@@ -1,0 +1,76 @@
+package kr.msgctf.scheduler.instance.domain
+
+import jakarta.persistence.Column
+import jakarta.persistence.Entity
+import jakarta.persistence.EntityListeners
+import jakarta.persistence.EnumType
+import jakarta.persistence.Enumerated
+import jakarta.persistence.Id
+import jakarta.persistence.Table
+import java.time.Instant
+import java.util.UUID
+import org.springframework.data.annotation.CreatedDate
+import org.springframework.data.annotation.LastModifiedDate
+import org.springframework.data.jpa.domain.support.AuditingEntityListener
+
+// 문제 인스턴스의 최신 상태를 저장
+// 상태 변경 이력이나 실패 상세 정보는 InstanceEvent에 따로 남긴다
+@Entity
+@Table(name = "challenge_instance")
+@EntityListeners(AuditingEntityListener::class)
+class Instance(
+    @Id
+    @Column(name = "instance_id", nullable = false, updatable = false)
+    val instanceId: UUID = UUID.randomUUID(),
+
+    @Column(name = "team_id", nullable = false)
+    val teamId: Long,
+
+    @Column(name = "challenge_id", nullable = false)
+    val challengeId: Long,
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false)
+    var status: InstanceStatus,
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "action")
+    var action: InstanceAction? = null,
+
+    @Column(name = "provider")
+    var provider: String? = null,
+
+    @Column(name = "account_id")
+    var accountId: String? = null,
+
+    @Column(name = "runtime_workload_id")
+    var runtimeWorkloadId: String? = null,
+
+    @Column(name = "service_url")
+    var serviceUrl: String? = null,
+
+    @CreatedDate
+    @Column(name = "created_at", nullable = false, updatable = false)
+    var createdAt: Instant? = null,
+
+    @LastModifiedDate
+    @Column(name = "updated_at", nullable = false)
+    var updatedAt: Instant? = null,
+
+    @Column(name = "expires_at", nullable = false)
+    var expiresAt: Instant,
+
+    // 사용자가 한동안 접속하지 않았을 때 자동 종료할 시각
+    // 예: 마지막 접속이 10:00이고 idle 제한이 30분이면 10:30
+    @Column(name = "idle_expires_at")
+    var idleExpiresAt: Instant? = null,
+
+    // 인스턴스가 절대 넘길 수 없는 최종 종료 시각
+    // 예: hard 종료가 13:00이면 연장을 여러 번 해도 expiresAt은 13:00을 넘을 수 없음
+    @Column(name = "hard_expires_at", nullable = false)
+    var hardExpiresAt: Instant,
+
+    // 마지막으로 인스턴스에 접근한 시각
+    @Column(name = "last_accessed_at")
+    var lastAccessedAt: Instant? = null,
+)
