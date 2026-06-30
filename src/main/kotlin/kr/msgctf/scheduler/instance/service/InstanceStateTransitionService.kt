@@ -3,8 +3,10 @@ package kr.msgctf.scheduler.instance.service
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import org.springframework.stereotype.Service
 
 // 인스턴스 상태 변경이 가능한지 검사한다
+@Service
 class InstanceStateTransitionService {
 
     fun canTransition(from: InstanceStatus, to: InstanceStatus): Boolean =
@@ -20,6 +22,8 @@ class InstanceStateTransitionService {
     }
 
     fun isActive(status: InstanceStatus): Boolean = status in activeStatuses
+
+    fun activeStatuses(): Set<InstanceStatus> = activeStatuses
 
     companion object {
         // 없는 이동은 잘못된 상태 변경으로 보고 막기
