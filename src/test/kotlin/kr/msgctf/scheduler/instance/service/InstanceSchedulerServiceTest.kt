@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.service
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -210,6 +211,65 @@ class InstanceSchedulerServiceTest {
         assertEquals(0, brokerClient.callCount)
     }
 
+    // delete 요청이 CLEANED 상태로 끝나는지 확인
+    @Test
+    fun `deletes running instance`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.deleteInstance(
+            DeleteInstanceCommand(instanceId = runningInstance.instanceId),
+        )
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, result.status)
+        assertEquals(InstanceStatus.CLEANED, runningInstance.status)
+    }
+
+    // delete 대상이 없으면 not found 확인
+    @Test
+    fun `rejects delete when instance is not found`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.deleteInstance(
+                DeleteInstanceCommand(instanceId = UUID.randomUUID()),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
+    }
+
+    // runtime 삭제 실패 시 cleanup 대기 상태 확인
+    @Test
+    fun `marks cleanup pending when runtime delete fails`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository.repository,
+            runtimeClient = FakeRuntimeClient(mode = FakeRuntimeMode.DELETE_FAIL),
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.deleteInstance(
+                DeleteInstanceCommand(instanceId = runningInstance.instanceId),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, runningInstance.status)
+    }
+
     private fun newService(
         instanceRepository: InstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),
@@ -284,6 +344,20 @@ class InstanceSchedulerServiceTest {
 
         return instanceRepository
     }
+
+    private fun newRunningInstance(): Instance =
+        Instance(
+            teamId = 301L,
+            challengeId = 10L,
+            status = InstanceStatus.RUNNING,
+            action = InstanceAction.CREATE,
+            runtimeType = RuntimeType.KUBERNETES,
+            runtimeTargetId = "cluster-main",
+            runtimeWorkloadId = "workload-1",
+            serviceUrl = "https://team-301-challenge-10.local",
+            expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
+            hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
+        )
 
     // SchedulerException이 아닌 예외를 던지는 broker 이중구현
     private class ThrowingBrokerClient(private val error: RuntimeException) : BrokerClient {

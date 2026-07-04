@@ -12,6 +12,8 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
@@ -119,6 +121,41 @@ class InstanceSchedulerService(
                 cause = exception,
             )
         }
+
+    @Transactional(noRollbackFor = [SchedulerException::class])
+    fun deleteInstance(command: DeleteInstanceCommand): InstanceResult {
+        val instance = instanceRepository.findById(command.instanceId).orElse(null)
+            ?: throw SchedulerException(
+                errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
+                adminDetail = "instanceId=${command.instanceId}",
+            )
+
+        move(instance, InstanceStatus.STOPPING)
+
+        try {
+            runtimeClient.deleteWorkload(
+                RuntimeDeleteRequest(
+                    requestId = "runtime-delete-${instance.instanceId}",
+                    instanceId = instance.instanceId,
+                    teamId = instance.teamId,
+                    target = RuntimeTarget(
+                        runtimeType = requireNotNull(instance.runtimeType),
+                        targetId = requireNotNull(instance.runtimeTargetId),
+                    ),
+                    runtimeWorkloadId = requireNotNull(instance.runtimeWorkloadId),
+                    reason = RuntimeDeleteReason.USER_REQUESTED,
+                ),
+            )
+        } catch (exception: SchedulerException) {
+            move(instance, InstanceStatus.CLEANUP_PENDING)
+            throw exception
+        }
+
+        move(instance, InstanceStatus.STOPPED)
+        move(instance, InstanceStatus.CLEANED)
+
+        return instance.toResult()
+    }
 
     // 외부 처리 실패 후 FAILED 상태가 DB에 남도록 rollback 대상에서 제외할 예외로 바꾸기
     // SchedulerException이면 원래 errorCode/adminDetail을 유지하고,

@@ -18,6 +18,11 @@ data class CreateInstanceCommand(
     val hardTimeoutMinutes: Long,
 )
 
+// delete 서비스에 넘기는 요청 값
+data class DeleteInstanceCommand(
+    val instanceId: UUID,
+)
+
 // create 서비스가 돌려주는 결과 값
 data class InstanceResult(
     val instanceId: UUID,
