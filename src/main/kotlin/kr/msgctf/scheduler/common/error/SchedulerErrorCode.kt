@@ -2,8 +2,7 @@ package kr.msgctf.scheduler.common.error
 
 import org.springframework.http.HttpStatus
 
-// 에러 종류별로 HTTP 상태 코드와 사용자에게 보여줄 메시지를 정리해 둔다.
-// 예외를 던질 때는 이 enum 값만 고르면 응답 메시지도 함께 정해진다.
+// 에러 종류마다 HTTP 상태 코드와 사용자 메시지를 정리
 enum class SchedulerErrorCode(
     val httpStatus: HttpStatus,
     val responseMessage: String,
@@ -11,6 +10,10 @@ enum class SchedulerErrorCode(
     INVALID_STATE_TRANSITION(
         HttpStatus.BAD_REQUEST,
         "현재 상태에서는 요청을 처리할 수 없습니다.",
+    ),
+    INVALID_REQUEST(
+        HttpStatus.BAD_REQUEST,
+        "요청값을 확인해주세요.",
     ),
     INVALID_TTL_RANGE(
         HttpStatus.BAD_REQUEST,

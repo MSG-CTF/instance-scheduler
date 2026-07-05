@@ -11,6 +11,7 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
@@ -24,12 +25,14 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
+import org.testcontainers.junit.jupiter.Testcontainers
 
 @Import(
     TestcontainersConfiguration::class,
     InstanceSchedulerFailureIntegrationTest.ExternalClientConfig::class,
 )
 @SpringBootTest
+@Testcontainers(disabledWithoutDocker = true)
 class InstanceSchedulerFailureIntegrationTest {
 
     @Autowired

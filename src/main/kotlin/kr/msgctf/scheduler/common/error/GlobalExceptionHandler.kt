@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.common.error
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
+import org.springframework.web.bind.MethodArgumentNotValidException
 
 @RestControllerAdvice
 class GlobalExceptionHandler {
@@ -19,4 +20,18 @@ class GlobalExceptionHandler {
                     message = exception.errorCode.responseMessage,
                 ),
             )
+
+    @ExceptionHandler(MethodArgumentNotValidException::class)
+    fun handleValidationException(exception: MethodArgumentNotValidException): ResponseEntity<ErrorResponse> {
+        val errorCode = SchedulerErrorCode.INVALID_REQUEST
+
+        return ResponseEntity
+            .status(errorCode.httpStatus)
+            .body(
+                ErrorResponse(
+                    code = errorCode.name,
+                    message = errorCode.responseMessage,
+                ),
+            )
+    }
 }

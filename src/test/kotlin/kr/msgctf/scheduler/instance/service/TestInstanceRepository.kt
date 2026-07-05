@@ -24,7 +24,8 @@ class TestInstanceRepository {
             arrayOf(InstanceRepository::class.java),
         ) { _, method, args ->
             when (method.name) {
-                "save" -> save(args?.first() as Instance)
+                // create 흐름은 REQUESTED를 먼저 flush해서 중복 active를 막는다
+                "save", "saveAndFlush" -> save(args?.first() as Instance)
                 "findById" -> findById(args?.first() as UUID)
                 "findFirstByTeamIdAndStatusInOrderByCreatedAtAsc" -> {
                     @Suppress("UNCHECKED_CAST")

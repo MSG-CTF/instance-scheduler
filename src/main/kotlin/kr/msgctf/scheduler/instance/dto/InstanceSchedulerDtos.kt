@@ -1,4 +1,4 @@
-package kr.msgctf.scheduler.instance.service
+package kr.msgctf.scheduler.instance.dto
 
 import java.time.Instant
 import java.util.UUID
