@@ -8,9 +8,12 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.repository.InstanceStore
+import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
+import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
+import kr.msgctf.scheduler.runtime.RuntimeTarget
+import kr.msgctf.scheduler.runtime.RuntimeWorkload
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -19,7 +22,7 @@ import org.springframework.transaction.annotation.Transactional
 class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
     private val transitionService: InstanceStateTransitionService,
-    private val instanceStore: InstanceStore,
+    private val instanceRepository: InstanceRepository,
     private val brokerClient: BrokerClient,
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
@@ -31,7 +34,7 @@ class InstanceSchedulerService(
         instancePolicyService.validateTeamCanCreate(command.teamId)
 
         val now = clock.instant()
-        val instance = instanceStore.save(
+        val instance = instanceRepository.save(
             Instance(
                 teamId = command.teamId,
                 challengeId = command.challengeId,
@@ -47,12 +50,15 @@ class InstanceSchedulerService(
         val candidate = try {
             val brokerResponse = brokerClient.getCandidates(
                 BrokerCandidateRequest(
+                    requestId = "broker-${instance.instanceId}",
+                    requestedAt = now,
                     teamId = command.teamId,
                     challengeId = command.challengeId,
+                    instanceId = instance.instanceId,
                     resourceProfile = command.resourceProfile,
                 ),
             )
-            resourceCandidateSelector.select(brokerResponse.candidates)
+            resourceCandidateSelector.select(brokerResponse)
         } catch (exception: SchedulerException) {
             move(instance, InstanceStatus.FAILED)
             throw exception
@@ -65,15 +71,22 @@ class InstanceSchedulerService(
         val runtimeResponse = try {
             runtimeClient.createWorkload(
                 RuntimeCreateRequest(
+                    requestId = "runtime-create-${instance.instanceId}",
+                    instanceId = instance.instanceId,
                     teamId = command.teamId,
-                    challengeId = command.challengeId,
-                    provider = candidate.provider,
-                    accountId = candidate.accountId,
-                    region = candidate.region,
-                    cpuMillicores = command.resourceProfile.cpuMillicores,
-                    memoryMib = command.resourceProfile.memoryMib,
-                    storageMib = command.resourceProfile.storageMib,
-                    ttlMinutes = command.ttlMinutes,
+                    target = RuntimeTarget(
+                        runtimeType = candidate.runtime.type,
+                        targetId = candidate.runtime.targetId,
+                    ),
+                    workload = RuntimeWorkload(
+                        image = command.containerImage,
+                        containerPort = command.containerPort,
+                        resourceLimits = RuntimeResourceLimits(
+                            cpuMillicores = command.resourceProfile.cpuMillicores,
+                            memoryMib = command.resourceProfile.memoryMib,
+                            ephemeralStorageMib = command.resourceProfile.ephemeralStorageMib,
+                        ),
+                    ),
                 ),
             )
         } catch (exception: SchedulerException) {

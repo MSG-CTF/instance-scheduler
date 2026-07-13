@@ -9,6 +9,8 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 data class CreateInstanceCommand(
     val teamId: Long,
     val challengeId: Long,
+    val containerImage: String,
+    val containerPort: Int,
     val resourceProfile: ResourceProfile,
     val ttlMinutes: Long,
     val hardTimeoutMinutes: Long,

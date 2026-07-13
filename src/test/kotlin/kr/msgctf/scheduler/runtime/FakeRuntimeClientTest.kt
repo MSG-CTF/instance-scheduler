@@ -1,12 +1,16 @@
 package kr.msgctf.scheduler.runtime
 
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kr.msgctf.scheduler.broker.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 
 class FakeRuntimeClientTest {
+
+    private val instanceId = UUID.fromString("018f3f1e-21b8-7a1e-a30b-63b3400fd001")
 
     // workload 생성 성공 확인
     @Test
@@ -18,8 +22,8 @@ class FakeRuntimeClientTest {
         val response = runtimeClient.createWorkload(newCreateRequest())
 
         // then
-        assertEquals("workload-team-1-challenge-10", response.runtimeWorkloadId)
-        assertEquals("https://team-1-challenge-10.local", response.serviceUrl)
+        assertEquals("workload-$instanceId", response.runtimeWorkloadId)
+        assertEquals("https://team-1.local", response.serviceUrl)
     }
 
     // workload 생성 실패 확인
@@ -35,7 +39,7 @@ class FakeRuntimeClientTest {
 
         // then
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals("teamId=1, challengeId=10", exception.adminDetail)
+        assertEquals("requestId=req-01, instanceId=$instanceId", exception.adminDetail)
     }
 
     // workload 삭제 성공 확인
@@ -65,7 +69,7 @@ class FakeRuntimeClientTest {
 
         // then
         assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, exception.errorCode)
-        assertEquals("runtimeWorkloadId=workload-1", exception.adminDetail)
+        assertEquals("requestId=req-02, runtimeWorkloadId=workload-1", exception.adminDetail)
     }
 
     // workload 재시작 성공 확인
@@ -98,19 +102,36 @@ class FakeRuntimeClientTest {
 
     private fun newCreateRequest(): RuntimeCreateRequest =
         RuntimeCreateRequest(
+            requestId = "req-01",
+            instanceId = instanceId,
             teamId = 1L,
-            challengeId = 10L,
-            provider = "SELF_HOSTED",
-            accountId = "self-hosted-1",
-            region = "local",
-            cpuMillicores = 500,
-            memoryMib = 512,
-            storageMib = 1024,
-            ttlMinutes = 120,
+            target = newTarget(),
+            workload = RuntimeWorkload(
+                image = "registry.msgctf.local/challenges/web-01:2026.07.01",
+                containerPort = 8080,
+                resourceLimits = RuntimeResourceLimits(
+                    cpuMillicores = 500,
+                    memoryMib = 512,
+                    ephemeralStorageMib = 1024,
+                ),
+            ),
         )
 
     private fun newDeleteRequest(): RuntimeDeleteRequest =
-        RuntimeDeleteRequest(runtimeWorkloadId = "workload-1")
+        RuntimeDeleteRequest(
+            requestId = "req-02",
+            instanceId = instanceId,
+            teamId = 1L,
+            target = newTarget(),
+            runtimeWorkloadId = "workload-1",
+            reason = RuntimeDeleteReason.USER_REQUESTED,
+        )
+
+    private fun newTarget(): RuntimeTarget =
+        RuntimeTarget(
+            runtimeType = RuntimeType.KUBERNETES,
+            targetId = "cluster-main",
+        )
 
     private fun newRestartRequest(): RuntimeRestartRequest =
         RuntimeRestartRequest(runtimeWorkloadId = "workload-1")

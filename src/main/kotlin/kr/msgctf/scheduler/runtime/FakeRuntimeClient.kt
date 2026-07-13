@@ -3,7 +3,7 @@ package kr.msgctf.scheduler.runtime
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 
-// 실제 runtime이 없을 때 Scheduler 흐름을 확인하는 용도 (나중에 지워질 예정)
+// Runtime이 없을 때 Scheduler 흐름을 확인하는 임시 client
 class FakeRuntimeClient(
     private val mode: FakeRuntimeMode = FakeRuntimeMode.SUCCESS,
 ) : RuntimeClient {
@@ -12,13 +12,13 @@ class FakeRuntimeClient(
         if (mode == FakeRuntimeMode.CREATE_FAIL) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
-                adminDetail = "teamId=${request.teamId}, challengeId=${request.challengeId}",
+                adminDetail = "requestId=${request.requestId}, instanceId=${request.instanceId}",
             )
         }
 
         return RuntimeCreateResponse(
-            runtimeWorkloadId = "workload-team-${request.teamId}-challenge-${request.challengeId}",
-            serviceUrl = "https://team-${request.teamId}-challenge-${request.challengeId}.local",
+            runtimeWorkloadId = "workload-${request.instanceId}",
+            serviceUrl = "https://team-${request.teamId}.local",
         )
     }
 
@@ -26,7 +26,7 @@ class FakeRuntimeClient(
         if (mode == FakeRuntimeMode.DELETE_FAIL) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
-                adminDetail = "runtimeWorkloadId=${request.runtimeWorkloadId}",
+                adminDetail = "requestId=${request.requestId}, runtimeWorkloadId=${request.runtimeWorkloadId}",
             )
         }
 
