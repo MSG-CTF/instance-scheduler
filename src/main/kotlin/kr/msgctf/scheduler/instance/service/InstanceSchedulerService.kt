@@ -55,6 +55,7 @@ class InstanceSchedulerService(
                     teamId = command.teamId,
                     challengeId = command.challengeId,
                     instanceId = instance.instanceId,
+                    architecture = command.architecture,
                     resourceProfile = command.resourceProfile,
                 ),
             )

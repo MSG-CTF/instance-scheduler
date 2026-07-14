@@ -51,7 +51,7 @@ class FakeBrokerClient(
                 type = RuntimeType.KUBERNETES,
                 targetId = "cluster-main",
             ),
-            architecture = "AMD64",
+            architecture = request.architecture,
             capacity = CandidateCapacity(
                 availableCpuMillicores = 4000,
                 availableMemoryMib = 8192,

@@ -33,6 +33,9 @@ data class BrokerCandidateRequest(
     @JsonProperty("instance_id")
     val instanceId: UUID,
 
+    // 문제 이미지가 실행되어야 하는 CPU 아키텍처
+    val architecture: Architecture,
+
     @JsonProperty("resource_profile")
     val resourceProfile: ResourceProfile,
 )
@@ -67,7 +70,7 @@ data class ResourceCandidate(
 
     val region: String,
     val runtime: CandidateRuntime,
-    val architecture: String,
+    val architecture: Architecture,
     val capacity: CandidateCapacity,
     val risk: ResourceRisk,
 
@@ -93,6 +96,11 @@ enum class RuntimeType {
     KUBERNETES,
     DOCKER,
     VM,
+}
+
+enum class Architecture {
+    AMD64,
+    ARM64,
 }
 
 // 후보 위치에 남아 있는 리소스 양

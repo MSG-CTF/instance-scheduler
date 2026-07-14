@@ -138,7 +138,7 @@ class ResourceCandidateSelectorTest {
                 type = RuntimeType.KUBERNETES,
                 targetId = "cluster-main",
             ),
-            architecture = "AMD64",
+            architecture = Architecture.AMD64,
             capacity = CandidateCapacity(
                 availableCpuMillicores = 4000,
                 availableMemoryMib = 8192,

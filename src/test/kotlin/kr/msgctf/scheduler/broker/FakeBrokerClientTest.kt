@@ -23,6 +23,7 @@ class FakeBrokerClientTest {
         assertEquals(BrokerCandidateStatus.OK, response.status)
         assertEquals(1, response.candidates.size)
         assertEquals(ResourceRisk.LOW, response.candidates[0].risk)
+        assertEquals(Architecture.AMD64, response.candidates[0].architecture)
         assertEquals(RuntimeType.KUBERNETES, response.candidates[0].runtime.type)
         assertEquals("cluster-main", response.candidates[0].runtime.targetId)
     }
@@ -63,6 +64,7 @@ class FakeBrokerClientTest {
             teamId = 1L,
             challengeId = 10L,
             instanceId = UUID.fromString("018f3f1e-21b8-7a1e-a30b-63b3400fd001"),
+            architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
                 memoryMib = 512,
