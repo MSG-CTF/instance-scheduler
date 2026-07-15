@@ -16,11 +16,12 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.repository.ActiveInstanceFinder
-import kr.msgctf.scheduler.instance.repository.InstanceStore
+import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.RuntimeClient
+import org.mockito.Mockito
+import org.springframework.dao.DataIntegrityViolationException
 
 class InstanceSchedulerServiceTest {
 
@@ -28,15 +29,16 @@ class InstanceSchedulerServiceTest {
     @Test
     fun `creates running instance`() {
         // given
-        val instanceStore = FakeInstanceStore()
-        val instanceSchedulerService = newService(instanceStore = instanceStore)
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
         val command = newCommand(teamId = 201L)
 
         // when
         val result = instanceSchedulerService.createInstance(command)
 
         // then
-        val saved = instanceStore.savedInstances.single()
+        val saved = savedInstances.single()
 
         assertEquals(InstanceStatus.RUNNING, result.status)
         assertEquals(InstanceStatus.RUNNING, saved.status)
@@ -53,9 +55,10 @@ class InstanceSchedulerServiceTest {
     @Test
     fun `marks failed when broker has no candidates`() {
         // given
-        val instanceStore = FakeInstanceStore()
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
         val instanceSchedulerService = newService(
-            instanceStore = instanceStore,
+            instanceRepository = instanceRepository,
             brokerClient = FakeBrokerClient(mode = FakeBrokerMode.EMPTY),
         )
 
@@ -65,7 +68,7 @@ class InstanceSchedulerServiceTest {
         }
 
         // then
-        val saved = instanceStore.savedInstances.single()
+        val saved = savedInstances.single()
 
         assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, exception.errorCode)
         assertEquals(InstanceStatus.FAILED, saved.status)
@@ -76,9 +79,10 @@ class InstanceSchedulerServiceTest {
     @Test
     fun `marks failed when runtime create fails`() {
         // given
-        val instanceStore = FakeInstanceStore()
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
         val instanceSchedulerService = newService(
-            instanceStore = instanceStore,
+            instanceRepository = instanceRepository,
             runtimeClient = FakeRuntimeClient(mode = FakeRuntimeMode.CREATE_FAIL),
         )
 
@@ -88,7 +92,7 @@ class InstanceSchedulerServiceTest {
         }
 
         // then
-        val saved = instanceStore.savedInstances.single()
+        val saved = savedInstances.single()
 
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
         assertEquals(InstanceStatus.FAILED, saved.status)
@@ -96,8 +100,34 @@ class InstanceSchedulerServiceTest {
         assertEquals("self-hosted-1", saved.accountId)
     }
 
+    // 동시에 create가 들어와 DB unique 제약에 걸리면 중복 생성으로 처리
+    @Test
+    fun `rejects create when active unique constraint is violated`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(
+            savedInstances = savedInstances,
+            saveAndFlushException = DataIntegrityViolationException("duplicate active instance"),
+        )
+        val brokerClient = CountingBrokerClient()
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            brokerClient = brokerClient,
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 204L))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
+        assertEquals("teamId=204, reason=active instance unique constraint", exception.adminDetail)
+        assertEquals(0, brokerClient.callCount)
+    }
+
     private fun newService(
-        instanceStore: FakeInstanceStore,
+        instanceRepository: InstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
     ): InstanceSchedulerService {
@@ -105,11 +135,11 @@ class InstanceSchedulerServiceTest {
 
         return InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
-                activeInstanceFinder = instanceStore,
+                activeInstanceFinder = instanceRepository,
                 transitionService = transitionService,
             ),
             transitionService = transitionService,
-            instanceStore = instanceStore,
+            instanceRepository = instanceRepository,
             brokerClient = brokerClient,
             resourceCandidateSelector = ResourceCandidateSelector(),
             runtimeClient = runtimeClient,
@@ -133,21 +163,42 @@ class InstanceSchedulerServiceTest {
     private fun fixedClock(): Clock =
         Clock.fixed(Instant.parse("2026-07-04T12:00:00Z"), ZoneOffset.UTC)
 
-    private class FakeInstanceStore : InstanceStore, ActiveInstanceFinder {
+    private fun newInstanceRepository(
+        savedInstances: MutableList<Instance>,
+        saveAndFlushException: DataIntegrityViolationException? = null,
+    ): InstanceRepository {
+        val instanceRepository = Mockito.mock(InstanceRepository::class.java)
 
-        val savedInstances = mutableListOf<Instance>()
-
-        override fun save(instance: Instance): Instance {
+        Mockito.`when`(instanceRepository.saveAndFlush(Mockito.any(Instance::class.java))).thenAnswer { invocation ->
+            saveAndFlushException?.let { exception -> throw exception }
+            val instance = invocation.getArgument<Instance>(0)
             savedInstances += instance
-            return instance
+            instance
         }
 
-        override fun findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-            teamId: Long,
-            statuses: Collection<InstanceStatus>,
-        ): Instance? =
+        Mockito.`when`(
+            instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
+                Mockito.anyLong(),
+                Mockito.anyCollection(),
+            ),
+        ).thenAnswer { invocation ->
+            val teamId = invocation.getArgument<Long>(0)
+            val statuses = invocation.getArgument<Collection<InstanceStatus>>(1)
+
             savedInstances.firstOrNull { instance ->
                 instance.teamId == teamId && instance.status in statuses
             }
+        }
+
+        return instanceRepository
+    }
+
+    private class CountingBrokerClient : BrokerClient {
+        var callCount = 0
+
+        override fun getCandidates(request: kr.msgctf.scheduler.broker.BrokerCandidateRequest): kr.msgctf.scheduler.broker.BrokerCandidateResponse {
+            callCount += 1
+            return FakeBrokerClient().getCandidates(request)
+        }
     }
 }
