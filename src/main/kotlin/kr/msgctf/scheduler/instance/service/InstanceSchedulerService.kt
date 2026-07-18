@@ -12,6 +12,9 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
+import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
+import kr.msgctf.scheduler.runtime.RuntimeTarget
+import kr.msgctf.scheduler.runtime.RuntimeWorkload
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -49,12 +52,16 @@ class InstanceSchedulerService(
         val candidate = try {
             val brokerResponse = brokerClient.getCandidates(
                 BrokerCandidateRequest(
+                    requestId = "broker-${instance.instanceId}",
+                    requestedAt = now,
                     teamId = command.teamId,
                     challengeId = command.challengeId,
+                    instanceId = instance.instanceId,
+                    architecture = command.architecture,
                     resourceProfile = command.resourceProfile,
                 ),
             )
-            resourceCandidateSelector.select(brokerResponse.candidates)
+            resourceCandidateSelector.select(brokerResponse)
         } catch (exception: SchedulerException) {
             move(instance, InstanceStatus.FAILED)
             throw keepFailedState(exception)
@@ -67,15 +74,22 @@ class InstanceSchedulerService(
         val runtimeResponse = try {
             runtimeClient.createWorkload(
                 RuntimeCreateRequest(
+                    requestId = "runtime-create-${instance.instanceId}",
+                    instanceId = instance.instanceId,
                     teamId = command.teamId,
-                    challengeId = command.challengeId,
-                    provider = candidate.provider,
-                    accountId = candidate.accountId,
-                    region = candidate.region,
-                    cpuMillicores = command.resourceProfile.cpuMillicores,
-                    memoryMib = command.resourceProfile.memoryMib,
-                    storageMib = command.resourceProfile.storageMib,
-                    ttlMinutes = command.ttlMinutes,
+                    target = RuntimeTarget(
+                        runtimeType = candidate.runtime.type,
+                        targetId = candidate.runtime.targetId,
+                    ),
+                    workload = RuntimeWorkload(
+                        image = command.containerImage,
+                        containerPort = command.containerPort,
+                        resourceLimits = RuntimeResourceLimits(
+                            cpuMillicores = command.resourceProfile.cpuMillicores,
+                            memoryMib = command.resourceProfile.memoryMib,
+                            ephemeralStorageMib = command.resourceProfile.ephemeralStorageMib,
+                        ),
+                    ),
                 ),
             )
         } catch (exception: SchedulerException) {

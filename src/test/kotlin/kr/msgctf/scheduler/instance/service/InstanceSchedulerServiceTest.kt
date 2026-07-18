@@ -6,15 +6,16 @@ import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
-import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
+import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
-import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.Instance
+import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
@@ -45,13 +46,13 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.CREATE, saved.action)
         assertEquals("SELF_HOSTED", saved.provider)
         assertEquals("self-hosted-1", saved.accountId)
-        assertEquals("workload-team-201-challenge-10", saved.runtimeWorkloadId)
-        assertEquals("https://team-201-challenge-10.local", saved.serviceUrl)
+        assertEquals("workload-${saved.instanceId}", saved.runtimeWorkloadId)
+        assertEquals("https://team-201.local", saved.serviceUrl)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200), saved.expiresAt)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800), saved.hardExpiresAt)
     }
 
-    // broker 후보가 없으면 FAILED 상태로 남는지 확인
+    // broker 후보가 없으면 FAILED 상태로 끝나는지 확인
     @Test
     fun `marks failed when broker has no candidates`() {
         // given
@@ -75,7 +76,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.CREATE, saved.action)
     }
 
-    // runtime 생성 실패 시 FAILED 상태로 남는지 확인
+    // runtime 생성 실패 시 FAILED 상태로 끝나는지 확인
     @Test
     fun `marks failed when runtime create fails`() {
         // given
@@ -132,18 +133,19 @@ class InstanceSchedulerServiceTest {
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
     ): InstanceSchedulerService {
         val transitionService = InstanceStateTransitionService()
+        val clock = fixedClock()
 
         return InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
-                activeInstanceFinder = instanceRepository,
+                instanceRepository = instanceRepository,
                 transitionService = transitionService,
             ),
             transitionService = transitionService,
             instanceRepository = instanceRepository,
             brokerClient = brokerClient,
-            resourceCandidateSelector = ResourceCandidateSelector(),
+            resourceCandidateSelector = ResourceCandidateSelector(clock = clock),
             runtimeClient = runtimeClient,
-            clock = fixedClock(),
+            clock = clock,
         )
     }
 
@@ -151,10 +153,13 @@ class InstanceSchedulerServiceTest {
         CreateInstanceCommand(
             teamId = teamId,
             challengeId = 10L,
+            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
+            containerPort = 8080,
+            architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
                 memoryMib = 512,
-                storageMib = 1024,
+                ephemeralStorageMib = 1024,
             ),
             ttlMinutes = 120,
             hardTimeoutMinutes = 180,

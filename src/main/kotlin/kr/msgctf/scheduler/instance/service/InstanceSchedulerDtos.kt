@@ -2,6 +2,7 @@ package kr.msgctf.scheduler.instance.service
 
 import java.time.Instant
 import java.util.UUID
+import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 
@@ -9,6 +10,9 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 data class CreateInstanceCommand(
     val teamId: Long,
     val challengeId: Long,
+    val containerImage: String,
+    val containerPort: Int,
+    val architecture: Architecture,
     val resourceProfile: ResourceProfile,
     val ttlMinutes: Long,
     val hardTimeoutMinutes: Long,
