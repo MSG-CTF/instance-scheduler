@@ -69,6 +69,9 @@ class InstanceSchedulerService(
 
         instance.provider = candidate.provider
         instance.accountId = candidate.accountId
+        instance.region = candidate.region
+        instance.runtimeType = candidate.runtime.type
+        instance.runtimeTargetId = candidate.runtime.targetId
         move(instance, InstanceStatus.PROVISIONING)
 
         val runtimeResponse = try {

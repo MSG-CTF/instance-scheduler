@@ -5,6 +5,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kr.msgctf.scheduler.common.model.RuntimeType
 
 class FakeBrokerClientTest {
 

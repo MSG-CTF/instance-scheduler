@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
+import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
@@ -46,6 +47,9 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.CREATE, saved.action)
         assertEquals("SELF_HOSTED", saved.provider)
         assertEquals("self-hosted-1", saved.accountId)
+        assertEquals("local", saved.region)
+        assertEquals(RuntimeType.KUBERNETES, saved.runtimeType)
+        assertEquals("cluster-main", saved.runtimeTargetId)
         assertEquals("workload-${saved.instanceId}", saved.runtimeWorkloadId)
         assertEquals("https://team-201.local", saved.serviceUrl)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200), saved.expiresAt)

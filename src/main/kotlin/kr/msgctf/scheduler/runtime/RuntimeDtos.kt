@@ -2,7 +2,7 @@ package kr.msgctf.scheduler.runtime
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.util.UUID
-import kr.msgctf.scheduler.broker.RuntimeType
+import kr.msgctf.scheduler.common.model.RuntimeType
 
 // Runtime에 workload 생성을 요청할 때 보내는 값
 data class RuntimeCreateRequest(

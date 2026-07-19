@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.broker
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.time.Instant
 import java.util.UUID
+import kr.msgctf.scheduler.common.model.RuntimeType
 
 // 문제 인스턴스 한 개를 실행하는 데 필요한 리소스 양
 data class ResourceProfile(
@@ -91,12 +92,6 @@ data class CandidateRuntime(
     @JsonProperty("target_id")
     val targetId: String,
 )
-
-enum class RuntimeType {
-    KUBERNETES,
-    DOCKER,
-    VM,
-}
 
 enum class Architecture {
     AMD64,

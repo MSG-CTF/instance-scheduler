@@ -1,5 +1,7 @@
 package kr.msgctf.scheduler.broker
 
+import kr.msgctf.scheduler.common.model.RuntimeType
+
 // Broker가 없을 때 Scheduler 흐름을 확인하는 임시 client
 class FakeBrokerClient(
     private val mode: FakeBrokerMode = FakeBrokerMode.SUCCESS,
