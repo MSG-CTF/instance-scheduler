@@ -69,6 +69,37 @@ class InstancePolicyServiceTest {
         assertEquals("teamId=$teamId, activeInstanceId=${activeInstance.instanceId}", exception.adminDetail)
     }
 
+    // ttl이 hard timeout을 넘으면 create 거절 확인
+    @Test
+    fun `rejects create when ttl exceeds hard timeout`() {
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTtl(ttlMinutes = 200, hardTimeoutMinutes = 120)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+    }
+
+    // ttl이 hard timeout과 같으면 create 허용 확인
+    @Test
+    fun `allows create when ttl equals hard timeout`() {
+        // when & then (예외가 발생하지 않아야 한다)
+        instancePolicyService.validateTtl(ttlMinutes = 120, hardTimeoutMinutes = 120)
+    }
+
+    // ttl이 1분 미만이면 create 거절 확인
+    @Test
+    fun `rejects create when ttl is not positive`() {
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTtl(ttlMinutes = 0, hardTimeoutMinutes = 120)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+    }
+
     // inactive 상태는 active 조회 대상에 포함되지 않는지 확인
     @Test
     fun `does not include cleaned status as active`() {

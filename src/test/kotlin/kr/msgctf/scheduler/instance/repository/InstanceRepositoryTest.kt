@@ -16,8 +16,10 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Import
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.test.context.ActiveProfiles
 
 @Import(TestcontainersConfiguration::class)
+@ActiveProfiles("test")
 @SpringBootTest
 class InstanceRepositoryTest {
 

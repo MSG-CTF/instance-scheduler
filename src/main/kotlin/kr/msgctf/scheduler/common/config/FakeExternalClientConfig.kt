@@ -4,19 +4,19 @@ import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeClient
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Profile
 
-// 실제 broker/runtime 구현체가 없을 때 fake를 기본으로 사용
+// fake client는 local/test 프로파일에서만 등록
+// 운영에서는 실제 client가 없으면 기동 실패
 @Configuration
+@Profile("local", "test")
 class FakeExternalClientConfig {
 
     @Bean
-    @ConditionalOnMissingBean(BrokerClient::class)
     fun brokerClient(): BrokerClient = FakeBrokerClient()
 
     @Bean
-    @ConditionalOnMissingBean(RuntimeClient::class)
     fun runtimeClient(): RuntimeClient = FakeRuntimeClient()
 }

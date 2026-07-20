@@ -7,6 +7,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.broker.BrokerCandidateRequest
+import kr.msgctf.scheduler.broker.BrokerCandidateResponse
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
@@ -22,6 +24,12 @@ import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.RuntimeClient
+import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
+import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
+import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
+import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
+import kr.msgctf.scheduler.runtime.RuntimeResetRequest
+import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 import org.mockito.Mockito
 import org.springframework.dao.DataIntegrityViolationException
 
@@ -105,6 +113,52 @@ class InstanceSchedulerServiceTest {
         assertEquals("self-hosted-1", saved.accountId)
     }
 
+    // runtime이 SchedulerException이 아닌 예외(타임아웃 등)를 던져도 행이 FAILED로 남는지 확인
+    @Test
+    fun `records failed when runtime throws non-scheduler exception`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val runtimeClient = ThrowingRuntimeClient(IllegalStateException("connect timed out"))
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            runtimeClient = runtimeClient,
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 206L))
+        }
+
+        // then
+        val saved = savedInstances.single()
+        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
+        assertEquals(InstanceStatus.FAILED, saved.status)
+    }
+
+    // broker가 SchedulerException이 아닌 예외(커넥션 오류 등)를 던져도 행이 FAILED로 남는지 확인
+    @Test
+    fun `records failed when broker throws non-scheduler exception`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val brokerClient = ThrowingBrokerClient(IllegalStateException("connection refused"))
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            brokerClient = brokerClient,
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 207L))
+        }
+
+        // then
+        val saved = savedInstances.single()
+        assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, exception.errorCode)
+        assertEquals(InstanceStatus.FAILED, saved.status)
+    }
+
     // 동시에 create가 들어와 DB unique 제약에 걸리면 중복 생성으로 처리
     @Test
     fun `rejects create when active unique constraint is violated`() {
@@ -131,6 +185,31 @@ class InstanceSchedulerServiceTest {
         assertEquals(0, brokerClient.callCount)
     }
 
+    // ttl이 hard timeout보다 크면 아무것도 저장/호출하지 않고 거절하는지 확인
+    @Test
+    fun `rejects create when ttl exceeds hard timeout`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val brokerClient = CountingBrokerClient()
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            brokerClient = brokerClient,
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(
+                newCommand(teamId = 205L, ttlMinutes = 200, hardTimeoutMinutes = 120),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+        assertEquals(0, savedInstances.size)
+        assertEquals(0, brokerClient.callCount)
+    }
+
     private fun newService(
         instanceRepository: InstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),
@@ -153,7 +232,11 @@ class InstanceSchedulerServiceTest {
         )
     }
 
-    private fun newCommand(teamId: Long): CreateInstanceCommand =
+    private fun newCommand(
+        teamId: Long,
+        ttlMinutes: Long = 120,
+        hardTimeoutMinutes: Long = 180,
+    ): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
             challengeId = 10L,
@@ -165,8 +248,8 @@ class InstanceSchedulerServiceTest {
                 memoryMib = 512,
                 ephemeralStorageMib = 1024,
             ),
-            ttlMinutes = 120,
-            hardTimeoutMinutes = 180,
+            ttlMinutes = ttlMinutes,
+            hardTimeoutMinutes = hardTimeoutMinutes,
         )
 
     private fun fixedClock(): Clock =
@@ -200,6 +283,19 @@ class InstanceSchedulerServiceTest {
         }
 
         return instanceRepository
+    }
+
+    // SchedulerException이 아닌 예외를 던지는 broker 이중구현
+    private class ThrowingBrokerClient(private val error: RuntimeException) : BrokerClient {
+        override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse = throw error
+    }
+
+    // SchedulerException이 아닌 예외를 던지는 runtime 이중구현
+    private class ThrowingRuntimeClient(private val error: RuntimeException) : RuntimeClient {
+        override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse = throw error
+        override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse = throw error
+        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse = throw error
+        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse = throw error
     }
 
     private class CountingBrokerClient : BrokerClient {

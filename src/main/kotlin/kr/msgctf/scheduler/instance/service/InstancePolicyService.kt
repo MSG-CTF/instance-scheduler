@@ -12,6 +12,16 @@ class InstancePolicyService(
     private val transitionService: InstanceStateTransitionService,
 ) {
 
+    // ttl은 1분 이상이면서 hard timeout을 넘을 수 없다
+    fun validateTtl(ttlMinutes: Long, hardTimeoutMinutes: Long) {
+        if (ttlMinutes < 1 || ttlMinutes > hardTimeoutMinutes) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_TTL_RANGE,
+                adminDetail = "ttlMinutes=$ttlMinutes, hardTimeoutMinutes=$hardTimeoutMinutes",
+            )
+        }
+    }
+
     fun validateTeamCanCreate(teamId: Long) {
         val activeInstance = instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
             teamId = teamId,

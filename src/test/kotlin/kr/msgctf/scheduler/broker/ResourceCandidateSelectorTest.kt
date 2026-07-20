@@ -29,10 +29,57 @@ class ResourceCandidateSelectorTest {
         )
 
         // when
-        val selected = selector.select(response)
+        val selected = selector.select(response, Architecture.AMD64)
 
         // then
         assertEquals("safe-account", selected.accountId)
+    }
+
+    // 요청 아키텍처와 일치하는 후보만 고르는지 확인
+    @Test
+    fun `selects only candidate matching requested architecture`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(
+                    candidateId = "arm",
+                    accountId = "arm-account",
+                    architecture = Architecture.ARM64,
+                    validUntil = now.plusSeconds(10),
+                ),
+                newCandidate(
+                    candidateId = "amd",
+                    accountId = "amd-account",
+                    architecture = Architecture.AMD64,
+                    validUntil = now.plusSeconds(30),
+                ),
+            ),
+        )
+
+        // when
+        val selected = selector.select(response, Architecture.AMD64)
+
+        // then
+        assertEquals("amd-account", selected.accountId)
+    }
+
+    // 요청 아키텍처와 일치하는 후보가 없으면 거절하는지 확인
+    @Test
+    fun `rejects when no candidate matches requested architecture`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(candidateId = "arm", architecture = Architecture.ARM64),
+            ),
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            selector.select(response, Architecture.AMD64)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, exception.errorCode)
     }
 
     // HIGH 후보만 있으면 거절하는지 확인
@@ -47,7 +94,7 @@ class ResourceCandidateSelectorTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            selector.select(response)
+            selector.select(response, Architecture.AMD64)
         }
 
         // then
@@ -66,7 +113,7 @@ class ResourceCandidateSelectorTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            selector.select(response)
+            selector.select(response, Architecture.AMD64)
         }
 
         // then
@@ -86,7 +133,7 @@ class ResourceCandidateSelectorTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            selector.select(response)
+            selector.select(response, Architecture.AMD64)
         }
 
         // then
@@ -105,7 +152,7 @@ class ResourceCandidateSelectorTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            selector.select(response)
+            selector.select(response, Architecture.AMD64)
         }
 
         // then
@@ -129,6 +176,7 @@ class ResourceCandidateSelectorTest {
         risk: ResourceRisk = ResourceRisk.LOW,
         fitCount: Int = 1,
         validUntil: Instant = now.plusSeconds(30),
+        architecture: Architecture = Architecture.AMD64,
     ): ResourceCandidate =
         ResourceCandidate(
             candidateId = candidateId,
@@ -139,7 +187,7 @@ class ResourceCandidateSelectorTest {
                 type = RuntimeType.KUBERNETES,
                 targetId = "cluster-main",
             ),
-            architecture = Architecture.AMD64,
+            architecture = architecture,
             capacity = CandidateCapacity(
                 availableCpuMillicores = 4000,
                 availableMemoryMib = 8192,

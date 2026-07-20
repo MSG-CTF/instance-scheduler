@@ -11,7 +11,10 @@ class ResourceCandidateSelector(
     private val clock: Clock = Clock.systemUTC(),
 ) {
 
-    fun select(response: BrokerCandidateResponse): ResourceCandidate {
+    fun select(
+        response: BrokerCandidateResponse,
+        requestedArchitecture: Architecture,
+    ): ResourceCandidate {
         if (response.status != BrokerCandidateStatus.OK) {
             throw unavailable(
                 response = response,
@@ -21,6 +24,7 @@ class ResourceCandidateSelector(
 
         val now = clock.instant()
         val selected = response.candidates
+            .filter { candidate -> candidate.architecture == requestedArchitecture }
             .filter { candidate -> candidate.validUntil.isAfter(now) }
             .filter { candidate -> candidate.capacity.fitCount > 0 }
             .filter { candidate -> candidate.risk != ResourceRisk.HIGH }

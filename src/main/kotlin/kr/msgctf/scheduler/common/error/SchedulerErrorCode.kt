@@ -12,6 +12,10 @@ enum class SchedulerErrorCode(
         HttpStatus.BAD_REQUEST,
         "현재 상태에서는 요청을 처리할 수 없습니다.",
     ),
+    INVALID_TTL_RANGE(
+        HttpStatus.BAD_REQUEST,
+        "요청한 인스턴스 시간 설정이 올바르지 않습니다.",
+    ),
     ACTIVE_INSTANCE_EXISTS(
         HttpStatus.CONFLICT,
         "이미 실행 중인 인스턴스가 있습니다.",

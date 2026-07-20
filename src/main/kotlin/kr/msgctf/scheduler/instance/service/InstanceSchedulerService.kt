@@ -33,6 +33,7 @@ class InstanceSchedulerService(
 
     @Transactional(noRollbackFor = [CreateFlowStateSavedException::class])
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
+        instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
         instancePolicyService.validateTeamCanCreate(command.teamId)
 
         val now = clock.instant()
@@ -61,10 +62,10 @@ class InstanceSchedulerService(
                     resourceProfile = command.resourceProfile,
                 ),
             )
-            resourceCandidateSelector.select(brokerResponse)
-        } catch (exception: SchedulerException) {
+            resourceCandidateSelector.select(brokerResponse, command.architecture)
+        } catch (exception: Exception) {
             move(instance, InstanceStatus.FAILED)
-            throw keepFailedState(exception)
+            throw keepFailedState(exception, SchedulerErrorCode.BROKER_CALL_FAILED)
         }
 
         instance.provider = candidate.provider
@@ -95,9 +96,9 @@ class InstanceSchedulerService(
                     ),
                 ),
             )
-        } catch (exception: SchedulerException) {
+        } catch (exception: Exception) {
             move(instance, InstanceStatus.FAILED)
-            throw keepFailedState(exception)
+            throw keepFailedState(exception, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         }
 
         instance.runtimeWorkloadId = runtimeResponse.runtimeWorkloadId
@@ -120,12 +121,19 @@ class InstanceSchedulerService(
         }
 
     // 외부 처리 실패 후 FAILED 상태가 DB에 남도록 rollback 대상에서 제외할 예외로 바꾸기
-    private fun keepFailedState(exception: SchedulerException): SchedulerException =
-        CreateFlowStateSavedException(
-            errorCode = exception.errorCode,
-            adminDetail = exception.adminDetail,
+    // SchedulerException이면 원래 errorCode/adminDetail을 유지하고,
+    // 타임아웃·커넥션 오류 등 그 외 예외는 phase 기본 errorCode로 매핑한다
+    private fun keepFailedState(
+        exception: Exception,
+        fallbackErrorCode: SchedulerErrorCode,
+    ): CreateFlowStateSavedException {
+        val schedulerException = exception as? SchedulerException
+        return CreateFlowStateSavedException(
+            errorCode = schedulerException?.errorCode ?: fallbackErrorCode,
+            adminDetail = schedulerException?.adminDetail ?: exception.message,
             cause = exception,
         )
+    }
 
     private fun move(instance: Instance, to: InstanceStatus) {
         transitionService.validateTransition(instance.status, to)
