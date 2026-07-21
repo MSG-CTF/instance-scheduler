@@ -76,6 +76,7 @@ data class RuntimeDeleteRequest(
     @JsonProperty("runtime_workload_id")
     val runtimeWorkloadId: String,
 
+    @JsonProperty("delete_reason")
     val reason: RuntimeDeleteReason,
 )
 

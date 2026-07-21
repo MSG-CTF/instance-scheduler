@@ -1,70 +1,62 @@
 package kr.msgctf.scheduler.instance.controller
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
-import kr.msgctf.scheduler.common.error.GlobalExceptionHandler
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.context.annotation.Import
 import org.springframework.http.MediaType
+import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.delete
 import org.springframework.test.web.servlet.post
-import org.springframework.test.context.ActiveProfiles
-import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import org.testcontainers.junit.jupiter.Testcontainers
+import tools.jackson.databind.ObjectMapper
 
+// 실제 MVC 스택으로 snake_case 응답 확인
 @Import(TestcontainersConfiguration::class)
 @ActiveProfiles("test")
 @SpringBootTest
+@AutoConfigureMockMvc
 @Testcontainers(disabledWithoutDocker = true)
 class InstanceCommandIntegrationTest {
 
     @Autowired
-    private lateinit var controller: InstanceCommandController
-
-    @Autowired
-    private lateinit var exceptionHandler: GlobalExceptionHandler
+    private lateinit var mockMvc: MockMvc
 
     @Autowired
     private lateinit var instanceRepository: InstanceRepository
 
-    private val objectMapper = ObjectMapper()
-
-    private lateinit var mockMvc: MockMvc
+    @Autowired
+    private lateinit var objectMapper: ObjectMapper
 
     @BeforeEach
     fun setUp() {
         instanceRepository.deleteAll()
-        mockMvc = MockMvcBuilders
-            .standaloneSetup(controller)
-            .setControllerAdvice(exceptionHandler)
-            .build()
     }
 
     @Test
     fun `create api stores running instance in postgres`() {
-        // create API가 실제 DB에 저장되는지 확인
-        // given
-        val requestBody = createRequestBody(teamId = 100L, challengeId = 10L)
-
+        // create 결과가 DB와 응답에 반영되는지 확인
         // when
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = requestBody
+            content = createRequestBody(teamId = 100L, challengeId = 10L)
         }.andExpect {
             status { isCreated() }
-            jsonPath("$.teamId") { value(100) }
-            jsonPath("$.challengeId") { value(10) }
-            jsonPath("$.status") { value("RUNNING") }
-            jsonPath("$.serviceUrl") { value("https://team-100.local") }
+            jsonPath("$.code") { value("SUCCESS") }
+            jsonPath("$.data.team_id") { value(100) }
+            jsonPath("$.data.challenge_id") { value(10) }
+            jsonPath("$.data.status") { value("RUNNING") }
+            jsonPath("$.data.service_url") { value("https://team-100.local") }
+            jsonPath("$.data.hard_expires_at") { exists() }
         }.andReturn().response.contentAsString
 
         // then
@@ -106,18 +98,18 @@ class InstanceCommandIntegrationTest {
         // given
         val requestBody = """
             {
-              "teamId": 0,
-              "challengeId": -1,
-              "containerImage": "",
-              "containerPort": 0,
+              "team_id": 0,
+              "challenge_id": -1,
+              "container_image": "",
+              "container_port": 0,
               "architecture": "AMD64",
-              "resourceProfile": {
-                "cpuMillicores": -500,
-                "memoryMib": 0,
-                "ephemeralStorageMib": -1
+              "resource_profile": {
+                "cpu_millicores": -500,
+                "memory_mib": 0,
+                "ephemeral_storage_mib": -1
               },
-              "ttlMinutes": 0,
-              "hardTimeoutMinutes": 0
+              "ttl_minutes": 0,
+              "hard_timeout_minutes": 0
             }
         """.trimIndent()
 
@@ -129,6 +121,30 @@ class InstanceCommandIntegrationTest {
             status { isBadRequest() }
             jsonPath("$.code") { value("INVALID_REQUEST") }
         }
+    }
+
+    @Test
+    fun `create api rejects unreadable request body`() {
+        // JSON 파싱 실패도 ErrorResponse로 변환되는지 확인
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "team_id": 1, "architecture": "X86" """
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    @Test
+    fun `delete api rejects non uuid instance id`() {
+        // path variable 타입 오류도 ErrorResponse로 변환되는지 확인
+        // when & then
+        mockMvc.delete("/api/instances/not-a-uuid")
+            .andExpect {
+                status { isBadRequest() }
+                jsonPath("$.code") { value("INVALID_REQUEST") }
+            }
     }
 
     @Test
@@ -145,12 +161,16 @@ class InstanceCommandIntegrationTest {
         val instanceId = readInstanceId(createResponse)
 
         // when
-        mockMvc.delete("/api/instances/$instanceId")
-            .andExpect {
-                status { isOk() }
-                jsonPath("$.instanceId") { value(instanceId.toString()) }
-                jsonPath("$.status") { value("CLEANED") }
-            }
+        mockMvc.delete("/api/instances/$instanceId") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "delete_reason": "ADMIN_FORCED" }"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.code") { value("SUCCESS") }
+            jsonPath("$.data.instance_id") { value(instanceId.toString()) }
+            jsonPath("$.data.status") { value("CLEANED") }
+            jsonPath("$.data.service_url") { doesNotExist() }
+        }
 
         // then
         val saved = instanceRepository.findById(instanceId).orElse(null)
@@ -159,29 +179,54 @@ class InstanceCommandIntegrationTest {
         assertEquals(InstanceStatus.CLEANED, saved.status)
     }
 
+    @Test
+    fun `delete api works without request body`() {
+        // body 없이 delete 가능 확인
+        // given
+        val createResponse = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 400L, challengeId = 10L)
+        }.andReturn().response.contentAsString
+
+        val instanceId = readInstanceId(createResponse)
+
+        // when & then
+        mockMvc.delete("/api/instances/$instanceId")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.status") { value("CLEANED") }
+            }
+    }
+
     private fun createRequestBody(
         teamId: Long,
         challengeId: Long,
     ): String =
         """
             {
-              "teamId": $teamId,
-              "challengeId": $challengeId,
-              "containerImage": "registry.local/challenge-$challengeId:latest",
-              "containerPort": 8080,
+              "team_id": $teamId,
+              "challenge_id": $challengeId,
+              "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
+              "container_port": 8080,
               "architecture": "AMD64",
-              "resourceProfile": {
-                "cpuMillicores": 500,
-                "memoryMib": 512,
-                "ephemeralStorageMib": 1024
+              "resource_profile": {
+                "cpu_millicores": 500,
+                "memory_mib": 512,
+                "ephemeral_storage_mib": 1024
               },
-              "ttlMinutes": 120,
-              "hardTimeoutMinutes": 180
+              "ttl_minutes": 120,
+              "hard_timeout_minutes": 180
             }
         """.trimIndent()
 
-    private fun readInstanceId(responseBody: String): UUID =
-        UUID.fromString(
-            objectMapper.readTree(responseBody).get("instanceId").asText(),
-        )
+    // data.instance_id 추출
+    private fun readInstanceId(responseBody: String): UUID {
+        val instanceId = objectMapper
+            .readTree(responseBody)
+            .get("data")
+            .get("instance_id")
+            .asText()
+
+        return UUID.fromString(instanceId)
+    }
 }

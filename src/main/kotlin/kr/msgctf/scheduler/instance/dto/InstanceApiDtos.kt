@@ -48,8 +48,7 @@ data class CreateInstanceRequest(
         )
 }
 
-// API 요청에서 받는 리소스 크기
-// broker로 보내는 ResourceProfile은 snake_case wire 포맷이라 API 입력 값과 분리한다
+// API 입력용 리소스 값
 data class ResourceProfileRequest(
     @field:Positive
     val cpuMillicores: Int,
@@ -69,7 +68,16 @@ data class ResourceProfileRequest(
         )
 }
 
-// instance API 응답 body
+// public delete는 항상 USER_REQUESTED로 처리
+class DeleteInstanceRequest {
+
+    fun toCommand(instanceId: UUID): DeleteInstanceCommand =
+        DeleteInstanceCommand(
+            instanceId = instanceId,
+        )
+}
+
+// create API 응답 body
 data class InstanceResponse(
     val instanceId: UUID,
     val teamId: Long,
@@ -91,6 +99,26 @@ data class InstanceResponse(
                 serviceUrl = result.serviceUrl,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
+            )
+    }
+}
+
+// delete API 응답 body
+data class DeleteInstanceResponse(
+    val instanceId: UUID,
+    val teamId: Long,
+    val challengeId: Long,
+    val status: InstanceStatus,
+) {
+
+    companion object {
+
+        fun from(result: InstanceResult): DeleteInstanceResponse =
+            DeleteInstanceResponse(
+                instanceId = result.instanceId,
+                teamId = result.teamId,
+                challengeId = result.challengeId,
+                status = result.status,
             )
     }
 }

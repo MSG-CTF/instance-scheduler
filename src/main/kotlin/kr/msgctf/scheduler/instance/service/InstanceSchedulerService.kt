@@ -24,7 +24,7 @@ import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
-// 인스턴스 생성 흐름을 하나로 묶는다
+// 인스턴스 생성과 삭제 흐름 처리
 @Service
 class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
@@ -36,7 +36,7 @@ class InstanceSchedulerService(
     private val clock: Clock,
 ) {
 
-    @Transactional(noRollbackFor = [CreateFlowStateSavedException::class])
+    @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
         instancePolicyService.validateTeamCanCreate(command.teamId)
@@ -113,7 +113,7 @@ class InstanceSchedulerService(
         return instance.toResult()
     }
 
-    // REQUESTED 상태를 DB에 바로 저장해서 중복 active 인스턴스를 먼저 막기
+    // REQUESTED를 바로 flush해 중복 active 인스턴스 차단
     private fun saveRequestedInstance(instance: Instance): Instance =
         try {
             instanceRepository.saveAndFlush(instance)
@@ -125,7 +125,7 @@ class InstanceSchedulerService(
             )
         }
 
-    @Transactional(noRollbackFor = [SchedulerException::class])
+    @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun deleteInstance(command: DeleteInstanceCommand): InstanceResult {
         val instance = instanceRepository.findById(command.instanceId).orElse(null)
             ?: throw SchedulerException(
@@ -133,25 +133,18 @@ class InstanceSchedulerService(
                 adminDetail = "instanceId=${command.instanceId}",
             )
 
+        // runtime 삭제 요청을 만들 수 있는지 먼저 확인
+        val deleteRequest = buildDeleteRequest(instance, command.reason)
+
+        instance.action = InstanceAction.DELETE
         move(instance, InstanceStatus.STOPPING)
 
         try {
-            runtimeClient.deleteWorkload(
-                RuntimeDeleteRequest(
-                    requestId = "runtime-delete-${instance.instanceId}",
-                    instanceId = instance.instanceId,
-                    teamId = instance.teamId,
-                    target = RuntimeTarget(
-                        runtimeType = requireNotNull(instance.runtimeType),
-                        targetId = requireNotNull(instance.runtimeTargetId),
-                    ),
-                    runtimeWorkloadId = requireNotNull(instance.runtimeWorkloadId),
-                    reason = RuntimeDeleteReason.USER_REQUESTED,
-                ),
-            )
-        } catch (exception: SchedulerException) {
+            runtimeClient.deleteWorkload(deleteRequest)
+        } catch (exception: Exception) {
+            // 삭제 재시도를 위해 CLEANUP_PENDING은 commit
             move(instance, InstanceStatus.CLEANUP_PENDING)
-            throw exception
+            throw keepFailedState(exception, SchedulerErrorCode.RUNTIME_DELETE_FAILED)
         }
 
         move(instance, InstanceStatus.STOPPED)
@@ -160,15 +153,43 @@ class InstanceSchedulerService(
         return instance.toResult()
     }
 
-    // 외부 처리 실패 후 FAILED 상태가 DB에 남도록 rollback 대상에서 제외할 예외로 바꾸기
-    // SchedulerException이면 원래 errorCode/adminDetail을 유지하고,
-    // 타임아웃·커넥션 오류 등 그 외 예외는 phase 기본 errorCode로 매핑한다
+    // runtime 정보가 없으면 삭제 요청을 만들 수 없음
+    private fun buildDeleteRequest(
+        instance: Instance,
+        reason: RuntimeDeleteReason,
+    ): RuntimeDeleteRequest {
+        val runtimeType = instance.runtimeType
+        val runtimeTargetId = instance.runtimeTargetId
+        val runtimeWorkloadId = instance.runtimeWorkloadId
+
+        if (runtimeType == null || runtimeTargetId == null || runtimeWorkloadId == null) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=${instance.instanceId}, runtimeType=$runtimeType, " +
+                    "runtimeTargetId=$runtimeTargetId, runtimeWorkloadId=$runtimeWorkloadId",
+            )
+        }
+
+        return RuntimeDeleteRequest(
+            requestId = "runtime-delete-${instance.instanceId}",
+            instanceId = instance.instanceId,
+            teamId = instance.teamId,
+            target = RuntimeTarget(
+                runtimeType = runtimeType,
+                targetId = runtimeTargetId,
+            ),
+            runtimeWorkloadId = runtimeWorkloadId,
+            reason = reason,
+        )
+    }
+
+    // 외부 호출 실패를 상태 저장용 예외로 변환
     private fun keepFailedState(
         exception: Exception,
         fallbackErrorCode: SchedulerErrorCode,
-    ): CreateFlowStateSavedException {
+    ): InstanceStateSavedException {
         val schedulerException = exception as? SchedulerException
-        return CreateFlowStateSavedException(
+        return InstanceStateSavedException(
             errorCode = schedulerException?.errorCode ?: fallbackErrorCode,
             adminDetail = schedulerException?.adminDetail ?: exception.message,
             cause = exception,
@@ -192,8 +213,8 @@ class InstanceSchedulerService(
         )
 }
 
-// FAILED 상태를 저장한 뒤 트랜잭션을 commit시키기 위한 예외
-private class CreateFlowStateSavedException(
+// 실패 상태를 commit시키기 위한 예외
+private class InstanceStateSavedException(
     errorCode: SchedulerErrorCode,
     adminDetail: String?,
     cause: Throwable,

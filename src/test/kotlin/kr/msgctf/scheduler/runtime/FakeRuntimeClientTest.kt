@@ -7,6 +7,7 @@ import kotlin.test.assertFailsWith
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
+import tools.jackson.databind.ObjectMapper
 
 class FakeRuntimeClientTest {
 
@@ -54,6 +55,20 @@ class FakeRuntimeClientTest {
         // then
         assertEquals("workload-1", response.runtimeWorkloadId)
         assertEquals(RuntimeOperationStatus.SUCCESS, response.status)
+    }
+
+    // runtime delete 요청의 delete_reason 직렬화 확인
+    @Test
+    fun `serializes delete reason as delete reason`() {
+        // given
+        val objectMapper = ObjectMapper()
+
+        // when
+        val json = objectMapper.writeValueAsString(newDeleteRequest())
+
+        // then
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED.name, objectMapper.readTree(json).get("delete_reason").asText())
+        assertEquals(null, objectMapper.readTree(json).get("reason"))
     }
 
     // workload 삭제 실패 확인
