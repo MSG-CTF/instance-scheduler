@@ -15,6 +15,18 @@ enum class SchedulerErrorCode(
         HttpStatus.BAD_REQUEST,
         "요청값을 확인해주세요.",
     ),
+    METHOD_NOT_ALLOWED(
+        HttpStatus.METHOD_NOT_ALLOWED,
+        "지원하지 않는 요청 방식입니다.",
+    ),
+    UNSUPPORTED_MEDIA_TYPE(
+        HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+        "지원하지 않는 요청 형식입니다.",
+    ),
+    ENDPOINT_NOT_FOUND(
+        HttpStatus.NOT_FOUND,
+        "요청한 경로를 찾을 수 없습니다.",
+    ),
     INVALID_TTL_RANGE(
         HttpStatus.BAD_REQUEST,
         "요청한 인스턴스 시간 설정이 올바르지 않습니다.",
@@ -50,5 +62,11 @@ enum class SchedulerErrorCode(
     CLEANUP_RETRY_EXCEEDED(
         HttpStatus.INTERNAL_SERVER_ERROR,
         "인스턴스 정리 중 문제가 발생했습니다.",
+    ),
+
+    // 예상하지 못한 예외도 code/message 계약을 지켜 응답하기 위한 기본값
+    INTERNAL_ERROR(
+        HttpStatus.INTERNAL_SERVER_ERROR,
+        "요청 처리 중 오류가 발생했습니다.",
     ),
 }

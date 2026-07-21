@@ -27,6 +27,8 @@ class TestInstanceRepository {
                 // create 흐름은 REQUESTED를 먼저 flush해서 중복 active를 막는다
                 "save", "saveAndFlush" -> save(args?.first() as Instance)
                 "findById" -> findById(args?.first() as UUID)
+                // 단위 테스트에는 동시성이 없어 잠금 없이 같은 행을 돌려준다
+                "findByIdForUpdate" -> findByIdOrNull(args?.first() as UUID)
                 "findFirstByTeamIdAndStatusInOrderByCreatedAtAsc" -> {
                     @Suppress("UNCHECKED_CAST")
                     findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
@@ -45,7 +47,10 @@ class TestInstanceRepository {
     }
 
     private fun findById(instanceId: UUID): Optional<Instance> =
-        Optional.ofNullable(savedInstances.firstOrNull { instance -> instance.instanceId == instanceId })
+        Optional.ofNullable(findByIdOrNull(instanceId))
+
+    private fun findByIdOrNull(instanceId: UUID): Instance? =
+        savedInstances.firstOrNull { instance -> instance.instanceId == instanceId }
 
     private fun findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
         teamId: Long,

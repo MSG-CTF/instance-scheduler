@@ -1,13 +1,22 @@
 package kr.msgctf.scheduler.instance.dto
 
 import jakarta.validation.Valid
+import jakarta.validation.constraints.Max
+import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Positive
 import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
+import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+
+// TCP 포트 범위
+private const val MIN_PORT = 1L
+private const val MAX_PORT = 65_535L
 
 // create API 요청 body
 data class CreateInstanceRequest(
@@ -20,7 +29,8 @@ data class CreateInstanceRequest(
     @field:NotBlank
     val containerImage: String,
 
-    @field:Positive
+    @field:Min(MIN_PORT)
+    @field:Max(MAX_PORT)
     val containerPort: Int,
 
     val architecture: Architecture,
@@ -28,6 +38,7 @@ data class CreateInstanceRequest(
     @field:Valid
     val resourceProfile: ResourceProfileRequest,
 
+    // 값이 계산 범위를 벗어나는 경우만 service에서 INVALID_TTL_RANGE로 거절한다
     @field:Positive
     val ttlMinutes: Long,
 
@@ -68,13 +79,27 @@ data class ResourceProfileRequest(
         )
 }
 
-// public delete는 항상 USER_REQUESTED로 처리
-class DeleteInstanceRequest {
+// delete API 요청 body
+// public API는 사용자 요청 삭제만 허용한다
+// 관리자 강제 종료나 TTL 만료 정리는 별도 경로에서 처리한다
+data class DeleteInstanceRequest(
+    val deleteReason: RuntimeDeleteReason = RuntimeDeleteReason.USER_REQUESTED,
+) {
 
-    fun toCommand(instanceId: UUID): DeleteInstanceCommand =
-        DeleteInstanceCommand(
+    // 허용하지 않는 사유는 명시적으로 거절한다
+    fun toCommand(instanceId: UUID): DeleteInstanceCommand {
+        if (deleteReason != RuntimeDeleteReason.USER_REQUESTED) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_REQUEST,
+                adminDetail = "deleteReason=$deleteReason, allowed=${RuntimeDeleteReason.USER_REQUESTED}",
+            )
+        }
+
+        return DeleteInstanceCommand(
             instanceId = instanceId,
+            reason = deleteReason,
         )
+    }
 }
 
 // create API 응답 body

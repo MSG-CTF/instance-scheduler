@@ -67,7 +67,7 @@ class FakeRuntimeClientTest {
         val json = objectMapper.writeValueAsString(newDeleteRequest())
 
         // then
-        assertEquals(RuntimeDeleteReason.USER_REQUESTED.name, objectMapper.readTree(json).get("delete_reason").asText())
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED.name, objectMapper.readTree(json).get("delete_reason").asString())
         assertEquals(null, objectMapper.readTree(json).get("reason"))
     }
 

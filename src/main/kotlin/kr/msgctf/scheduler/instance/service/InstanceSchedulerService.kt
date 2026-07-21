@@ -1,6 +1,9 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.time.Clock
+import java.time.DateTimeException
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
@@ -48,8 +51,8 @@ class InstanceSchedulerService(
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
-                expiresAt = now.plusSeconds(command.ttlMinutes * 60),
-                hardExpiresAt = now.plusSeconds(command.hardTimeoutMinutes * 60),
+                expiresAt = now.plusMinutesOrReject(command.ttlMinutes),
+                hardExpiresAt = now.plusMinutesOrReject(command.hardTimeoutMinutes),
             ),
         )
 
@@ -127,7 +130,8 @@ class InstanceSchedulerService(
 
     @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun deleteInstance(command: DeleteInstanceCommand): InstanceResult {
-        val instance = instanceRepository.findById(command.instanceId).orElse(null)
+        // 동시 삭제 요청이 모두 통과하지 않도록 행을 잠그고 읽는다
+        val instance = instanceRepository.findByIdForUpdate(command.instanceId)
             ?: throw SchedulerException(
                 errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
                 adminDetail = "instanceId=${command.instanceId}",
@@ -196,6 +200,27 @@ class InstanceSchedulerService(
         )
     }
 
+    // 분을 초로 바꾸는 곱셈은 Long을 넘으면 조용히 음수로 감긴다
+    // 그대로 두면 이미 만료된 인스턴스가 성공 응답과 함께 생성되므로 여기서 막는다
+    // service에서 검사해야 HTTP를 거치지 않는 호출자도 보호된다
+    // 응답이 밀리초까지만 내보내므로 저장값도 같은 정밀도로 맞춘다
+    private fun Instant.plusMinutesOrReject(minutes: Long): Instant =
+        try {
+            plusSeconds(Math.multiplyExact(minutes, SECONDS_PER_MINUTE))
+                .truncatedTo(ChronoUnit.MILLIS)
+        } catch (exception: ArithmeticException) {
+            throw invalidTtlRange(minutes, exception)
+        } catch (exception: DateTimeException) {
+            throw invalidTtlRange(minutes, exception)
+        }
+
+    private fun invalidTtlRange(minutes: Long, cause: Exception): SchedulerException =
+        SchedulerException(
+            errorCode = SchedulerErrorCode.INVALID_TTL_RANGE,
+            adminDetail = "minutes=$minutes",
+            cause = cause,
+        )
+
     private fun move(instance: Instance, to: InstanceStatus) {
         transitionService.validateTransition(instance.status, to)
         instance.status = to
@@ -212,6 +237,8 @@ class InstanceSchedulerService(
             hardExpiresAt = hardExpiresAt,
         )
 }
+
+private const val SECONDS_PER_MINUTE = 60L
 
 // 실패 상태를 commit시키기 위한 예외
 private class InstanceStateSavedException(
