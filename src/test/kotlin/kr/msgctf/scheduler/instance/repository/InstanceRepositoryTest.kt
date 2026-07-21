@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -15,8 +16,10 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Import
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.test.context.ActiveProfiles
 
 @Import(TestcontainersConfiguration::class)
+@ActiveProfiles("test")
 @SpringBootTest
 class InstanceRepositoryTest {
 
@@ -55,6 +58,31 @@ class InstanceRepositoryTest {
         assertThrows<DataIntegrityViolationException> {
             instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 20L))
         }
+    }
+
+    @Test
+    fun `saves runtime target fields`() {
+        // delete 요청에 사용할 runtime 실행 위치 저장 확인
+        // given
+        val instance = newInstance(teamId = 4L, challengeId = 10L).apply {
+            provider = "SELF_HOSTED"
+            accountId = "self-hosted-1"
+            region = "local"
+            runtimeType = RuntimeType.KUBERNETES
+            runtimeTargetId = "cluster-main"
+        }
+
+        // when
+        val saved = instanceRepository.saveAndFlush(instance)
+        val found = instanceRepository.findById(saved.instanceId).orElse(null)
+
+        // then
+        assertNotNull(found)
+        assertEquals("SELF_HOSTED", found.provider)
+        assertEquals("self-hosted-1", found.accountId)
+        assertEquals("local", found.region)
+        assertEquals(RuntimeType.KUBERNETES, found.runtimeType)
+        assertEquals("cluster-main", found.runtimeTargetId)
     }
 
     @Test

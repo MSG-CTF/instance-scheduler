@@ -9,6 +9,7 @@ import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
 import java.util.UUID
+import kr.msgctf.scheduler.common.model.RuntimeType
 import org.springframework.data.annotation.CreatedDate
 import org.springframework.data.annotation.LastModifiedDate
 import org.springframework.data.jpa.domain.support.AuditingEntityListener
@@ -42,6 +43,19 @@ class Instance(
 
     @Column(name = "account_id")
     var accountId: String? = null,
+
+    // Broker 후보에서 선택한 실행 지역
+    @Column(name = "region")
+    var region: String? = null,
+
+    // Runtime이 workload를 만들 실행 환경 종류
+    @Enumerated(EnumType.STRING)
+    @Column(name = "runtime_type")
+    var runtimeType: RuntimeType? = null,
+
+    // Runtime이 workload를 만들 대상 ID
+    @Column(name = "runtime_target_id")
+    var runtimeTargetId: String? = null,
 
     @Column(name = "runtime_workload_id")
     var runtimeWorkloadId: String? = null,

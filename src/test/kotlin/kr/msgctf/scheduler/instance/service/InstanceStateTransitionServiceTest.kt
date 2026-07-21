@@ -95,4 +95,34 @@ class InstanceStateTransitionServiceTest {
             assertFalse(transitionService.isActive(status), "$status should be inactive")
         }
     }
+
+    // DB가 팀당 1개 제한에 사용하는 상태 목록과 코드의 active 상태 목록이 같은지 확인
+    // (목록이 다르면 DB와 코드가 서로 다른 기준으로 create를 막는다)
+    @Test
+    fun `active statuses match sql partial unique index`() {
+        // given
+        val codeActiveStatuses = transitionService.activeStatuses().map { it.name }.toSet()
+
+        // when
+        val sqlActiveStatuses = activeStatusesInUniqueIndex()
+
+        // then
+        assertEquals(codeActiveStatuses, sqlActiveStatuses)
+    }
+
+    private fun activeStatusesInUniqueIndex(): Set<String> {
+        val sql = javaClass.getResource("/db/migration/V1__create_challenge_instance.sql")
+            ?.readText()
+            ?: error("V1 migration not found on test classpath")
+
+        val uniqueIndexWhereClause = sql
+            .substringAfter("uq_team_active_instance")
+            .substringBefore(";")
+            .substringAfter("WHERE")
+
+        return Regex("'([A-Z_]+)'")
+            .findAll(uniqueIndexWhereClause)
+            .map { match -> match.groupValues[1] }
+            .toSet()
+    }
 }

@@ -1,29 +1,30 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.time.Instant
-import org.junit.jupiter.api.BeforeEach
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.repository.ActiveInstanceFinder
+import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import org.junit.jupiter.api.BeforeEach
+import org.mockito.Mockito
 
 class InstancePolicyServiceTest {
 
-    private lateinit var activeInstanceFinder: FakeActiveInstanceFinder
-
+    private lateinit var instanceRepository: InstanceRepository
+    private lateinit var transitionService: InstanceStateTransitionService
     private lateinit var instancePolicyService: InstancePolicyService
 
     @BeforeEach
     fun setUp() {
-        activeInstanceFinder = FakeActiveInstanceFinder()
+        instanceRepository = Mockito.mock(InstanceRepository::class.java)
+        transitionService = InstanceStateTransitionService()
         instancePolicyService = InstancePolicyService(
-            activeInstanceFinder = activeInstanceFinder,
-            transitionService = InstanceStateTransitionService(),
+            instanceRepository = instanceRepository,
+            transitionService = transitionService,
         )
     }
 
@@ -32,23 +33,31 @@ class InstancePolicyServiceTest {
     fun `allows create when team has no active instance`() {
         // given
         val teamId = 100L
+        val activeStatuses = transitionService.activeStatuses()
 
         // when
         instancePolicyService.validateTeamCanCreate(teamId)
 
         // then
-        assertEquals(teamId, activeInstanceFinder.lastTeamId)
-        assertTrue(InstanceStatus.RUNNING in activeInstanceFinder.lastStatuses)
+        Mockito.verify(instanceRepository).findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
+            teamId = teamId,
+            statuses = activeStatuses,
+        )
     }
 
-    // active 인스턴스가 있으면 create 거부 확인
+    // active 인스턴스가 있으면 create 거절 확인
     @Test
     fun `rejects create when team has active instance`() {
         // given
         val teamId = 101L
-        val activeInstance = activeInstanceFinder.save(
-            newInstance(teamId = teamId, challengeId = 10L, status = InstanceStatus.RUNNING),
-        )
+        val activeStatuses = transitionService.activeStatuses()
+        val activeInstance = newInstance(teamId = teamId, challengeId = 10L, status = InstanceStatus.RUNNING)
+        Mockito.`when`(
+            instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
+                teamId = teamId,
+                statuses = activeStatuses,
+            ),
+        ).thenReturn(activeInstance)
 
         // when
         val exception = assertFailsWith<SchedulerException> {
@@ -60,21 +69,45 @@ class InstancePolicyServiceTest {
         assertEquals("teamId=$teamId, activeInstanceId=${activeInstance.instanceId}", exception.adminDetail)
     }
 
-    // inactive 인스턴스만 있으면 create 허용 확인
+    // ttl이 hard timeout을 넘으면 create 거절 확인
     @Test
-    fun `allows create when team only has inactive instance`() {
-        // given
-        val teamId = 102L
-        activeInstanceFinder.save(
-            newInstance(teamId = teamId, challengeId = 10L, status = InstanceStatus.CLEANED),
-        )
-
+    fun `rejects create when ttl exceeds hard timeout`() {
         // when
-        instancePolicyService.validateTeamCanCreate(teamId)
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTtl(ttlMinutes = 200, hardTimeoutMinutes = 120)
+        }
 
         // then
-        assertEquals(teamId, activeInstanceFinder.lastTeamId)
-        assertTrue(InstanceStatus.CLEANED !in activeInstanceFinder.lastStatuses)
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+    }
+
+    // ttl이 hard timeout과 같으면 create 허용 확인
+    @Test
+    fun `allows create when ttl equals hard timeout`() {
+        // when & then (예외가 발생하지 않아야 한다)
+        instancePolicyService.validateTtl(ttlMinutes = 120, hardTimeoutMinutes = 120)
+    }
+
+    // ttl이 1분 미만이면 create 거절 확인
+    @Test
+    fun `rejects create when ttl is not positive`() {
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTtl(ttlMinutes = 0, hardTimeoutMinutes = 120)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+    }
+
+    // inactive 상태는 active 조회 대상에 포함되지 않는지 확인
+    @Test
+    fun `does not include cleaned status as active`() {
+        // given
+        val activeStatuses = transitionService.activeStatuses()
+
+        // when & then
+        assertEquals(false, InstanceStatus.CLEANED in activeStatuses)
     }
 
     private fun newInstance(
@@ -91,32 +124,5 @@ class InstancePolicyServiceTest {
             expiresAt = now.plusSeconds(7200),
             hardExpiresAt = now.plusSeconds(10800),
         )
-    }
-
-    private class FakeActiveInstanceFinder : ActiveInstanceFinder {
-
-        private val instances = mutableListOf<Instance>()
-
-        var lastTeamId: Long? = null
-            private set
-
-        var lastStatuses: Collection<InstanceStatus> = emptyList()
-            private set
-
-        fun save(instance: Instance): Instance {
-            instances += instance
-            return instance
-        }
-
-        override fun findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-            teamId: Long,
-            statuses: Collection<InstanceStatus>,
-        ): Instance? {
-            lastTeamId = teamId
-            lastStatuses = statuses
-            return instances.firstOrNull { instance ->
-                instance.teamId == teamId && instance.status in statuses
-            }
-        }
     }
 }
