@@ -113,7 +113,7 @@ class InstanceSchedulerService(
         instance.serviceUrl = runtimeResponse.serviceUrl
         move(instance, InstanceStatus.RUNNING)
 
-        return instance.toResult()
+        return InstanceResult.from(instance)
     }
 
     // REQUESTED를 바로 flush해 중복 active 인스턴스 차단
@@ -154,7 +154,7 @@ class InstanceSchedulerService(
         move(instance, InstanceStatus.STOPPED)
         move(instance, InstanceStatus.CLEANED)
 
-        return instance.toResult()
+        return InstanceResult.from(instance)
     }
 
     // runtime 정보가 없으면 삭제 요청을 만들 수 없음
@@ -225,17 +225,6 @@ class InstanceSchedulerService(
         transitionService.validateTransition(instance.status, to)
         instance.status = to
     }
-
-    private fun Instance.toResult(): InstanceResult =
-        InstanceResult(
-            instanceId = instanceId,
-            teamId = teamId,
-            challengeId = challengeId,
-            status = status,
-            serviceUrl = serviceUrl,
-            expiresAt = expiresAt,
-            hardExpiresAt = hardExpiresAt,
-        )
 }
 
 private const val SECONDS_PER_MINUTE = 60L
