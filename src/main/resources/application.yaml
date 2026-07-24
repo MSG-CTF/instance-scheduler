@@ -3,3 +3,9 @@ spring:
     name: scheduler
   jackson:
     property-naming-strategy: SNAKE_CASE
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
