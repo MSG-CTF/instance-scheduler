@@ -1,3 +1,5 @@
 spring:
   application:
     name: scheduler
+  jackson:
+    property-naming-strategy: SNAKE_CASE

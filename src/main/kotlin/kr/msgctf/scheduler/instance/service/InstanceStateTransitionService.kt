@@ -26,7 +26,7 @@ class InstanceStateTransitionService {
     fun activeStatuses(): Set<InstanceStatus> = activeStatuses
 
     companion object {
-        // 없는 이동은 잘못된 상태 변경으로 보고 막기
+        // 표에 적어둔 상태 이동만 허용
         private val allowedTransitions = mapOf(
             InstanceStatus.REQUESTED to setOf(InstanceStatus.SCHEDULING),
             InstanceStatus.SCHEDULING to setOf(
@@ -66,8 +66,7 @@ class InstanceStateTransitionService {
             ),
         )
 
-        // 아직 살아있는 인스턴스로 볼 상태 set
-        // 같은 team id에 아래 상태의 인스턴스가 있으면 새 create를 막는다
+        // 새 create를 막는 진행 중 상태
         private val activeStatuses = setOf(
             InstanceStatus.REQUESTED,
             InstanceStatus.SCHEDULING,

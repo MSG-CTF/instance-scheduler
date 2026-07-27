@@ -4,26 +4,25 @@ import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.junit.jupiter.api.BeforeEach
-import org.mockito.Mockito
 
 class InstancePolicyServiceTest {
 
-    private lateinit var instanceRepository: InstanceRepository
+    private lateinit var instanceRepository: TestInstanceRepository
     private lateinit var transitionService: InstanceStateTransitionService
     private lateinit var instancePolicyService: InstancePolicyService
 
     @BeforeEach
     fun setUp() {
-        instanceRepository = Mockito.mock(InstanceRepository::class.java)
+        instanceRepository = TestInstanceRepository()
         transitionService = InstanceStateTransitionService()
         instancePolicyService = InstancePolicyService(
-            instanceRepository = instanceRepository,
+            instanceRepository = instanceRepository.repository,
             transitionService = transitionService,
         )
     }
@@ -33,16 +32,13 @@ class InstancePolicyServiceTest {
     fun `allows create when team has no active instance`() {
         // given
         val teamId = 100L
-        val activeStatuses = transitionService.activeStatuses()
 
         // when
         instancePolicyService.validateTeamCanCreate(teamId)
 
         // then
-        Mockito.verify(instanceRepository).findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-            teamId = teamId,
-            statuses = activeStatuses,
-        )
+        assertEquals(teamId, instanceRepository.lastTeamId)
+        assertTrue(InstanceStatus.RUNNING in instanceRepository.lastStatuses)
     }
 
     // active 인스턴스가 있으면 create 거절 확인
@@ -50,14 +46,9 @@ class InstancePolicyServiceTest {
     fun `rejects create when team has active instance`() {
         // given
         val teamId = 101L
-        val activeStatuses = transitionService.activeStatuses()
-        val activeInstance = newInstance(teamId = teamId, challengeId = 10L, status = InstanceStatus.RUNNING)
-        Mockito.`when`(
-            instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-                teamId = teamId,
-                statuses = activeStatuses,
-            ),
-        ).thenReturn(activeInstance)
+        val activeInstance = instanceRepository.save(
+            newInstance(teamId = teamId, challengeId = 10L, status = InstanceStatus.RUNNING),
+        )
 
         // when
         val exception = assertFailsWith<SchedulerException> {
@@ -67,6 +58,23 @@ class InstancePolicyServiceTest {
         // then
         assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
         assertEquals("teamId=$teamId, activeInstanceId=${activeInstance.instanceId}", exception.adminDetail)
+    }
+
+    // inactive 인스턴스만 있으면 create 허용 확인
+    @Test
+    fun `allows create when team only has inactive instance`() {
+        // given
+        val teamId = 102L
+        instanceRepository.save(
+            newInstance(teamId = teamId, challengeId = 10L, status = InstanceStatus.CLEANED),
+        )
+
+        // when
+        instancePolicyService.validateTeamCanCreate(teamId)
+
+        // then
+        assertEquals(teamId, instanceRepository.lastTeamId)
+        assertTrue(InstanceStatus.CLEANED !in instanceRepository.lastStatuses)
     }
 
     // ttl이 hard timeout을 넘으면 create 거절 확인
