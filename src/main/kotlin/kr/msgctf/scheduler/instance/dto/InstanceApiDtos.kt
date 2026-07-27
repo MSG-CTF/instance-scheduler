@@ -11,6 +11,8 @@ import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
@@ -102,7 +104,7 @@ data class DeleteInstanceRequest(
     }
 }
 
-// create API 응답 body
+// create / delete 이후 상태와 active 조회에 공통으로 쓰는 응답 body
 data class InstanceResponse(
     val instanceId: UUID,
     val teamId: Long,
@@ -124,6 +126,54 @@ data class InstanceResponse(
                 serviceUrl = result.serviceUrl,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
+            )
+    }
+}
+
+// 단건 조회 API 응답 body
+data class InstanceDetailResponse(
+    val instanceId: UUID,
+    val teamId: Long,
+    val challengeId: Long,
+    val status: InstanceStatus,
+    val action: InstanceAction?,
+    val provider: String?,
+    val accountId: String?,
+    val region: String?,
+    val runtimeType: RuntimeType?,
+    val runtimeTargetId: String?,
+    val runtimeWorkloadId: String?,
+    val serviceUrl: String?,
+    val createdAt: Instant?,
+    val updatedAt: Instant?,
+    val expiresAt: Instant,
+    val idleExpiresAt: Instant?,
+    val hardExpiresAt: Instant,
+    val lastAccessedAt: Instant?,
+) {
+
+    companion object {
+
+        fun from(result: InstanceDetailResult): InstanceDetailResponse =
+            InstanceDetailResponse(
+                instanceId = result.instanceId,
+                teamId = result.teamId,
+                challengeId = result.challengeId,
+                status = result.status,
+                action = result.action,
+                provider = result.provider,
+                accountId = result.accountId,
+                region = result.region,
+                runtimeType = result.runtimeType,
+                runtimeTargetId = result.runtimeTargetId,
+                runtimeWorkloadId = result.runtimeWorkloadId,
+                serviceUrl = result.serviceUrl,
+                createdAt = result.createdAt,
+                updatedAt = result.updatedAt,
+                expiresAt = result.expiresAt,
+                idleExpiresAt = result.idleExpiresAt,
+                hardExpiresAt = result.hardExpiresAt,
+                lastAccessedAt = result.lastAccessedAt,
             )
     }
 }

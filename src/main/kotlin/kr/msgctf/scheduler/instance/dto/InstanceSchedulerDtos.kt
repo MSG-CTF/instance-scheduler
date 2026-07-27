@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
+import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
@@ -25,7 +26,7 @@ data class DeleteInstanceCommand(
     val reason: RuntimeDeleteReason = RuntimeDeleteReason.USER_REQUESTED,
 )
 
-// create 서비스가 돌려주는 결과 값
+// create/delete/active 조회가 공통으로 돌려주는 결과 값
 data class InstanceResult(
     val instanceId: UUID,
     val teamId: Long,
@@ -34,4 +35,19 @@ data class InstanceResult(
     val serviceUrl: String?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
-)
+) {
+
+    companion object {
+
+        fun from(instance: Instance): InstanceResult =
+            InstanceResult(
+                instanceId = instance.instanceId,
+                teamId = instance.teamId,
+                challengeId = instance.challengeId,
+                status = instance.status,
+                serviceUrl = instance.serviceUrl,
+                expiresAt = instance.expiresAt,
+                hardExpiresAt = instance.hardExpiresAt,
+            )
+    }
+}
