@@ -113,6 +113,23 @@ class InstanceRepositoryTest {
         assertNotNull(events[0].createdAt)
     }
 
+    @Test
+    fun `persists cleanup retry count`() {
+        // cleanup 재시도 카운트가 기본 0으로 저장되고 증가분이 반영되는지 확인
+        // given
+        val saved = instanceRepository.saveAndFlush(newInstance(teamId = 5L, challengeId = 10L))
+        assertEquals(0, saved.cleanupRetryCount)
+
+        // when
+        saved.cleanupRetryCount += 1
+        instanceRepository.saveAndFlush(saved)
+        val found = instanceRepository.findById(saved.instanceId).orElse(null)
+
+        // then
+        assertNotNull(found)
+        assertEquals(1, found.cleanupRetryCount)
+    }
+
     private fun newInstance(
         teamId: Long,
         challengeId: Long,
