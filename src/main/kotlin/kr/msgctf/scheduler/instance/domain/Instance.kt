@@ -88,7 +88,7 @@ class Instance(
     @Column(name = "last_accessed_at")
     var lastAccessedAt: Instant? = null,
 
-    // runtime 삭제(cleanup) 재시도 횟수. 한도 도달 시 FAILED로 전이한다
+    // runtime 삭제(cleanup) 재시도 횟수, 한도 도달 시 FAILED로 전이한다
     @Column(name = "cleanup_retry_count", nullable = false)
     var cleanupRetryCount: Int = 0,
 )

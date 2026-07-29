@@ -10,8 +10,8 @@ data class CleanupProperties(
     // 기본은 꺼짐
     // 테스트에선 안 뜨고 켜는 환경에서만 동작한다
     val enabled: Boolean = false,
-    // 워커 실행 주기
+    // 워커 실행 주기, @Scheduled는 fixed-delay placeholder를 읽으므로 이 필드는 문서용이다
     val fixedDelay: Duration = Duration.ofSeconds(30),
-    // runtime 삭제 재시도 한도. 도달하면 FAILED로 전이한다
+    // runtime 삭제 재시도 한도, 도달하면 FAILED로 전이한다
     val retryLimit: Int = 5,
 )

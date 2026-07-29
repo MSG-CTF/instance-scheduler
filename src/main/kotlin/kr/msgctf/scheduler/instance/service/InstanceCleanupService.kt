@@ -35,6 +35,8 @@ class InstanceCleanupService(
         // 조회 이후 상태가 바뀌었을 수 있어 잠금으로 다시 읽어 확인한다
         val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return
         val now = clock.instant()
+        // 전이로 상태가 바뀌기 전에 어느 정리 경로가 잡았는지로 삭제 사유를 정한다
+        val reason = classifyDeleteReason(instance, now)
 
         if (instance.status == InstanceStatus.RUNNING && isExpired(instance.expiresAt, now)) {
             move(instance, InstanceStatus.EXPIRED)
@@ -51,11 +53,11 @@ class InstanceCleanupService(
         }
 
         if (instance.status == InstanceStatus.CLEANUP_PENDING) {
-            deleteWorkload(instance, now)
+            deleteWorkload(instance, reason)
         }
     }
 
-    private fun deleteWorkload(instance: Instance, now: Instant) {
+    private fun deleteWorkload(instance: Instance, reason: RuntimeDeleteReason) {
         val runtimeType = instance.runtimeType
         val runtimeTargetId = instance.runtimeTargetId
         // runtime 좌표가 전혀 없으면 만들어진 workload도 없으므로 바로 정리 완료로 본다
@@ -65,18 +67,18 @@ class InstanceCleanupService(
             return
         }
 
+        val request = RuntimeDeleteRequest(
+            requestId = "runtime-cleanup-${instance.instanceId}",
+            instanceId = instance.instanceId,
+            teamId = instance.teamId,
+            target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
+            // workloadId가 null이면 runtime이 instance_id로 삭제한다
+            runtimeWorkloadId = instance.runtimeWorkloadId,
+            reason = reason,
+        )
+
         try {
-            runtimeClient.deleteWorkload(
-                RuntimeDeleteRequest(
-                    requestId = "runtime-cleanup-${instance.instanceId}",
-                    instanceId = instance.instanceId,
-                    teamId = instance.teamId,
-                    target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
-                    // workloadId가 null이면 runtime이 instance_id로 삭제한다
-                    runtimeWorkloadId = instance.runtimeWorkloadId,
-                    reason = deleteReason(instance, now),
-                ),
-            )
+            runtimeClient.deleteWorkload(request)
         } catch (exception: Exception) {
             instance.cleanupRetryCount += 1
             if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
@@ -98,9 +100,13 @@ class InstanceCleanupService(
         instance.action = null
     }
 
-    // 삭제 사유는 저장하지 않고 현재 만료 상태로 정한다
-    private fun deleteReason(instance: Instance, now: Instant): RuntimeDeleteReason =
+    // 삭제 사유는 저장하지 않고 정리 진입 시점의 원래 상태로 도출한다
+    // RUNNING/EXPIRED는 TTL, 전이 상태는 하드타임아웃, 정리 대기로 남은 CLEANUP_PENDING은 만료 시각으로 폴백한다
+    private fun classifyDeleteReason(instance: Instance, now: Instant): RuntimeDeleteReason =
         when {
+            instance.status == InstanceStatus.RUNNING || instance.status == InstanceStatus.EXPIRED ->
+                RuntimeDeleteReason.TTL_EXPIRED
+            instance.status in HARD_TIMEOUT_STATES -> RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
             isExpired(instance.expiresAt, now) -> RuntimeDeleteReason.TTL_EXPIRED
             isExpired(instance.hardExpiresAt, now) -> RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
             else -> RuntimeDeleteReason.CREATE_FAILED_CLEANUP
