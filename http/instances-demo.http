@@ -1,0 +1,63 @@
+# 인스턴스 API 데모 (create -> 조회 -> 삭제)
+#
+# 실행 전제:
+#   - Docker Desktop 실행 (postgres/redis 자동 기동)
+#   - local 프로파일로 앱 기동: .\gradlew.bat bootRun --args='--spring.profiles.active=local'
+#
+# IntelliJ에서 각 요청 왼쪽의 실행 버튼으로 1 -> 4 순서로 누른다.
+# 1번 응답의 instance_id를 전역 변수로 잡아 2/4번이 자동으로 이어받는다.
+
+@host = http://localhost:8080
+
+### 1. 인스턴스 생성 -> instance_id 저장
+POST {{host}}/api/instances
+Content-Type: application/json
+
+{
+  "team_id": 1,
+  "challenge_id": 100,
+  "container_image": "ghcr.io/example/web:latest",
+  "container_port": 8080,
+  "architecture": "AMD64",
+  "resource_profile": {
+    "cpu_millicores": 500,
+    "memory_mib": 512,
+    "ephemeral_storage_mib": 1024
+  },
+  "ttl_minutes": 60,
+  "hard_timeout_minutes": 120
+}
+
+> {%
+    client.global.set("instance_id", response.body.data.instance_id);
+    client.log("instance_id = " + response.body.data.instance_id);
+%}
+
+### 2. 단건 조회 (방금 만든 인스턴스)
+GET {{host}}/api/instances/{{instance_id}}
+
+### 3. 팀 active 인스턴스 조회
+GET {{host}}/api/instances/active?team_id=1
+
+### 4. 삭제 (body 생략 시 USER_REQUESTED 기본)
+DELETE {{host}}/api/instances/{{instance_id}}
+
+### 5. (보너스) 삭제 전에 같은 팀으로 재생성 -> 409 ACTIVE_INSTANCE_EXISTS
+# 1번을 4번 없이 다시 실행하면 "팀당 active 1개" 정책이 막는 걸 보여줄 수 있다.
+POST {{host}}/api/instances
+Content-Type: application/json
+
+{
+  "team_id": 1,
+  "challenge_id": 100,
+  "container_image": "ghcr.io/example/web:latest",
+  "container_port": 8080,
+  "architecture": "AMD64",
+  "resource_profile": {
+    "cpu_millicores": 500,
+    "memory_mib": 512,
+    "ephemeral_storage_mib": 1024
+  },
+  "ttl_minutes": 60,
+  "hard_timeout_minutes": 120
+}

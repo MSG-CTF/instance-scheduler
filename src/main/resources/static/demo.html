@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>MJSEC Scheduler · Instance Console</title>
+  <style>
+    :root {
+      --bg: #eef1f6;
+      --surface: #ffffff;
+      --surface-2: #f7f9fc;
+      --line: #dbe1ea;
+      --line-strong: #c3ccda;
+      --ink: #1f2733;
+      --ink-2: #5b6673;
+      --ink-3: #8a93a1;
+      --accent: #4f46e5;
+      --accent-ink: #ffffff;
+      --read: #0e7490;
+      --ok: #15803d;      --ok-bg: #e6f4ea;
+      --warn: #b45309;    --warn-bg: #fbf0dd;
+      --bad: #b91c1c;     --bad-bg: #fbe7e7;
+      --done: #556072;    --done-bg: #eceff4;
+      --mono: ui-monospace, "Cascadia Code", "SF Mono", "JetBrains Mono", Consolas, monospace;
+      --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+      --radius: 10px;
+      --shadow: 0 1px 2px rgba(24,33,48,.06), 0 6px 20px rgba(24,33,48,.05);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---- top bar ---- */
+    .topbar {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 22px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+    .topbar__mark {
+      font-family: var(--mono); font-weight: 700; letter-spacing: -.02em;
+      font-size: 15px; color: var(--ink);
+      padding: 4px 9px; border: 1px solid var(--line-strong); border-radius: 7px;
+      background: var(--surface-2);
+    }
+    .topbar__mark span { color: var(--accent); }
+    .topbar__title { font-weight: 600; }
+    .topbar__title small { display: block; font-weight: 400; color: var(--ink-3); font-size: 12px; }
+    .health { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
+    .health__dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-3); box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+    .health[data-up="yes"] .health__dot { background: var(--ok); animation: pulse 2.4s ease-out infinite; }
+    .health[data-up="no"] .health__dot { background: var(--bad); }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(21,128,61,.35);} 70%{ box-shadow: 0 0 0 6px rgba(21,128,61,0);} 100%{ box-shadow:0 0 0 0 rgba(21,128,61,0);} }
+
+    /* ---- layout ---- */
+    .console {
+      display: grid; grid-template-columns: 360px 1fr; gap: 18px;
+      max-width: 1160px; margin: 0 auto; padding: 22px;
+    }
+    @media (max-width: 880px) { .console { grid-template-columns: 1fr; } }
+
+    .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .panel__head {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 13px 16px; border-bottom: 1px solid var(--line);
+    }
+    .panel__head h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+    .panel__head .eyebrow { font-family: var(--mono); font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; }
+    .panel__body { padding: 16px; }
+
+    .col { display: flex; flex-direction: column; gap: 18px; }
+
+    /* ---- form ---- */
+    .fieldset { border: 0; margin: 0; padding: 0; }
+    .fieldset + .fieldset { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--line); }
+    .fieldset__legend { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 9px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 12px; color: var(--ink-2); }
+    .field input, .field select {
+      font-family: var(--mono); font-size: 13px; color: var(--ink);
+      padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface-2);
+      width: 100%;
+    }
+    .field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+
+    /* ---- actions ---- */
+    .actions { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .actions__row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btn {
+      font-family: var(--sans); font-size: 13px; font-weight: 600;
+      padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line-strong);
+      background: var(--surface); color: var(--ink); cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      transition: transform .06s ease, background .12s ease, border-color .12s ease;
+    }
+    .btn:hover { border-color: var(--line-strong); background: var(--surface-2); }
+    .btn:active { transform: translateY(1px); }
+    .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .btn--primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); width: 100%; padding: 11px; font-size: 14px; }
+    .btn--primary:hover { background: #443cc9; border-color: #443cc9; }
+    .btn--danger { color: var(--bad); }
+    .btn--danger:hover { background: var(--bad-bg); border-color: var(--bad); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+    .btn__key { font-family: var(--mono); font-size: 11px; color: currentColor; opacity: .6; }
+
+    /* ---- instance card ---- */
+    .inst__top { display: flex; align-items: center; gap: 12px; }
+    .badge {
+      font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: .02em;
+      padding: 6px 11px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap;
+    }
+    .badge[data-tone="ok"]   { color: var(--ok);   background: var(--ok-bg);   border-color: #bfe3ca; }
+    .badge[data-tone="warn"] { color: var(--warn); background: var(--warn-bg); border-color: #ecd7ab; }
+    .badge[data-tone="bad"]  { color: var(--bad);  background: var(--bad-bg);  border-color: #eec2c2; }
+    .badge[data-tone="done"] { color: var(--done); background: var(--done-bg); border-color: var(--line-strong); }
+    .badge[data-tone="idle"] { color: var(--ink-3); background: var(--surface-2); border-color: var(--line); }
+    .inst__hint { font-size: 12px; color: var(--ink-3); }
+
+    /* lifecycle rail — the signature element */
+    .rail { display: flex; align-items: center; gap: 0; margin: 16px 0 4px; overflow-x: auto; padding-bottom: 4px; }
+    .rail__node { display: flex; align-items: center; gap: 0; flex: 0 0 auto; }
+    .rail__dot {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: .03em;
+      color: var(--ink-3); background: var(--surface-2);
+      border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; white-space: nowrap;
+      transition: all .2s ease;
+    }
+    .rail__node.is-passed .rail__dot { color: var(--ok); border-color: #bfe3ca; background: var(--ok-bg); }
+    .rail__node.is-current .rail__dot { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+    .rail__link { width: 16px; height: 1px; background: var(--line-strong); flex: 0 0 auto; }
+    .rail__node.is-passed + .rail__node .rail__link, .rail__node.is-current .rail__link { background: var(--accent); }
+
+    .kv { margin-top: 14px; display: grid; grid-template-columns: 116px 1fr; gap: 7px 12px; }
+    .kv dt { color: var(--ink-2); font-size: 12.5px; }
+    .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; color: var(--ink); word-break: break-all; }
+    .kv dd.muted { color: var(--ink-3); }
+
+    .empty { text-align: center; color: var(--ink-3); padding: 26px 10px; }
+    .empty strong { display: block; color: var(--ink-2); font-weight: 600; margin-bottom: 4px; }
+
+    /* ---- logs, split into 생성 / 조회 / 삭제 lanes ---- */
+    .logs { display: flex; flex-direction: column; gap: 14px; }
+    .lane { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; border-left: 3px solid var(--line-strong); }
+    .lane[data-lane="create"] { border-left-color: var(--accent); }
+    .lane[data-lane="read"]   { border-left-color: var(--read); }
+    .lane[data-lane="delete"] { border-left-color: var(--bad); }
+    .lane__head { display: flex; align-items: center; gap: 9px; padding: 9px 13px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+    .lane__tag { font-weight: 700; font-size: 12.5px; }
+    .lane[data-lane="create"] .lane__tag { color: var(--accent); }
+    .lane[data-lane="read"]   .lane__tag { color: var(--read); }
+    .lane[data-lane="delete"] .lane__tag { color: var(--bad); }
+    .lane__meta { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+    .lane__count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+    .lane__body { padding: 11px 13px; display: flex; flex-direction: column; gap: 9px; }
+    .lane__empty { color: var(--ink-3); font-size: 12.5px; }
+
+    .entry { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .entry__bar { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--surface); }
+    .chip { font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; letter-spacing: .03em; }
+    .chip--method { color: var(--ink); background: var(--surface-2); border: 1px solid var(--line-strong); }
+    .chip--status { color: #fff; }
+    .chip--status[data-tone="ok"]  { background: var(--ok); }
+    .chip--status[data-tone="bad"] { background: var(--bad); }
+    .entry__path { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .entry__time { margin-left: auto; font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+    pre.json { margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: var(--ink); background: var(--surface-2); overflow-x: auto; border-top: 1px solid var(--line); }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; font-size: 11.5px; color: var(--ink-2); }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .legend i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__mark">MSG<span>/</span>SCHED</div>
+    <div class="topbar__title">인스턴스 콘솔<small>challenge instance · 생성 · 조회 · 삭제</small></div>
+    <div class="health" id="health" data-up="unknown">
+      <span class="health__dot"></span><span id="healthText">서버 확인 중…</span>
+    </div>
+  </header>
+
+  <main class="console">
+    <!-- LEFT: request -->
+    <section class="panel" aria-label="요청">
+      <div class="panel__head"><span class="eyebrow">request</span><h2>인스턴스 요청</h2></div>
+      <div class="panel__body">
+        <form id="form" autocomplete="off">
+          <div class="fieldset">
+            <div class="fieldset__legend">인스턴스</div>
+            <div class="grid2">
+              <div class="field"><label for="team_id">team_id</label><input id="team_id" type="number" value="1" min="1" /></div>
+              <div class="field"><label for="challenge_id">challenge_id</label><input id="challenge_id" type="number" value="100" min="1" /></div>
+            </div>
+          </div>
+          <div class="fieldset">
+            <div class="fieldset__legend">컨테이너</div>
+            <div class="field"><label for="container_image">container_image</label><input id="container_image" type="text" value="ghcr.io/example/web:latest" /></div>
+            <div class="grid2" style="margin-top:10px">
+              <div class="field"><label for="container_port">container_port</label><input id="container_port" type="number" value="8080" min="1" max="65535" /></div>
+              <div class="field"><label for="architecture">architecture</label>
+                <select id="architecture"><option>AMD64</option><option>ARM64</option></select>
+              </div>
+            </div>
+          </div>
+          <div class="fieldset">
+            <div class="fieldset__legend">리소스</div>
+            <div class="grid2">
+              <div class="field"><label for="cpu_millicores">cpu_millicores</label><input id="cpu_millicores" type="number" value="500" min="1" /></div>
+              <div class="field"><label for="memory_mib">memory_mib</label><input id="memory_mib" type="number" value="512" min="1" /></div>
+            </div>
+            <div class="field" style="margin-top:10px"><label for="ephemeral_storage_mib">ephemeral_storage_mib</label><input id="ephemeral_storage_mib" type="number" value="1024" min="1" /></div>
+          </div>
+          <div class="fieldset">
+            <div class="fieldset__legend">수명 (분)</div>
+            <div class="grid2">
+              <div class="field"><label for="ttl_minutes">ttl_minutes</label><input id="ttl_minutes" type="number" value="60" min="1" /></div>
+              <div class="field"><label for="hard_timeout_minutes">hard_timeout_minutes</label><input id="hard_timeout_minutes" type="number" value="120" min="1" /></div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn--primary" type="button" id="btnCreate">인스턴스 생성 <span class="btn__key">POST</span></button>
+            <div class="actions__row">
+              <button class="btn" type="button" id="btnGet" disabled>단건 조회 <span class="btn__key">GET</span></button>
+              <button class="btn" type="button" id="btnActive">active 조회 <span class="btn__key">GET</span></button>
+            </div>
+            <button class="btn btn--danger" type="button" id="btnDelete" disabled>인스턴스 삭제 <span class="btn__key">DELETE</span></button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- RIGHT: state + split logs -->
+    <div class="col">
+      <section class="panel" aria-label="현재 인스턴스">
+        <div class="panel__head"><span class="eyebrow">state</span><h2>현재 인스턴스</h2></div>
+        <div class="panel__body" id="stateBody">
+          <div class="empty" id="stateEmpty">
+            <strong>아직 생성된 인스턴스가 없습니다</strong>
+            왼쪽에서 <b>인스턴스 생성</b>을 눌러 시작하세요.
+          </div>
+          <div id="stateFilled" hidden>
+            <div class="inst__top">
+              <span class="badge" id="badge" data-tone="idle">—</span>
+              <span class="inst__hint" id="stateHint"></span>
+            </div>
+            <div class="rail" id="rail" aria-hidden="true"></div>
+            <dl class="kv" id="kv"></dl>
+            <div class="legend">
+              <span><i style="background:var(--ok)"></i>정상 (RUNNING)</span>
+              <span><i style="background:var(--warn)"></i>전이 중</span>
+              <span><i style="background:var(--done)"></i>종료됨</span>
+              <span><i style="background:var(--bad)"></i>실패</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="응답 로그">
+        <div class="panel__head"><span class="eyebrow">log</span><h2>응답 로그</h2><span class="lane__count" style="margin-left:auto">호출별로 분리</span></div>
+        <div class="panel__body logs">
+          <div class="lane" data-lane="create">
+            <div class="lane__head"><span class="lane__tag">생성</span><span class="lane__meta">POST /api/instances</span><span class="lane__count" id="count-create">0</span></div>
+            <div class="lane__body" id="log-create"><div class="lane__empty">아직 호출 없음</div></div>
+          </div>
+          <div class="lane" data-lane="read">
+            <div class="lane__head"><span class="lane__tag">조회</span><span class="lane__meta">GET /api/instances · /active</span><span class="lane__count" id="count-read">0</span></div>
+            <div class="lane__body" id="log-read"><div class="lane__empty">아직 호출 없음</div></div>
+          </div>
+          <div class="lane" data-lane="delete">
+            <div class="lane__head"><span class="lane__tag">삭제</span><span class="lane__meta">DELETE /api/instances</span><span class="lane__count" id="count-delete">0</span></div>
+            <div class="lane__body" id="log-delete"><div class="lane__empty">아직 호출 없음</div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const API = "/api/instances";
+    const SPINE = ["REQUESTED", "SCHEDULING", "PROVISIONING", "RUNNING", "STOPPING", "CLEANED"];
+    let instanceId = null;
+    const laneState = { create: { empty: true, n: 0 }, read: { empty: true, n: 0 }, delete: { empty: true, n: 0 } };
+
+    const $ = (id) => document.getElementById(id);
+    const val = (id) => $(id).value.trim();
+    const num = (id) => Number($(id).value);
+
+    function toneOf(status) {
+      if (status === "RUNNING") return "ok";
+      if (status === "FAILED") return "bad";
+      if (["STOPPED", "CLEANED", "EXPIRED"].includes(status)) return "done";
+      return "warn"; // REQUESTED/SCHEDULING/PROVISIONING/RESTARTING/RESETTING/STOPPING/CLEANUP_PENDING
+    }
+
+    function requestBody() {
+      return {
+        team_id: num("team_id"),
+        challenge_id: num("challenge_id"),
+        container_image: val("container_image"),
+        container_port: num("container_port"),
+        architecture: val("architecture"),
+        resource_profile: {
+          cpu_millicores: num("cpu_millicores"),
+          memory_mib: num("memory_mib"),
+          ephemeral_storage_mib: num("ephemeral_storage_mib"),
+        },
+        ttl_minutes: num("ttl_minutes"),
+        hard_timeout_minutes: num("hard_timeout_minutes"),
+      };
+    }
+
+    async function call(lane, method, path, body) {
+      let res, json;
+      try {
+        res = await fetch(path, {
+          method,
+          headers: body ? { "Content-Type": "application/json" } : undefined,
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        json = await res.json().catch(() => ({}));
+      } catch (err) {
+        pushLog(lane, method, path, 0, { error: String(err) });
+        return { ok: false, status: 0, json: null };
+      }
+      pushLog(lane, method, path, res.status, json);
+      return { ok: res.ok, status: res.status, json };
+    }
+
+    function pushLog(lane, method, path, status, json) {
+      const body = $("log-" + lane);
+      const st = laneState[lane];
+      if (st.empty) { body.innerHTML = ""; st.empty = false; }
+      st.n += 1; $("count-" + lane).textContent = st.n;
+
+      const ok = status >= 200 && status < 300;
+      const time = new Date().toLocaleTimeString("ko-KR", { hour12: false });
+      const entry = document.createElement("div");
+      entry.className = "entry";
+      const bar = document.createElement("div");
+      bar.className = "entry__bar";
+      bar.innerHTML =
+        `<span class="chip chip--method">${method}</span>` +
+        `<span class="chip chip--status" data-tone="${ok ? "ok" : "bad"}">${status || "ERR"}</span>` +
+        `<span class="entry__path"></span><span class="entry__time">${time}</span>`;
+      bar.querySelector(".entry__path").textContent = path;
+      const pre = document.createElement("pre");
+      pre.className = "json";
+      pre.textContent = JSON.stringify(json, null, 2);
+      entry.appendChild(bar); entry.appendChild(pre);
+      body.prepend(entry);
+    }
+
+    function renderInstance(data) {
+      $("stateEmpty").hidden = true;
+      $("stateFilled").hidden = false;
+      const badge = $("badge");
+      badge.textContent = data.status;
+      badge.dataset.tone = toneOf(data.status);
+      $("stateHint").textContent = instanceId ? `id ${instanceId.slice(0, 8)}…` : "";
+
+      const rail = $("rail");
+      rail.innerHTML = "";
+      const idx = SPINE.indexOf(data.status);
+      SPINE.forEach((s, i) => {
+        const node = document.createElement("div");
+        node.className = "rail__node" + (idx >= 0 && i < idx ? " is-passed" : "") + (i === idx ? " is-current" : "");
+        if (i > 0) { const link = document.createElement("span"); link.className = "rail__link"; node.appendChild(link); }
+        const dot = document.createElement("span"); dot.className = "rail__dot"; dot.textContent = s;
+        node.appendChild(dot); rail.appendChild(node);
+      });
+
+      const rows = [
+        ["instance_id", data.instance_id],
+        ["team_id", data.team_id],
+        ["challenge_id", data.challenge_id],
+        ["service_url", data.service_url, data.service_url ? "" : "muted"],
+        ["expires_at", data.expires_at],
+        ["hard_expires_at", data.hard_expires_at],
+      ];
+      if (data.runtime_type) rows.splice(4, 0, ["runtime_type", data.runtime_type], ["region", data.region]);
+      const kv = $("kv"); kv.innerHTML = "";
+      for (const [k, v, cls] of rows) {
+        const dt = document.createElement("dt"); dt.textContent = k;
+        const dd = document.createElement("dd"); dd.textContent = (v ?? "null"); if (cls) dd.className = cls;
+        kv.appendChild(dt); kv.appendChild(dd);
+      }
+      $("btnGet").disabled = !instanceId;
+      $("btnDelete").disabled = !instanceId;
+    }
+
+    async function doCreate() {
+      const r = await call("create", "POST", API, requestBody());
+      if (r.ok && r.json?.data) { instanceId = r.json.data.instance_id; renderInstance(r.json.data); }
+    }
+    async function doGet() {
+      if (!instanceId) return;
+      const r = await call("read", "GET", `${API}/${instanceId}`);
+      if (r.ok && r.json?.data) renderInstance(r.json.data);
+    }
+    async function doActive() {
+      const r = await call("read", "GET", `${API}/active?team_id=${num("team_id")}`);
+      if (r.ok && r.json?.data) { instanceId = r.json.data.instance_id; renderInstance(r.json.data); }
+    }
+    async function doDelete() {
+      if (!instanceId) return;
+      const r = await call("delete", "DELETE", `${API}/${instanceId}`);
+      if (r.ok && r.json?.data) renderInstance(r.json.data);
+    }
+
+    async function checkHealth() {
+      const el = $("health");
+      try {
+        const res = await fetch("/actuator/health");
+        const j = await res.json();
+        const up = j.status === "UP";
+        el.dataset.up = up ? "yes" : "no";
+        $("healthText").textContent = up ? "서버 연결됨" : "서버 상태 " + j.status;
+      } catch {
+        el.dataset.up = "no";
+        $("healthText").textContent = "서버 연결 안 됨";
+      }
+    }
+
+    $("btnCreate").addEventListener("click", doCreate);
+    $("btnGet").addEventListener("click", doGet);
+    $("btnActive").addEventListener("click", doActive);
+    $("btnDelete").addEventListener("click", doDelete);
+    checkHealth();
+    setInterval(checkHealth, 10000);
+  </script>
+</body>
+</html>

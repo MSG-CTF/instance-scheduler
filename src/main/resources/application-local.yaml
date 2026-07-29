@@ -1,0 +1,6 @@
+# local 프로파일 전용 설정
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
