@@ -119,6 +119,81 @@ class InstanceCleanupServiceTest {
         assertEquals(RuntimeDeleteReason.TTL_EXPIRED, capturing.lastRequest?.reason)
     }
 
+    // 하드타임아웃에 끼인 PROVISIONING은 CLEANUP_PENDING 경유로 정리되는지 확인
+    @Test
+    fun `cleans hard timed out provisioning instance`() {
+        // given
+        val repo = TestInstanceRepository()
+        val instance = repo.save(
+            hardTimedOut(status = InstanceStatus.PROVISIONING, workloadId = "workload-1"),
+        )
+        val service = newService(repo)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+    }
+
+    // workloadId가 없으면(남은 workload) instance_id 기반 삭제로 CLEANED 되는지 확인
+    @Test
+    fun `compensates when workload id is missing`() {
+        // given
+        val repo = TestInstanceRepository()
+        val capturing = CapturingRuntimeClient()
+        val instance = repo.save(
+            hardTimedOut(status = InstanceStatus.PROVISIONING, workloadId = null),
+        )
+        val service = newService(repo, runtimeClient = capturing)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertNull(capturing.lastRequest?.runtimeWorkloadId)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, capturing.lastRequest?.reason)
+    }
+
+    // runtime 미호출 상태(SCHEDULING)는 삭제 없이 FAILED로 끝나는지 확인
+    @Test
+    fun `fails hard timed out scheduling instance without runtime call`() {
+        // given
+        val repo = TestInstanceRepository()
+        val capturing = CapturingRuntimeClient()
+        val instance = repo.save(schedulingHardTimedOut())
+        val service = newService(repo, runtimeClient = capturing)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(capturing.lastRequest)
+    }
+
+    // create 실패로 파킹된 CLEANUP_PENDING(만료 전)은 사유를 CREATE_FAILED_CLEANUP로 도출하는지 확인
+    @Test
+    fun `derives create failed reason for parked cleanup pending`() {
+        // given
+        val repo = TestInstanceRepository()
+        val capturing = CapturingRuntimeClient()
+        val instance = repo.save(
+            newInstance(status = InstanceStatus.CLEANUP_PENDING, expiresAt = NOW.plusSeconds(3600)).apply {
+                runtimeWorkloadId = null
+            },
+        )
+        val service = newService(repo, runtimeClient = capturing)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, capturing.lastRequest?.reason)
+    }
+
     private fun newService(
         repo: TestInstanceRepository,
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
@@ -149,6 +224,29 @@ class InstanceCleanupServiceTest {
             expiresAt = expiresAt,
             hardExpiresAt = NOW.plusSeconds(10800),
             cleanupRetryCount = cleanupRetryCount,
+        )
+
+    private fun hardTimedOut(status: InstanceStatus, workloadId: String?): Instance =
+        Instance(
+            teamId = 402L,
+            challengeId = 10L,
+            status = status,
+            action = InstanceAction.CREATE,
+            runtimeType = RuntimeType.KUBERNETES,
+            runtimeTargetId = "cluster-main",
+            runtimeWorkloadId = workloadId,
+            expiresAt = NOW.plusSeconds(1800),
+            hardExpiresAt = NOW.minusSeconds(60),
+        )
+
+    private fun schedulingHardTimedOut(): Instance =
+        Instance(
+            teamId = 403L,
+            challengeId = 10L,
+            status = InstanceStatus.SCHEDULING,
+            action = InstanceAction.CREATE,
+            expiresAt = NOW.plusSeconds(1800),
+            hardExpiresAt = NOW.minusSeconds(60),
         )
 
     // 삭제 요청을 붙잡아 사유를 검증하는 대역

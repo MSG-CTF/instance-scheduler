@@ -40,6 +40,11 @@ class InstanceCleanupService(
             move(instance, InstanceStatus.EXPIRED)
         }
 
+        // 전이 상태로 멈춘 채 하드타임아웃이 지난 인스턴스도 정리한다
+        if (instance.status in HARD_TIMEOUT_STATES && isExpired(instance.hardExpiresAt, now)) {
+            routeHardTimeout(instance)
+        }
+
         if (instance.status == InstanceStatus.EXPIRED) {
             instance.action = InstanceAction.CLEANUP
             move(instance, InstanceStatus.CLEANUP_PENDING)
@@ -106,5 +111,26 @@ class InstanceCleanupService(
     private fun move(instance: Instance, to: InstanceStatus) {
         transitionService.validateTransition(instance.status, to)
         instance.status = to
+    }
+
+    // runtime을 아직 안 부른 SCHEDULING은 지울 게 없어 FAILED로, workload가 남았을 수 있는 나머지는 CLEANUP_PENDING으로 보낸다
+    private fun routeHardTimeout(instance: Instance) {
+        if (instance.status == InstanceStatus.SCHEDULING) {
+            move(instance, InstanceStatus.FAILED)
+            return
+        }
+        instance.action = InstanceAction.CLEANUP
+        move(instance, InstanceStatus.CLEANUP_PENDING)
+    }
+
+    companion object {
+        // 하드타임아웃으로 정리하는 전이 상태 (RUNNING은 TTL 경로가 맡아 제외)
+        private val HARD_TIMEOUT_STATES = setOf(
+            InstanceStatus.SCHEDULING,
+            InstanceStatus.PROVISIONING,
+            InstanceStatus.RESTARTING,
+            InstanceStatus.RESETTING,
+            InstanceStatus.STOPPING,
+        )
     }
 }
