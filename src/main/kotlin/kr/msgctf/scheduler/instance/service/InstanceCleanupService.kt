@@ -125,7 +125,8 @@ class InstanceCleanupService(
 
     companion object {
         // 하드타임아웃으로 정리하는 전이 상태 (RUNNING은 TTL 경로가 맡아 제외)
-        private val HARD_TIMEOUT_STATES = setOf(
+        // 워커의 하드타임아웃 조회도 이 집합을 그대로 써서 라우팅 대상과 조회 대상이 어긋나지 않게 한다
+        internal val HARD_TIMEOUT_STATES = setOf(
             InstanceStatus.SCHEDULING,
             InstanceStatus.PROVISIONING,
             InstanceStatus.RESTARTING,

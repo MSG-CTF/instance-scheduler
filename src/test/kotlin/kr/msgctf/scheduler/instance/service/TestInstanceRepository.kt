@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.lang.reflect.Proxy
+import java.time.Instant
 import java.util.Optional
 import java.util.UUID
 import kr.msgctf.scheduler.instance.domain.Instance
@@ -35,6 +36,23 @@ class TestInstanceRepository {
                         teamId = args?.get(0) as Long,
                         statuses = args[1] as Collection<InstanceStatus>,
                     )
+                }
+                "findByStatusAndExpiresAtLessThanEqual" -> {
+                    val status = args?.get(0) as InstanceStatus
+                    val at = args[1] as Instant
+                    savedInstances.filter { it.status == status && !it.expiresAt.isAfter(at) }
+                }
+                "findByStatusInAndHardExpiresAtLessThanEqual" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val statuses = args?.get(0) as Collection<InstanceStatus>
+                    val at = args[1] as Instant
+                    savedInstances.filter { it.status in statuses && !it.hardExpiresAt.isAfter(at) }
+                }
+                "findByStatusInAndCleanupRetryCountLessThan" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val statuses = args?.get(0) as Collection<InstanceStatus>
+                    val limit = args[1] as Int
+                    savedInstances.filter { it.status in statuses && it.cleanupRetryCount < limit }
                 }
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }
