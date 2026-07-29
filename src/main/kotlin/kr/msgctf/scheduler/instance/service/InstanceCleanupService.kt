@@ -16,7 +16,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
-// 만료·실패 인스턴스 한 건을 트랜잭션 1개로 정리한다
+// 만료되거나 실패한 인스턴스 하나를 트랜잭션 1개로 정리한다
 @Service
 class InstanceCleanupService(
     private val transitionService: InstanceStateTransitionService,

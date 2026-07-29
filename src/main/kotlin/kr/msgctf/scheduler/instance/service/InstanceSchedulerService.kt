@@ -105,7 +105,9 @@ class InstanceSchedulerService(
                 ),
             )
         } catch (exception: Exception) {
-            move(instance, InstanceStatus.FAILED)
+            // runtime에 workload가 남을 수 있어 FAILED 대신 정리 대기로 커밋한다
+            instance.action = InstanceAction.CLEANUP
+            move(instance, InstanceStatus.CLEANUP_PENDING)
             throw keepFailedState(exception, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         }
 

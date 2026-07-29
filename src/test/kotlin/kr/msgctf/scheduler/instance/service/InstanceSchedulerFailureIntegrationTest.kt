@@ -41,9 +41,9 @@ class InstanceSchedulerFailureIntegrationTest {
     @Autowired
     private lateinit var instanceRepository: InstanceRepository
 
-    // runtime 일반 예외가 나도 실제 DB에 FAILED 상태가 commit되는지 확인
+    // runtime 일반 예외가 나도 실제 DB에 CLEANUP_PENDING이 commit되는지 확인
     @Test
-    fun `commits failed instance when runtime throws non scheduler exception`() {
+    fun `commits cleanup pending when runtime throws non scheduler exception`() {
         // given
         val teamId = 9001L
 
@@ -56,7 +56,7 @@ class InstanceSchedulerFailureIntegrationTest {
         val saved = instanceRepository.findAll().single { instance -> instance.teamId == teamId }
 
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
     }
 
     private fun newCommand(teamId: Long): CreateInstanceCommand =

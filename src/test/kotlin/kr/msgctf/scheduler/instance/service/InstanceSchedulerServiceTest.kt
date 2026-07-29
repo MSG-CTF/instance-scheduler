@@ -92,9 +92,9 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.CREATE, saved.action)
     }
 
-    // runtime 생성 실패 시 FAILED 상태로 끝나는지 확인
+    // runtime 생성 실패 시 CLEANUP_PENDING으로 파킹되는지 확인(남은 workload 회수 대상)
     @Test
-    fun `marks failed when runtime create fails`() {
+    fun `parks cleanup pending when runtime create fails`() {
         // given
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
@@ -112,14 +112,15 @@ class InstanceSchedulerServiceTest {
         val saved = savedInstances.single()
 
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
+        assertEquals(InstanceAction.CLEANUP, saved.action)
         assertEquals("SELF_HOSTED", saved.provider)
         assertEquals("self-hosted-1", saved.accountId)
     }
 
-    // runtime이 SchedulerException이 아닌 예외(타임아웃 등)를 던져도 행이 FAILED로 남는지 확인
+    // runtime이 SchedulerException이 아닌 예외(타임아웃 등)를 던져도 행이 CLEANUP_PENDING으로 남는지 확인
     @Test
-    fun `records failed when runtime throws non-scheduler exception`() {
+    fun `parks cleanup pending when runtime throws non-scheduler exception`() {
         // given
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
@@ -137,7 +138,7 @@ class InstanceSchedulerServiceTest {
         // then
         val saved = savedInstances.single()
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
     }
 
     // broker가 SchedulerException이 아닌 예외(커넥션 오류 등)를 던져도 행이 FAILED로 남는지 확인
