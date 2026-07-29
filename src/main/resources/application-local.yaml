@@ -4,3 +4,9 @@ springdoc:
     enabled: true
   swagger-ui:
     enabled: true
+
+scheduler:
+  cleanup:
+    enabled: true
+    fixed-delay: 30s
+    retry-limit: 5

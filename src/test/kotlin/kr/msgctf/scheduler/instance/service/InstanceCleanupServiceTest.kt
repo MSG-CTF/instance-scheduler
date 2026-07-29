@@ -235,7 +235,7 @@ class InstanceCleanupServiceTest {
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
             runtimeWorkloadId = workloadId,
-            expiresAt = NOW.plusSeconds(1800),
+            expiresAt = NOW.minusSeconds(120),
             hardExpiresAt = NOW.minusSeconds(60),
         )
 
@@ -245,7 +245,7 @@ class InstanceCleanupServiceTest {
             challengeId = 10L,
             status = InstanceStatus.SCHEDULING,
             action = InstanceAction.CREATE,
-            expiresAt = NOW.plusSeconds(1800),
+            expiresAt = NOW.minusSeconds(120),
             hardExpiresAt = NOW.minusSeconds(60),
         )
 
