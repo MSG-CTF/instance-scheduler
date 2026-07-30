@@ -7,6 +7,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import org.junit.jupiter.api.BeforeEach
@@ -15,15 +16,18 @@ class InstancePolicyServiceTest {
 
     private lateinit var instanceRepository: TestInstanceRepository
     private lateinit var transitionService: InstanceStateTransitionService
+    private lateinit var policyProperties: InstancePolicyProperties
     private lateinit var instancePolicyService: InstancePolicyService
 
     @BeforeEach
     fun setUp() {
         instanceRepository = TestInstanceRepository()
         transitionService = InstanceStateTransitionService()
+        policyProperties = InstancePolicyProperties()
         instancePolicyService = InstancePolicyService(
             instanceRepository = instanceRepository.repository,
             transitionService = transitionService,
+            policyProperties = policyProperties,
         )
     }
 
@@ -102,6 +106,43 @@ class InstancePolicyServiceTest {
         // when
         val exception = assertFailsWith<SchedulerException> {
             instancePolicyService.validateTtl(ttlMinutes = 0, hardTimeoutMinutes = 120)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+    }
+
+    // hard timeout이 상한을 넘으면 create 거절 확인
+    @Test
+    fun `rejects create when hard timeout exceeds max`() {
+        // given
+        val max = policyProperties.maxHardTimeoutMinutes
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTtl(ttlMinutes = 100, hardTimeoutMinutes = max + 1)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+    }
+
+    // hard timeout이 상한과 같으면 create 허용 확인
+    @Test
+    fun `allows create when hard timeout equals max`() {
+        // given
+        val max = policyProperties.maxHardTimeoutMinutes
+
+        // when & then (예외가 발생하지 않아야 한다)
+        instancePolicyService.validateTtl(ttlMinutes = 100, hardTimeoutMinutes = max)
+    }
+
+    // 사실상 안 죽는 값(거대한 hard timeout)은 create 거절 확인
+    @Test
+    fun `rejects create when hard timeout is absurdly large`() {
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTtl(ttlMinutes = 1, hardTimeoutMinutes = 1_000_000_000L)
         }
 
         // then

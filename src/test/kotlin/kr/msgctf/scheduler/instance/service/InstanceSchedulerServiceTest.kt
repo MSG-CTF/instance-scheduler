@@ -18,6 +18,7 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -365,6 +366,7 @@ class InstanceSchedulerServiceTest {
             instancePolicyService = InstancePolicyService(
                 instanceRepository = instanceRepository,
                 transitionService = transitionService,
+                policyProperties = InstancePolicyProperties(),
             ),
             transitionService = transitionService,
             instanceRepository = instanceRepository,

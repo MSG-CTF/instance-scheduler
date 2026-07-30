@@ -9,3 +9,8 @@ springdoc:
     enabled: false
   swagger-ui:
     enabled: false
+
+scheduler:
+  instance-policy:
+    # hard timeout 상한 기본값
+    max-hard-timeout-minutes: 360
