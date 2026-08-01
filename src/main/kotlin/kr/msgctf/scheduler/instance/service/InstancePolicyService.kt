@@ -14,14 +14,23 @@ class InstancePolicyService(
     private val policyProperties: InstancePolicyProperties,
 ) {
 
-    // ttl은 1분 이상이면서 hard timeout을 넘을 수 없고, hard timeout은 상한을 넘을 수 없다
+    // ttl은 1분 이상이면서 hard timeout을 넘을 수 없다
+    // hard timeout은 설정된 상한을 넘을 수 없다
     // 상한이 없으면 하드타임아웃 정리가 언제 발동할지를 요청자가 정하게 되어 안전망이 무력해진다
+    // 두 실패는 원인이 다르므로 에러코드를 나눠 호출자가 구분할 수 있게 한다
     fun validateTtl(ttlMinutes: Long, hardTimeoutMinutes: Long) {
-        val maxHardTimeout = policyProperties.maxHardTimeoutMinutes
-        if (ttlMinutes < 1 || ttlMinutes > hardTimeoutMinutes || hardTimeoutMinutes > maxHardTimeout) {
+        if (ttlMinutes < 1 || ttlMinutes > hardTimeoutMinutes) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.INVALID_TTL_RANGE,
-                adminDetail = "ttlMinutes=$ttlMinutes, hardTimeoutMinutes=$hardTimeoutMinutes, maxHardTimeoutMinutes=$maxHardTimeout",
+                adminDetail = "ttlMinutes=$ttlMinutes, hardTimeoutMinutes=$hardTimeoutMinutes",
+            )
+        }
+
+        val maxHardTimeout = policyProperties.maxHardTimeoutMinutes
+        if (hardTimeoutMinutes > maxHardTimeout) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.HARD_TIMEOUT_LIMIT_EXCEEDED,
+                adminDetail = "hardTimeoutMinutes=$hardTimeoutMinutes, maxHardTimeoutMinutes=$maxHardTimeout",
             )
         }
     }

@@ -124,7 +124,7 @@ class InstancePolicyServiceTest {
         }
 
         // then
-        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+        assertEquals(SchedulerErrorCode.HARD_TIMEOUT_LIMIT_EXCEEDED, exception.errorCode)
     }
 
     // hard timeout이 상한과 같으면 create 허용 확인
@@ -146,7 +146,7 @@ class InstancePolicyServiceTest {
         }
 
         // then
-        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+        assertEquals(SchedulerErrorCode.HARD_TIMEOUT_LIMIT_EXCEEDED, exception.errorCode)
     }
 
     // inactive 상태는 active 조회 대상에 포함되지 않는지 확인

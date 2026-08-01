@@ -388,7 +388,7 @@
       entry.appendChild(pre);
     }
 
-    // JSON을 키/문자열/숫자/불리언/null 색으로 구분해 보여준다
+    // JSON을 키, 문자열, 숫자, 불리언, null 색으로 구분해 보여준다
     function highlightJson(obj) {
       const json = JSON.stringify(obj, null, 2)
         .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

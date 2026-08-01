@@ -354,10 +354,39 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.DELETE, runningInstance.action)
     }
 
+    // 상한을 크게 열어 validateTtl을 통과해도 만료 시각 곱셈이 Long을 넘으면 가드가 거절한다
+    // 이 가드를 걷으면 ArithmeticException이 그대로 새서 이 테스트가 실패한다
+    @Test
+    fun `rejects create when ttl overflows the timestamp even under a raised cap`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            policyProperties = InstancePolicyProperties(maxHardTimeoutMinutes = Long.MAX_VALUE),
+        )
+        val command = newCommand(
+            teamId = 202L,
+            ttlMinutes = Long.MAX_VALUE,
+            hardTimeoutMinutes = Long.MAX_VALUE,
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(command)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+        // 시각 계산에서 막혔으므로 저장까지 가면 안 된다
+        assertEquals(0, savedInstances.size)
+    }
+
     private fun newService(
         instanceRepository: InstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
+        policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
     ): InstanceSchedulerService {
         val transitionService = InstanceStateTransitionService()
         val clock = fixedClock()
@@ -366,7 +395,7 @@ class InstanceSchedulerServiceTest {
             instancePolicyService = InstancePolicyService(
                 instanceRepository = instanceRepository,
                 transitionService = transitionService,
-                policyProperties = InstancePolicyProperties(),
+                policyProperties = policyProperties,
             ),
             transitionService = transitionService,
             instanceRepository = instanceRepository,

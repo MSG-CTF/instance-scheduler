@@ -305,32 +305,25 @@ class InstanceCommandIntegrationTest {
             }
     }
 
-    // 만료 시각으로 표현할 수 없는 ttl은 거절한다
+    // 허용 상한을 넘는 하드타임아웃은 거절한다
+    // 만료 시각으로 표현할 수 없는 큰 값의 곱셈 오버플로 가드는 InstanceSchedulerServiceTest에서 단위로 검증한다
     @Test
-    fun `create api rejects ttl that cannot be represented`() {
-        val unrepresentable = mapOf(
-            700L to "1000000000000000",
-            710L to "9223372036854775807",
-        )
+    fun `create api rejects hard timeout beyond the allowed maximum`() {
+        // given
+        val requestBody = createRequestBody(teamId = 700L, challengeId = 10L)
+            .replace("\"hard_timeout_minutes\": 180", "\"hard_timeout_minutes\": 100000")
 
-        for ((teamId, minutes) in unrepresentable) {
-            // given
-            val requestBody = createRequestBody(teamId = teamId, challengeId = 10L)
-                .replace("\"ttl_minutes\": 120", "\"ttl_minutes\": $minutes")
-                .replace("\"hard_timeout_minutes\": 180", "\"hard_timeout_minutes\": $minutes")
-
-            // when & then
-            mockMvc.post("/api/instances") {
-                contentType = MediaType.APPLICATION_JSON
-                content = requestBody
-            }.andExpect {
-                status { isBadRequest() }
-                jsonPath("$.code") { value("INVALID_TTL_RANGE") }
-            }
-
-            // then: 거절됐으므로 인스턴스가 남으면 안 된다
-            assertEquals(0, instanceRepository.count())
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("HARD_TIMEOUT_LIMIT_EXCEEDED") }
         }
+
+        // then: 거절됐으므로 인스턴스가 남으면 안 된다
+        assertEquals(0, instanceRepository.count())
     }
 
     // 지원하지 않는 Content-Type
