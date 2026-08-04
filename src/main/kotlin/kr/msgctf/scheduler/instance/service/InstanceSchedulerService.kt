@@ -178,7 +178,9 @@ class InstanceSchedulerService(
             )
         }
 
-        val extended = instance.expiresAt.plusMinutesWithinHardTimeout(
+        // 이미 만료 시각이 지난 인스턴스는 현재 시각을 기준으로 잡아 연장 직후 재만료를 막는다
+        val base = maxOf(clock.instant(), instance.expiresAt)
+        val extended = base.plusMinutesWithinHardTimeout(
             minutes = command.extendMinutes,
             hardExpiresAt = instance.hardExpiresAt,
             instanceId = command.instanceId,

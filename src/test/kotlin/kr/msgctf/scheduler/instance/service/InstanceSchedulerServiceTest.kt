@@ -482,6 +482,34 @@ class InstanceSchedulerServiceTest {
         assertEquals(originalExpiresAt, runningInstance.expiresAt)
     }
 
+    // 이미 만료 시각이 지난 RUNNING 인스턴스는 현재 시각을 기준으로 연장해 즉시 재만료를 막는지 확인
+    @Test
+    fun `extends an already expired running instance from now`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val expiredInstance = instanceRepository.save(
+            Instance(
+                teamId = 320L,
+                challengeId = 10L,
+                status = InstanceStatus.RUNNING,
+                action = InstanceAction.CREATE,
+                expiresAt = Instant.parse("2026-07-04T12:00:00Z").minusSeconds(3600),
+                hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(3600),
+            ),
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.extendInstance(
+            ExtendInstanceCommand(instanceId = expiredInstance.instanceId, extendMinutes = 30),
+        )
+
+        // then
+        val expected = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(1800)
+        assertEquals(expected, result.expiresAt)
+        assertEquals(expected, expiredInstance.expiresAt)
+    }
+
     // 상한을 크게 열어 validateTtl을 통과해도 만료 시각 곱셈이 Long을 넘으면 가드가 거절한다
     // 이 가드를 걷으면 ArithmeticException이 그대로 새서 이 테스트가 실패한다
     @Test
