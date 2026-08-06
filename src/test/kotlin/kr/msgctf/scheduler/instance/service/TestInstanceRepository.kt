@@ -48,11 +48,10 @@ class TestInstanceRepository {
                     val at = args[1] as Instant
                     savedInstances.filter { it.status in statuses && !it.hardExpiresAt.isAfter(at) }
                 }
-                "findByStatusInAndCleanupRetryCountLessThan" -> {
+                "findByStatusIn" -> {
                     @Suppress("UNCHECKED_CAST")
-                    val statuses = args?.get(0) as Collection<InstanceStatus>
-                    val limit = args[1] as Int
-                    savedInstances.filter { it.status in statuses && it.cleanupRetryCount < limit }
+                    val statuses = args?.first() as Collection<InstanceStatus>
+                    savedInstances.filter { it.status in statuses }
                 }
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }

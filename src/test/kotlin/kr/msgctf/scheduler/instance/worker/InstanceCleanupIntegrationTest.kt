@@ -6,7 +6,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
-import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -42,9 +41,6 @@ class InstanceCleanupIntegrationTest {
 
     @Autowired
     private lateinit var cleanupService: InstanceCleanupService
-
-    @Autowired
-    private lateinit var cleanupProperties: CleanupProperties
 
     @Autowired
     private lateinit var runtimeClient: SwitchableRuntimeClient
@@ -90,7 +86,6 @@ class InstanceCleanupIntegrationTest {
         InstanceCleanupWorker(
             instanceRepository = instanceRepository,
             cleanupService = cleanupService,
-            cleanupProperties = cleanupProperties,
             clock = Clock.systemUTC(),
         )
 

@@ -35,9 +35,6 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
         hardExpiresAt: Instant,
     ): List<Instance>
 
-    // EXPIRED/CLEANUP_PENDING 중 재시도 한도 미만인 대상을 조회한다
-    fun findByStatusInAndCleanupRetryCountLessThan(
-        statuses: Collection<InstanceStatus>,
-        cleanupRetryCount: Int,
-    ): List<Instance>
+    // EXPIRED/CLEANUP_PENDING 정리 재시도 대상을 조회한다
+    fun findByStatusIn(statuses: Collection<InstanceStatus>): List<Instance>
 }

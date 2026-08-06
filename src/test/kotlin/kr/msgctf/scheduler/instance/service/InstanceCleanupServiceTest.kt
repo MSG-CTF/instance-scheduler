@@ -72,6 +72,26 @@ class InstanceCleanupServiceTest {
         assertEquals(5, instance.cleanupRetryCount)
     }
 
+    // 한도를 낮춰 이미 한도를 넘긴 CLEANUP_PENDING이 새 시도 없이 FAILED로 수렴하는지 확인
+    @Test
+    fun `parks over limit cleanup pending without delete attempt`() {
+        // given
+        val repo = TestInstanceRepository()
+        val capturing = CapturingRuntimeClient()
+        val instance = repo.save(
+            newInstance(status = InstanceStatus.CLEANUP_PENDING, expiresAt = NOW.minusSeconds(60), cleanupRetryCount = 5),
+        )
+        val service = newService(repo, runtimeClient = capturing, retryLimit = 3)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(5, instance.cleanupRetryCount)
+        assertNull(capturing.lastRequest)
+    }
+
     // 아직 만료되지 않은 RUNNING은 상태가 그대로인지 확인
     @Test
     fun `keeps running instance when not expired`() {

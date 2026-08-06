@@ -17,7 +17,7 @@ import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 
 class InstanceCleanupWorkerTest {
 
-    // TTL 만료, 하드타임아웃, 정리 대기 대상을 모두 넘기고 아직 만료 전 인스턴스는 건너뛰는지 확인
+    // TTL 만료, 하드타임아웃, 정리 대기(한도 초과 포함) 대상을 모두 넘기고 아직 만료 전 인스턴스는 건너뛰는지 확인
     @Test
     fun `delegates every sweep target to the cleanup service`() {
         // given
@@ -25,6 +25,8 @@ class InstanceCleanupWorkerTest {
         val ttlExpired = repo.save(running(expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600)))
         val hardTimedOut = repo.save(provisioning(hardExpiresAt = NOW.minusSeconds(60)))
         val pending = repo.save(cleanupPending())
+        // 한도를 넘긴 행도 조회에서 거르지 않고 넘겨야 서비스가 FAILED로 보낼 수 있다
+        val overLimit = repo.save(cleanupPending(teamId = 704L, retryCount = 9))
         val fresh = repo.save(running(expiresAt = NOW.plusSeconds(3600), hardExpiresAt = NOW.plusSeconds(7200)))
         val service = RecordingCleanupService(repo)
         val worker = newWorker(repo, service)
@@ -34,7 +36,7 @@ class InstanceCleanupWorkerTest {
 
         // then
         assertEquals(
-            setOf(ttlExpired.instanceId, hardTimedOut.instanceId, pending.instanceId),
+            setOf(ttlExpired.instanceId, hardTimedOut.instanceId, pending.instanceId, overLimit.instanceId),
             service.cleaned.toSet(),
         )
         assertTrue(fresh.instanceId !in service.cleaned)
@@ -62,7 +64,6 @@ class InstanceCleanupWorkerTest {
         InstanceCleanupWorker(
             instanceRepository = repo.repository,
             cleanupService = service,
-            cleanupProperties = CleanupProperties(retryLimit = 5),
             clock = Clock.fixed(NOW, ZoneOffset.UTC),
         )
 
@@ -78,10 +79,11 @@ class InstanceCleanupWorkerTest {
             expiresAt = hardExpiresAt.plusSeconds(3600), hardExpiresAt = hardExpiresAt,
         )
 
-    private fun cleanupPending(): Instance =
+    private fun cleanupPending(teamId: Long = 703L, retryCount: Int = 0): Instance =
         Instance(
-            teamId = 703L, challengeId = 10L, status = InstanceStatus.CLEANUP_PENDING,
-            runtimeWorkloadId = "workload-3", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
+            teamId = teamId, challengeId = 10L, status = InstanceStatus.CLEANUP_PENDING,
+            runtimeWorkloadId = "workload-$teamId", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
+            cleanupRetryCount = retryCount,
         )
 
     // cleanup 호출만 기록하는 대역

@@ -53,6 +53,16 @@ class InstanceCleanupService(
         }
 
         if (instance.status == InstanceStatus.CLEANUP_PENDING) {
+            // 한도 도달 판정은 워커의 조회 필터가 아니라 여기서 한다
+            // 조회 필터에만 두면 한도를 낮췄을 때 이미 한도를 넘긴 행이 조회에서 빠져 영원히 CLEANUP_PENDING으로 남는다
+            if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
+                move(instance, InstanceStatus.FAILED)
+                log.error(
+                    "instance cleanup gave up: instanceId={}, retries={}",
+                    instance.instanceId, instance.cleanupRetryCount,
+                )
+                return
+            }
             deleteWorkload(instance, reason)
         }
     }

@@ -168,23 +168,23 @@ class InstanceRepositoryTest {
     }
 
     @Test
-    fun `finds retry targets under limit`() {
-        // EXPIRED/CLEANUP_PENDING 중 retryCount < limit 인 것만 잡는지 확인
+    fun `finds cleanup retry targets regardless of retry count`() {
+        // EXPIRED/CLEANUP_PENDING 이면 재시도 횟수와 무관하게 잡고, 다른 상태는 제외하는지 확인
         // given
         val now = Instant.parse("2026-07-04T12:00:00Z")
         val retryable = instanceRepository.saveAndFlush(
             pendingInstance(teamId = 15L, retryCount = 4, expiresAt = now),
         )
-        instanceRepository.saveAndFlush(pendingInstance(teamId = 16L, retryCount = 5, expiresAt = now))
+        val overLimit = instanceRepository.saveAndFlush(pendingInstance(teamId = 16L, retryCount = 5, expiresAt = now))
+        instanceRepository.saveAndFlush(runningInstance(teamId = 17L, expiresAt = now.plusSeconds(60)))
 
         // when
-        val found = instanceRepository.findByStatusInAndCleanupRetryCountLessThan(
+        val found = instanceRepository.findByStatusIn(
             listOf(InstanceStatus.EXPIRED, InstanceStatus.CLEANUP_PENDING),
-            5,
         )
 
         // then
-        assertEquals(listOf(retryable.instanceId), found.map { it.instanceId })
+        assertEquals(setOf(retryable.instanceId, overLimit.instanceId), found.map { it.instanceId }.toSet())
     }
 
     private fun newInstance(

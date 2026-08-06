@@ -2,7 +2,6 @@ package kr.msgctf.scheduler.instance.worker
 
 import java.time.Clock
 import java.util.UUID
-import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
@@ -18,7 +17,6 @@ import org.springframework.stereotype.Component
 class InstanceCleanupWorker(
     private val instanceRepository: InstanceRepository,
     private val cleanupService: InstanceCleanupService,
-    private val cleanupProperties: CleanupProperties,
     private val clock: Clock,
 ) {
 
@@ -41,13 +39,13 @@ class InstanceCleanupWorker(
         val ttlExpired = instanceRepository.findByStatusAndExpiresAtLessThanEqual(InstanceStatus.RUNNING, now)
         val hardTimedOut =
             instanceRepository.findByStatusInAndHardExpiresAtLessThanEqual(InstanceCleanupService.HARD_TIMEOUT_STATES, now)
-        val retryTargets =
-            instanceRepository.findByStatusInAndCleanupRetryCountLessThan(RETRY_STATES, cleanupProperties.retryLimit)
+        val retryTargets = instanceRepository.findByStatusIn(RETRY_STATES)
         return (ttlExpired + hardTimedOut + retryTargets).mapTo(LinkedHashSet()) { it.instanceId }
     }
 
     companion object {
-        // 삭제 실패로 재시도가 남은 상태
+        // 삭제 실패로 정리가 남은 상태
+        // 한도를 넘긴 행도 같이 넘겨야 서비스가 FAILED로 정리할 수 있다
         private val RETRY_STATES = listOf(InstanceStatus.EXPIRED, InstanceStatus.CLEANUP_PENDING)
     }
 }
