@@ -388,10 +388,12 @@ class InstanceCommandIntegrationTest {
     private fun createRequestBody(
         teamId: Long,
         challengeId: Long,
+        userId: UUID = UUID.randomUUID(),
     ): String =
         """
             {
               "team_id": $teamId,
+              "user_id": "$userId",
               "challenge_id": $challengeId,
               "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
               "container_port": 8080,

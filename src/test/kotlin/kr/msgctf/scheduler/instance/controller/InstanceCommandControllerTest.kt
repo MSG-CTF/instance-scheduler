@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.controller
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.broker.Architecture
@@ -136,6 +137,7 @@ class InstanceCommandControllerTest {
     private fun newCreateRequest(): CreateInstanceRequest =
         CreateInstanceRequest(
             teamId = 1L,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
@@ -152,6 +154,7 @@ class InstanceCommandControllerTest {
     private fun newRunningInstance(): Instance =
         Instance(
             teamId = 1L,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,

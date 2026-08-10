@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.instance.controller
 
 import java.time.Instant
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -65,6 +66,7 @@ class InstanceQueryControllerTest {
     private fun newRunningInstance(teamId: Long): Instance =
         Instance(
             teamId = teamId,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,

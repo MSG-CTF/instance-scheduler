@@ -98,6 +98,7 @@ class InstanceQueryIntegrationTest {
         val instance = instanceRepository.save(
             Instance(
                 teamId = 400L,
+                userId = UUID.randomUUID(),
                 challengeId = 10L,
                 status = InstanceStatus.FAILED,
                 expiresAt = Instant.parse("2026-07-04T14:00:00Z"),
@@ -264,6 +265,7 @@ class InstanceQueryIntegrationTest {
             content = """
                 {
                   "team_id": $teamId,
+                  "user_id": "${UUID.randomUUID()}",
                   "challenge_id": 10,
                   "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
                   "container_port": 8080,

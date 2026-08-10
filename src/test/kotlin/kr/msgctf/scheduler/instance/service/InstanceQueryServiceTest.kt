@@ -128,9 +128,10 @@ class InstanceQueryServiceTest {
             transitionService = InstanceStateTransitionService(),
         )
 
-    private fun newRunningInstance(teamId: Long): Instance =
+    private fun newRunningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,

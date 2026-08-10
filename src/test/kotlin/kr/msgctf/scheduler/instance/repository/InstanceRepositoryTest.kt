@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.instance.repository
 
 import java.time.Instant
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -11,6 +12,7 @@ import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -30,6 +32,14 @@ class InstanceRepositoryTest {
 
     @Autowired
     private lateinit var instanceEventRepository: InstanceEventRepository
+
+    // 상태만으로 거르는 조회 테스트가 다른 테스트가 남긴 행과 섞이지 않도록 매 테스트 전 비운다
+    // event가 instance를 참조하므로 instance보다 먼저 지운다
+    @BeforeEach
+    fun setUp() {
+        instanceEventRepository.deleteAll()
+        instanceRepository.deleteAll()
+    }
 
     @Test
     fun `saves and finds instance`() {
@@ -51,15 +61,37 @@ class InstanceRepositoryTest {
     }
 
     @Test
-    fun `prevents more than one active instance per team`() {
-        // 같은 팀에 active 인스턴스가 2개 생기지 않는지 확인
+    fun `prevents more than one converging instance per user`() {
+        // 같은 user에 한도 상태 인스턴스가 2개 생기지 않는지 확인
         // given
-        instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 10L))
+        val userId = UUID.randomUUID()
+        instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 10L, userId = userId))
 
         // when & then
         assertThrows<DataIntegrityViolationException> {
-            instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 20L))
+            instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 20L, userId = userId))
         }
+    }
+
+    @Test
+    fun `allows new instance while previous one is being cleaned`() {
+        // 지워지는 중(CLEANUP_PENDING)인 행은 새 생성을 막지 않는지 확인
+        // given
+        val userId = UUID.randomUUID()
+        instanceRepository.saveAndFlush(
+            newInstance(teamId = 2L, challengeId = 10L, userId = userId, status = InstanceStatus.CLEANUP_PENDING),
+        )
+
+        // when & then (예외가 발생하지 않아야 한다)
+        instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 20L, userId = userId))
+    }
+
+    @Test
+    fun `allows two users of the same team`() {
+        // 같은 팀이라도 user가 다르면 각자 1개씩 가질 수 있는지 확인
+        // when & then (예외가 발생하지 않아야 한다)
+        instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 10L))
+        instanceRepository.saveAndFlush(newInstance(teamId = 2L, challengeId = 20L))
     }
 
     @Test
@@ -191,11 +223,13 @@ class InstanceRepositoryTest {
         teamId: Long,
         challengeId: Long,
         status: InstanceStatus = InstanceStatus.REQUESTED,
+        userId: UUID = UUID.randomUUID(),
     ): Instance {
         val now = Instant.parse("2026-06-29T00:00:00Z")
 
         return Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = challengeId,
             status = status,
             expiresAt = now.plusSeconds(7200),
@@ -203,9 +237,10 @@ class InstanceRepositoryTest {
         )
     }
 
-    private fun runningInstance(teamId: Long, expiresAt: Instant): Instance =
+    private fun runningInstance(teamId: Long, expiresAt: Instant, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             runtimeWorkloadId = "workload-$teamId",
@@ -213,18 +248,29 @@ class InstanceRepositoryTest {
             hardExpiresAt = expiresAt.plusSeconds(3600),
         )
 
-    private fun provisioningInstance(teamId: Long, hardExpiresAt: Instant): Instance =
+    private fun provisioningInstance(
+        teamId: Long,
+        hardExpiresAt: Instant,
+        userId: UUID = UUID.randomUUID(),
+    ): Instance =
         Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             status = InstanceStatus.PROVISIONING,
             expiresAt = hardExpiresAt.plusSeconds(3600),
             hardExpiresAt = hardExpiresAt,
         )
 
-    private fun pendingInstance(teamId: Long, retryCount: Int, expiresAt: Instant): Instance =
+    private fun pendingInstance(
+        teamId: Long,
+        retryCount: Int,
+        expiresAt: Instant,
+        userId: UUID = UUID.randomUUID(),
+    ): Instance =
         Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             status = InstanceStatus.CLEANUP_PENDING,
             runtimeWorkloadId = "workload-$teamId",

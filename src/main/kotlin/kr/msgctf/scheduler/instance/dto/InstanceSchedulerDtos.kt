@@ -11,6 +11,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 // create 서비스에 넘기는 요청 값
 data class CreateInstanceCommand(
     val teamId: Long,
+    val userId: UUID,
     val challengeId: Long,
     val containerImage: String,
     val containerPort: Int,

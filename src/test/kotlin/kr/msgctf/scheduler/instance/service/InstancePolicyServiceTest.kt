@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.time.Instant
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -163,11 +164,13 @@ class InstancePolicyServiceTest {
         teamId: Long,
         challengeId: Long,
         status: InstanceStatus,
+        userId: UUID = UUID.randomUUID(),
     ): Instance {
         val now = Instant.parse("2026-06-29T00:00:00Z")
 
         return Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = challengeId,
             status = status,
             expiresAt = now.plusSeconds(7200),

@@ -25,6 +25,8 @@ data class CreateInstanceRequest(
     @field:Positive
     val teamId: Long,
 
+    val userId: UUID,
+
     @field:Positive
     val challengeId: Long,
 
@@ -51,6 +53,7 @@ data class CreateInstanceRequest(
     fun toCommand(): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
+            userId = userId,
             challengeId = challengeId,
             containerImage = containerImage,
             containerPort = containerPort,

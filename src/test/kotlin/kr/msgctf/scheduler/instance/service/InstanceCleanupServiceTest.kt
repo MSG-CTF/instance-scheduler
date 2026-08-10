@@ -4,6 +4,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -231,9 +232,11 @@ class InstanceCleanupServiceTest {
         status: InstanceStatus,
         expiresAt: Instant,
         cleanupRetryCount: Int = 0,
+        userId: UUID = UUID.randomUUID(),
     ): Instance =
         Instance(
             teamId = 401L,
+            userId = userId,
             challengeId = 10L,
             status = status,
             action = if (status == InstanceStatus.RUNNING) InstanceAction.CREATE else InstanceAction.CLEANUP,
@@ -249,6 +252,7 @@ class InstanceCleanupServiceTest {
     private fun hardTimedOut(status: InstanceStatus, workloadId: String?): Instance =
         Instance(
             teamId = 402L,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             status = status,
             action = InstanceAction.CREATE,
@@ -262,6 +266,7 @@ class InstanceCleanupServiceTest {
     private fun schedulingHardTimedOut(): Instance =
         Instance(
             teamId = 403L,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             status = InstanceStatus.SCHEDULING,
             action = InstanceAction.CREATE,

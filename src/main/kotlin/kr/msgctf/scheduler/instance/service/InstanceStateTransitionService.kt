@@ -43,6 +43,8 @@ class InstanceStateTransitionService {
                 InstanceStatus.RESETTING,
                 InstanceStatus.STOPPING,
                 InstanceStatus.EXPIRED,
+                // 같은 user가 재생성하면 이전 RUNNING 행을 교체 표시만 하고 정리 대기로 넘긴다
+                InstanceStatus.CLEANUP_PENDING,
             ),
             InstanceStatus.RESTARTING to setOf(
                 InstanceStatus.RUNNING,
@@ -66,7 +68,7 @@ class InstanceStateTransitionService {
             ),
         )
 
-        // 새 create를 막는 진행 중 상태
+        // 새 create를 막는, RUNNING으로 수렴 중인 상태
         private val activeStatuses = setOf(
             InstanceStatus.REQUESTED,
             InstanceStatus.SCHEDULING,
@@ -74,8 +76,6 @@ class InstanceStateTransitionService {
             InstanceStatus.RUNNING,
             InstanceStatus.RESTARTING,
             InstanceStatus.RESETTING,
-            InstanceStatus.STOPPING,
-            InstanceStatus.CLEANUP_PENDING,
         )
     }
 }

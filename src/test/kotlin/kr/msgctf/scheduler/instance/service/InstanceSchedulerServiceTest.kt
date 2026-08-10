@@ -40,6 +40,8 @@ import org.springframework.dao.DataIntegrityViolationException
 
 class InstanceSchedulerServiceTest {
 
+    private val testUserId: UUID = UUID.fromString("018f3f1e-0000-7a91-a30b-630000000001")
+
     // create 요청이 RUNNING 인스턴스를 만드는지 확인
     @Test
     fun `creates running instance`() {
@@ -67,6 +69,7 @@ class InstanceSchedulerServiceTest {
         assertEquals("https://team-201.local", saved.serviceUrl)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200), saved.expiresAt)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800), saved.hardExpiresAt)
+        assertEquals(testUserId, saved.userId)
     }
 
     // broker 후보가 없으면 FAILED 상태로 끝나는지 확인
@@ -306,6 +309,7 @@ class InstanceSchedulerServiceTest {
         val instance = instanceRepository.save(
             Instance(
                 teamId = 302L,
+                userId = testUserId,
                 challengeId = 10L,
                 status = InstanceStatus.RUNNING,
                 action = InstanceAction.CREATE,
@@ -410,9 +414,11 @@ class InstanceSchedulerServiceTest {
         teamId: Long,
         ttlMinutes: Long = 120,
         hardTimeoutMinutes: Long = 180,
+        userId: UUID = testUserId,
     ): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
@@ -462,6 +468,7 @@ class InstanceSchedulerServiceTest {
     private fun newRunningInstance(): Instance =
         Instance(
             teamId = 301L,
+            userId = testUserId,
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,

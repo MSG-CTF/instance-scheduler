@@ -48,6 +48,7 @@ class InstanceSchedulerService(
         val instance = saveRequestedInstance(
             Instance(
                 teamId = command.teamId,
+                userId = command.userId,
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,

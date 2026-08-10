@@ -27,6 +27,9 @@ class Instance(
     @Column(name = "team_id", nullable = false)
     val teamId: Long,
 
+    @Column(name = "user_id", nullable = false, updatable = false)
+    val userId: UUID,
+
     @Column(name = "challenge_id", nullable = false)
     val challengeId: Long,
 

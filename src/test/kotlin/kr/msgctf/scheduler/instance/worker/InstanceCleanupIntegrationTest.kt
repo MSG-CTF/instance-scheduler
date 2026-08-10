@@ -2,6 +2,7 @@ package kr.msgctf.scheduler.instance.worker
 
 import java.time.Clock
 import java.time.Instant
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.TestcontainersConfiguration
@@ -93,6 +94,7 @@ class InstanceCleanupIntegrationTest {
         val now = Instant.now()
         return Instance(
             teamId = teamId,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
