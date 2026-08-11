@@ -215,6 +215,25 @@ class InstanceCleanupServiceTest {
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, capturing.lastRequest?.reason)
     }
 
+    // 교체나 사용자 삭제가 남긴 행(action=DELETE)은 만료 전이라도 사용자 요청 사유로 지우는지 확인
+    @Test
+    fun `classifies delete leftover as user requested`() {
+        // given
+        val repo = TestInstanceRepository()
+        val capturing = CapturingRuntimeClient()
+        val instance = repo.save(
+            newInstance(status = InstanceStatus.CLEANUP_PENDING, expiresAt = NOW.plusSeconds(3600))
+                .apply { action = InstanceAction.DELETE },
+        )
+        val service = newService(repo, runtimeClient = capturing)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, capturing.lastRequest?.reason)
+    }
+
     private fun newService(
         repo: TestInstanceRepository,
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
