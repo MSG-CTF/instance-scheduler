@@ -121,8 +121,6 @@ class InstanceCommandControllerTest {
 
         return InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
-                instanceRepository = repository.repository,
-                transitionService = transitionService,
                 policyProperties = InstancePolicyProperties(),
             ),
             transitionService = transitionService,

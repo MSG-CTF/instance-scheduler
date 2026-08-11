@@ -53,6 +53,14 @@ class TestInstanceRepository {
                     val statuses = args?.first() as Collection<InstanceStatus>
                     savedInstances.filter { it.status in statuses }
                 }
+                // 단위 테스트에는 동시성이 없어 잠금 없이 같은 행을 돌려준다
+                "findByUserIdAndStatusInForUpdate" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val userId = args?.get(0) as UUID
+                    val statuses = args[1] as Collection<InstanceStatus>
+                    savedInstances.firstOrNull { it.userId == userId && it.status in statuses }
+                }
+                "flush" -> null
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }
         } as InstanceRepository

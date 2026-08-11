@@ -7,6 +7,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
@@ -192,6 +193,58 @@ class InstanceSchedulerServiceTest {
         assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
         assertEquals("teamId=204, reason=active instance unique constraint", exception.adminDetail)
         assertEquals(0, brokerClient.callCount)
+    }
+
+    // 같은 user의 RUNNING 인스턴스가 있으면 교체하고 이전 id를 알려주는지 확인
+    @Test
+    fun `replaces own running instance on create`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+        assertEquals(InstanceAction.DELETE, previous.action)
+        assertEquals(previous.instanceId, result.replacedInstanceId)
+        assertEquals(InstanceStatus.RUNNING, result.status)
+    }
+
+    // 이전 인스턴스가 아직 만들어지는 중이면 교체하지 않고 거절하는지 확인
+    @Test
+    fun `rejects create while previous instance is in transition`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance().apply { status = InstanceStatus.PROVISIONING })
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
+        assertEquals(InstanceStatus.PROVISIONING, previous.status)
+    }
+
+    // 이전 인스턴스가 지워지는 중이면 한도에 세지 않고 일반 생성하는지 확인
+    @Test
+    fun `creates plainly when previous instance is already being cleaned`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        instanceRepository.save(newRunningInstance().apply { status = InstanceStatus.CLEANUP_PENDING })
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+
+        // then
+        assertNull(result.replacedInstanceId)
+        assertEquals(InstanceStatus.RUNNING, result.status)
     }
 
     // ttl이 hard timeout보다 크면 아무것도 저장/호출하지 않고 거절하는지 확인
@@ -397,8 +450,6 @@ class InstanceSchedulerServiceTest {
 
         return InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
-                instanceRepository = instanceRepository,
-                transitionService = transitionService,
                 policyProperties = policyProperties,
             ),
             transitionService = transitionService,

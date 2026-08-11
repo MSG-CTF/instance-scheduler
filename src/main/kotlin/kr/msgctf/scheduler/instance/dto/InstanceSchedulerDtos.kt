@@ -36,11 +36,12 @@ data class InstanceResult(
     val serviceUrl: String?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
+    val replacedInstanceId: UUID? = null,
 ) {
 
     companion object {
 
-        fun from(instance: Instance): InstanceResult =
+        fun from(instance: Instance, replacedInstanceId: UUID? = null): InstanceResult =
             InstanceResult(
                 instanceId = instance.instanceId,
                 teamId = instance.teamId,
@@ -49,6 +50,7 @@ data class InstanceResult(
                 serviceUrl = instance.serviceUrl,
                 expiresAt = instance.expiresAt,
                 hardExpiresAt = instance.hardExpiresAt,
+                replacedInstanceId = replacedInstanceId,
             )
     }
 }

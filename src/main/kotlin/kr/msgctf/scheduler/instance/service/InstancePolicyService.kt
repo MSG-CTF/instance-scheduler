@@ -3,14 +3,11 @@ package kr.msgctf.scheduler.instance.service
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
-import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.springframework.stereotype.Service
 
 // 인스턴스 생성 전에 적용할 정책을 검사한다
 @Service
 class InstancePolicyService(
-    private val instanceRepository: InstanceRepository,
-    private val transitionService: InstanceStateTransitionService,
     private val policyProperties: InstancePolicyProperties,
 ) {
 
@@ -33,17 +30,5 @@ class InstancePolicyService(
                 adminDetail = "hardTimeoutMinutes=$hardTimeoutMinutes, maxHardTimeoutMinutes=$maxHardTimeout",
             )
         }
-    }
-
-    fun validateTeamCanCreate(teamId: Long) {
-        val activeInstance = instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-            teamId = teamId,
-            statuses = transitionService.activeStatuses(),
-        ) ?: return
-
-        throw SchedulerException(
-            errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
-            adminDetail = "teamId=$teamId, activeInstanceId=${activeInstance.instanceId}",
-        )
     }
 }

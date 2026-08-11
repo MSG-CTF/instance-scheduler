@@ -116,6 +116,7 @@ data class InstanceResponse(
     val serviceUrl: String?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
+    val replacedInstanceId: UUID?,
 ) {
 
     companion object {
@@ -129,6 +130,7 @@ data class InstanceResponse(
                 serviceUrl = result.serviceUrl,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
+                replacedInstanceId = result.replacedInstanceId,
             )
     }
 }

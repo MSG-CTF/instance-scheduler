@@ -4,6 +4,7 @@ import java.time.Clock
 import java.time.DateTimeException
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.UUID
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
@@ -42,7 +43,12 @@ class InstanceSchedulerService(
     @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
-        instancePolicyService.validateTeamCanCreate(command.teamId)
+
+        val previous = instanceRepository.findByUserIdAndStatusInForUpdate(
+            userId = command.userId,
+            statuses = transitionService.activeStatuses(),
+        )
+        val replacedInstanceId = previous?.let { replaceOwnInstance(it) }
 
         val now = clock.instant()
         val instance = saveRequestedInstance(
@@ -116,7 +122,27 @@ class InstanceSchedulerService(
         instance.serviceUrl = runtimeResponse.serviceUrl
         move(instance, InstanceStatus.RUNNING)
 
-        return InstanceResult.from(instance)
+        return InstanceResult.from(instance, replacedInstanceId)
+    }
+
+    // user의 이전 인스턴스는 RUNNING일 때만 교체 대상이다
+    // 전이 상태면 이전 요청이 아직 처리 중이므로 거절한다
+    private fun replaceOwnInstance(previous: Instance): UUID {
+        if (previous.status != InstanceStatus.RUNNING) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
+                adminDetail = "userId=${previous.userId}, activeInstanceId=${previous.instanceId}, " +
+                    "status=${previous.status}",
+            )
+        }
+
+        previous.action = InstanceAction.DELETE
+        move(previous, InstanceStatus.CLEANUP_PENDING)
+        // Hibernate는 한 flush에서 INSERT를 UPDATE보다 먼저 보낸다
+        // 교체 표시를 먼저 flush해야 새 행 INSERT가 유니크 인덱스에 걸리지 않는다
+        instanceRepository.flush()
+
+        return previous.instanceId
     }
 
     // REQUESTED를 바로 flush해 중복 active 인스턴스 차단

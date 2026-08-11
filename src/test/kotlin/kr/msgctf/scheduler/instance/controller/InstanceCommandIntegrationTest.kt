@@ -8,6 +8,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.junit.jupiter.api.BeforeEach
@@ -76,25 +77,49 @@ class InstanceCommandIntegrationTest {
         assertEquals("https://team-100.local", saved.serviceUrl)
     }
 
+    // 같은 user의 재생성은 거절이 아니라 이전 인스턴스 교체다
     @Test
-    fun `create api rejects duplicate active instance for same team`() {
-        // 같은 팀이 동시에 2개 만들 수 없는지 확인
+    fun `create api replaces own running instance`() {
         // given
+        val userId = UUID.randomUUID()
+        val firstResponse = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 200L, challengeId = 10L, userId = userId)
+        }.andExpect { status { isOk() } }.andReturn().response.contentAsString
+        val firstId = readInstanceId(firstResponse)
+
+        // when
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 200L, challengeId = 10L)
+            content = createRequestBody(teamId = 200L, challengeId = 20L, userId = userId)
         }.andExpect {
             status { isOk() }
+            jsonPath("$.data.status") { value("RUNNING") }
+            jsonPath("$.data.replaced_instance_id") { value(firstId.toString()) }
         }
 
-        // when & then
+        // then: 이전 인스턴스는 워커가 지울 정리 대기로 남는다
+        val previous = instanceRepository.findById(firstId).orElseThrow()
+        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+        assertEquals(InstanceAction.DELETE, previous.action)
+    }
+
+    // 같은 팀이라도 user가 다르면 병렬로 만들 수 있다
+    @Test
+    fun `create api allows two users of the same team`() {
+        // when & then: createRequestBody의 기본 userId가 호출마다 랜덤이라 서로 다른 user다
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 200L, challengeId = 20L)
-        }.andExpect {
-            status { isConflict() }
-            jsonPath("$.code") { value("ACTIVE_INSTANCE_EXISTS") }
-        }
+            content = createRequestBody(teamId = 210L, challengeId = 10L)
+        }.andExpect { status { isOk() } }
+
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 210L, challengeId = 20L)
+        }.andExpect { status { isOk() } }
+
+        // then: 교체 없이 두 인스턴스가 모두 RUNNING으로 남는다
+        assertEquals(2, instanceRepository.findAll().count { it.status == InstanceStatus.RUNNING })
     }
 
     @Test
