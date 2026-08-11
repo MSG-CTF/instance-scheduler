@@ -24,6 +24,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
+import org.hibernate.exception.ConstraintViolationException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -150,12 +151,30 @@ class InstanceSchedulerService(
         try {
             instanceRepository.saveAndFlush(instance)
         } catch (exception: DataIntegrityViolationException) {
+            if (isActiveUniqueViolation(exception)) {
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
+                    adminDetail = "userId=${instance.userId}, reason=active instance unique constraint",
+                    cause = exception,
+                )
+            }
             throw SchedulerException(
-                errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
-                adminDetail = "teamId=${instance.teamId}, reason=active instance unique constraint",
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${instance.instanceId}, reason=${exception.message}",
                 cause = exception,
             )
         }
+
+    private fun isActiveUniqueViolation(exception: DataIntegrityViolationException): Boolean {
+        var cause: Throwable? = exception.cause
+        while (cause != null) {
+            if (cause is ConstraintViolationException) {
+                return cause.constraintName?.contains("uq_user_active_instance") == true
+            }
+            cause = cause.cause
+        }
+        return false
+    }
 
     @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun deleteInstance(command: DeleteInstanceCommand): InstanceResult {

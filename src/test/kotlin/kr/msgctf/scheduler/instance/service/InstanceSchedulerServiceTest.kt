@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.service
 
+import java.sql.SQLException
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -36,6 +37,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
 import kr.msgctf.scheduler.runtime.RuntimeResetRequest
 import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
+import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
 import org.springframework.dao.DataIntegrityViolationException
 
@@ -176,7 +178,14 @@ class InstanceSchedulerServiceTest {
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(
             savedInstances = savedInstances,
-            saveAndFlushException = DataIntegrityViolationException("duplicate active instance"),
+            saveAndFlushException = DataIntegrityViolationException(
+                "duplicate active instance",
+                ConstraintViolationException(
+                    "duplicate key value",
+                    SQLException("duplicate key value violates unique constraint \"uq_user_active_instance\""),
+                    "uq_user_active_instance",
+                ),
+            ),
         )
         val brokerClient = CountingBrokerClient()
         val instanceSchedulerService = newService(
@@ -191,8 +200,28 @@ class InstanceSchedulerServiceTest {
 
         // then
         assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
-        assertEquals("teamId=204, reason=active instance unique constraint", exception.adminDetail)
+        assertEquals("userId=${testUserId}, reason=active instance unique constraint", exception.adminDetail)
         assertEquals(0, brokerClient.callCount)
+    }
+
+    // 유니크 위반이 아닌 저장 오류를 한도 충돌로 둔갑시키지 않는지 확인
+    @Test
+    fun `classifies non-unique save failure as internal error`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(
+            savedInstances = savedInstances,
+            saveAndFlushException = DataIntegrityViolationException("value too long for column"),
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 208L))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
     }
 
     // 같은 user의 RUNNING 인스턴스가 있으면 교체하고 이전 id를 알려주는지 확인
