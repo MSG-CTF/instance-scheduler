@@ -166,7 +166,7 @@ class InstanceQueryIntegrationTest {
             }
     }
 
-    // active 응답은 명세대로 요약 7필드만 내보낸다
+    // active 응답은 runtime 내부 정보를 내보내지 않는다
     @Test
     fun `get active api does not expose runtime detail`() {
         // given

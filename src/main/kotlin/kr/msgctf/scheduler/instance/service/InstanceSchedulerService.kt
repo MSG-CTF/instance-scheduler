@@ -139,7 +139,6 @@ class InstanceSchedulerService(
 
         previous.action = InstanceAction.DELETE
         move(previous, InstanceStatus.CLEANUP_PENDING)
-        // Hibernate는 한 flush에서 INSERT를 UPDATE보다 먼저 보낸다
         // 교체 표시를 먼저 flush해야 새 행 INSERT가 유니크 인덱스에 걸리지 않는다
         instanceRepository.flush()
 
