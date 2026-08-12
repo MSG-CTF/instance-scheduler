@@ -1,0 +1,198 @@
+package kr.msgctf.scheduler.instance.service
+
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
+import java.util.UUID
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.broker.FakeBrokerClient
+import kr.msgctf.scheduler.broker.FakeBrokerMode
+import kr.msgctf.scheduler.broker.ResourceCandidateSelector
+import kr.msgctf.scheduler.instance.domain.Instance
+import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.FakeRuntimeClient
+import kr.msgctf.scheduler.runtime.FakeRuntimeMode
+import kr.msgctf.scheduler.runtime.RuntimeClient
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import org.springframework.transaction.support.TransactionOperations
+
+class InstanceOperationServiceTest {
+
+    private val clock = Clock.fixed(Instant.parse("2026-08-12T00:00:00Z"), ZoneOffset.UTC)
+
+    // REQUESTED가 broker 선택과 접수를 거쳐 PROVISIONING까지 가는지 확인
+    @Test
+    fun `progresses requested instance to provisioning with operation id`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNotNull(instance.runtimeOperationId)
+        assertEquals(clock.instant(), instance.nextPollAt)
+        assertEquals("cluster-main", instance.runtimeTargetId)
+    }
+
+    // 실행 스펙이 비어 있으면 진행하지 않고 FAILED로 보내는지 확인
+    @Test
+    fun `fails requested instance when workload spec is missing`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested().apply { containerImage = null })
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+    }
+
+    // broker가 후보를 못 주면 FAILED로 보내는지 확인
+    @Test
+    fun `fails requested instance when broker rejects`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = FakeBrokerClient(FakeBrokerMode.EMPTY), events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 접수가 실패하면 잔여 정리를 위해 CLEANUP_PENDING으로 파킹하는지 확인
+    @Test
+    fun `parks requested instance when submit fails`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL))
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(InstanceAction.CLEANUP, instance.action)
+        assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
+        assertNull(instance.runtimeOperationId)
+    }
+
+    // SUCCEEDED result를 반영해 RUNNING으로 확정하는지 확인
+    @Test
+    fun `promotes provisioning instance to running on succeeded`() {
+        // given
+        val repository = TestInstanceRepository()
+        val runtimeClient = FakeRuntimeClient()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals("workload-${instance.instanceId}", instance.runtimeWorkloadId)
+        assertEquals("https://team-7.local", instance.serviceUrl)
+        assertNull(instance.runtimeOperationId)
+        assertNull(instance.nextPollAt)
+        assertNull(instance.action)
+    }
+
+    // operation 최종 실패는 create 재요청 없이 정리 대기로 보내는지 확인
+    @Test
+    fun `parks provisioning instance when operation failed`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val runtimeClient = FakeRuntimeClient()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+        service.progressRequested(instance.instanceId)
+        runtimeClient.mode = FakeRuntimeMode.OPERATION_FAIL
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
+        assertNull(instance.runtimeOperationId)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 조회 오류는 상태를 바꾸지 않고 다음 조회만 예약하는지 확인
+    @Test
+    fun `keeps state when operation lookup fails`() {
+        // given
+        val repository = TestInstanceRepository()
+        val runtimeClient = FakeRuntimeClient()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+        // Fake 저장소에 없는 operation을 조회하게 만들어 조회 오류를 흉내낸다
+        instance.runtimeOperationId = "op-unknown"
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("op-unknown", instance.runtimeOperationId)
+        assertEquals(clock.instant(), instance.nextPollAt)
+    }
+
+    private fun newService(
+        repository: TestInstanceRepository,
+        brokerClient: FakeBrokerClient = FakeBrokerClient(),
+        runtimeClient: RuntimeClient = FakeRuntimeClient(),
+        events: TestInstanceEventRepository = TestInstanceEventRepository(),
+    ): InstanceOperationService =
+        InstanceOperationService(
+            transitionService = InstanceStateTransitionService(),
+            instanceRepository = repository.repository,
+            instanceEventRepository = events.repository,
+            brokerClient = brokerClient,
+            resourceCandidateSelector = ResourceCandidateSelector(clock),
+            runtimeClient = runtimeClient,
+            clock = clock,
+            tx = TransactionOperations.withoutTransaction(),
+        )
+
+    private fun newRequested(): Instance {
+        val now = clock.instant()
+        return Instance(
+            teamId = 7L,
+            userId = UUID.randomUUID(),
+            challengeId = 100L,
+            status = InstanceStatus.REQUESTED,
+            action = InstanceAction.CREATE,
+            containerImage = "ghcr.io/example/web:latest",
+            containerPort = 8080,
+            architecture = Architecture.AMD64,
+            cpuMillicores = 500,
+            memoryMib = 512,
+            ephemeralStorageMib = 1024,
+            expiresAt = now.plusSeconds(3600),
+            hardExpiresAt = now.plusSeconds(7200),
+        )
+    }
+}
