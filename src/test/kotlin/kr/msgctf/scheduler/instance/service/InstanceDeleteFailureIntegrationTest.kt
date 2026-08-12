@@ -22,8 +22,6 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
-import kr.msgctf.scheduler.runtime.RuntimeResetRequest
-import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
@@ -137,10 +135,11 @@ class InstanceDeleteFailureIntegrationTest {
         override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse =
             throw deleteError
 
-        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse =
-            delegate.restartWorkload(request)
+        override fun submitCreate(request: RuntimeCreateRequest) = delegate.submitCreate(request)
 
-        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse =
-            delegate.resetWorkload(request)
+        override fun submitDelete(request: RuntimeDeleteRequest): kr.msgctf.scheduler.runtime.RuntimeSubmitResult =
+            throw deleteError
+
+        override fun getOperation(operationId: String) = delegate.getOperation(operationId)
     }
 }

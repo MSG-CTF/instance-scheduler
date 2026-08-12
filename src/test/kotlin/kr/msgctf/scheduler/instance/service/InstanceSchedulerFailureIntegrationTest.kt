@@ -19,8 +19,6 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
-import kr.msgctf.scheduler.runtime.RuntimeResetRequest
-import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
@@ -94,10 +92,13 @@ class InstanceSchedulerFailureIntegrationTest {
         override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse =
             throw UnsupportedOperationException("not used")
 
-        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse =
+        override fun submitCreate(request: RuntimeCreateRequest) =
             throw UnsupportedOperationException("not used")
 
-        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse =
+        override fun submitDelete(request: RuntimeDeleteRequest) =
+            throw UnsupportedOperationException("not used")
+
+        override fun getOperation(operationId: String) =
             throw UnsupportedOperationException("not used")
     }
 }

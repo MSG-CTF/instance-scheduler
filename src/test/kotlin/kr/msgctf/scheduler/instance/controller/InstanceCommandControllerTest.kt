@@ -28,8 +28,6 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
-import kr.msgctf.scheduler.runtime.RuntimeResetRequest
-import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 
 // controller는 서비스 결과를 성공 응답으로 감싸는지만 확인
 // HTTP 직렬화와 검증은 integration test에서 확인
@@ -178,10 +176,10 @@ class InstanceCommandControllerTest {
             return delegate.deleteWorkload(request)
         }
 
-        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse =
-            delegate.restartWorkload(request)
+        override fun submitCreate(request: RuntimeCreateRequest) = delegate.submitCreate(request)
 
-        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse =
-            delegate.resetWorkload(request)
+        override fun submitDelete(request: RuntimeDeleteRequest) = delegate.submitDelete(request)
+
+        override fun getOperation(operationId: String) = delegate.getOperation(operationId)
     }
 }

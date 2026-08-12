@@ -17,8 +17,6 @@ import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
-import kr.msgctf.scheduler.runtime.RuntimeResetRequest
-import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 import org.junit.jupiter.api.AfterEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -120,7 +118,8 @@ class InstanceCleanupIntegrationTest {
         var mode: FakeRuntimeMode = FakeRuntimeMode.SUCCESS
         override fun createWorkload(request: RuntimeCreateRequest) = FakeRuntimeClient(mode).createWorkload(request)
         override fun deleteWorkload(request: RuntimeDeleteRequest) = FakeRuntimeClient(mode).deleteWorkload(request)
-        override fun restartWorkload(request: RuntimeRestartRequest) = FakeRuntimeClient(mode).restartWorkload(request)
-        override fun resetWorkload(request: RuntimeResetRequest) = FakeRuntimeClient(mode).resetWorkload(request)
+        override fun submitCreate(request: RuntimeCreateRequest) = FakeRuntimeClient(mode).submitCreate(request)
+        override fun submitDelete(request: RuntimeDeleteRequest) = FakeRuntimeClient(mode).submitDelete(request)
+        override fun getOperation(operationId: String) = FakeRuntimeClient(mode).getOperation(operationId)
     }
 }

@@ -24,8 +24,6 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
-import kr.msgctf.scheduler.runtime.RuntimeResetRequest
-import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -145,10 +143,10 @@ class InstanceDeleteConcurrencyIntegrationTest {
             return delegate.deleteWorkload(request)
         }
 
-        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse =
-            delegate.restartWorkload(request)
+        override fun submitCreate(request: RuntimeCreateRequest) = delegate.submitCreate(request)
 
-        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse =
-            delegate.resetWorkload(request)
+        override fun submitDelete(request: RuntimeDeleteRequest) = delegate.submitDelete(request)
+
+        override fun getOperation(operationId: String) = delegate.getOperation(operationId)
     }
 }

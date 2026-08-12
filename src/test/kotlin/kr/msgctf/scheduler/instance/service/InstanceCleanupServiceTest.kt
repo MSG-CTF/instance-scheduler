@@ -305,10 +305,12 @@ class InstanceCleanupServiceTest {
                 status = RuntimeOperationStatus.SUCCESS,
             )
         }
-        override fun restartWorkload(request: kr.msgctf.scheduler.runtime.RuntimeRestartRequest) =
-            FakeRuntimeClient().restartWorkload(request)
-        override fun resetWorkload(request: kr.msgctf.scheduler.runtime.RuntimeResetRequest) =
-            FakeRuntimeClient().resetWorkload(request)
+        override fun submitCreate(request: kr.msgctf.scheduler.runtime.RuntimeCreateRequest) =
+            FakeRuntimeClient().submitCreate(request)
+        override fun submitDelete(request: RuntimeDeleteRequest) =
+            FakeRuntimeClient().submitDelete(request)
+        override fun getOperation(operationId: String) =
+            FakeRuntimeClient().getOperation(operationId)
     }
 
     companion object {

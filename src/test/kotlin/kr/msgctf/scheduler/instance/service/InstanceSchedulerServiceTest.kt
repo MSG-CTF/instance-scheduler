@@ -35,8 +35,6 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
-import kr.msgctf.scheduler.runtime.RuntimeResetRequest
-import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
 import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
 import org.springframework.dao.DataIntegrityViolationException
@@ -555,8 +553,9 @@ class InstanceSchedulerServiceTest {
     private class ThrowingRuntimeClient(private val error: RuntimeException) : RuntimeClient {
         override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse = throw error
         override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse = throw error
-        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse = throw error
-        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse = throw error
+        override fun submitCreate(request: RuntimeCreateRequest) = throw error
+        override fun submitDelete(request: RuntimeDeleteRequest) = throw error
+        override fun getOperation(operationId: String) = throw error
     }
 
     // 삭제 요청 내용을 확인하기 위한 runtime 이중구현
@@ -574,11 +573,11 @@ class InstanceSchedulerServiceTest {
             return delegate.deleteWorkload(request)
         }
 
-        override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse =
-            delegate.restartWorkload(request)
+        override fun submitCreate(request: RuntimeCreateRequest) = delegate.submitCreate(request)
 
-        override fun resetWorkload(request: RuntimeResetRequest): RuntimeOperationResponse =
-            delegate.resetWorkload(request)
+        override fun submitDelete(request: RuntimeDeleteRequest) = delegate.submitDelete(request)
+
+        override fun getOperation(operationId: String) = delegate.getOperation(operationId)
     }
 
     private class CountingBrokerClient : BrokerClient {

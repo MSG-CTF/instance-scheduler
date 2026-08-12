@@ -89,18 +89,6 @@ enum class RuntimeDeleteReason {
     ADMIN_FORCED,
 }
 
-// Runtime에 workload 재시작을 요청할 때 보내는 값
-data class RuntimeRestartRequest(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-)
-
-// Runtime에 workload 초기화를 요청할 때 보내는 값
-data class RuntimeResetRequest(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-)
-
 // Runtime 작업 처리 결과
 data class RuntimeOperationResponse(
     @JsonProperty("runtime_workload_id")
@@ -112,3 +100,41 @@ data class RuntimeOperationResponse(
 enum class RuntimeOperationStatus {
     SUCCESS,
 }
+
+// 접수 결과, 202 접수와 삭제 404(지울 대상 없음)를 구분한다
+sealed interface RuntimeSubmitResult {
+
+    data class Accepted(
+        val operationId: String,
+        val retryAfterSeconds: Long?,
+    ) : RuntimeSubmitResult
+
+    data object TargetMissing : RuntimeSubmitResult
+}
+
+enum class RuntimeOperationState {
+    QUEUED,
+    RUNNING,
+    RETRYING,
+    SUCCEEDED,
+    FAILED,
+}
+
+// operation 조회 결과
+data class RuntimeOperationSnapshot(
+    val operationId: String,
+    val status: RuntimeOperationState,
+    val retryAfterSeconds: Long?,
+    val result: RuntimeOperationResult?,
+    val lastErrorCode: String?,
+)
+
+// SUCCEEDED일 때만 존재한다
+data class RuntimeOperationResult(
+    @JsonProperty("runtime_workload_id")
+    val runtimeWorkloadId: String,
+
+    // DELETE operation에는 없다
+    @JsonProperty("service_url")
+    val serviceUrl: String?,
+)
