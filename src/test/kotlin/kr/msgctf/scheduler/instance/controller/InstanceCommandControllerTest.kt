@@ -6,9 +6,8 @@ import java.time.ZoneOffset
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
-import kr.msgctf.scheduler.broker.FakeBrokerClient
-import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.Instance
@@ -46,8 +45,8 @@ class InstanceCommandControllerTest {
         assertEquals("SUCCESS", response.code)
         assertEquals(1L, response.data.teamId)
         assertEquals(10L, response.data.challengeId)
-        assertEquals(InstanceStatus.RUNNING, response.data.status)
-        assertEquals("https://team-1.local", response.data.serviceUrl)
+        assertEquals(InstanceStatus.REQUESTED, response.data.status)
+        assertNull(response.data.serviceUrl)
     }
 
     // delete API 응답 확인
@@ -112,23 +111,16 @@ class InstanceCommandControllerTest {
     private fun newService(
         repository: TestInstanceRepository = TestInstanceRepository(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
-    ): InstanceSchedulerService {
-        val transitionService = InstanceStateTransitionService()
-        // selector도 같은 고정 clock을 써야 후보 validUntil이 만료로 걸리지 않는다
-        val clock = Clock.fixed(Instant.parse("2026-07-04T12:00:00Z"), ZoneOffset.UTC)
-
-        return InstanceSchedulerService(
+    ): InstanceSchedulerService =
+        InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
                 policyProperties = InstancePolicyProperties(),
             ),
-            transitionService = transitionService,
+            transitionService = InstanceStateTransitionService(),
             instanceRepository = repository.repository,
-            brokerClient = FakeBrokerClient(),
-            resourceCandidateSelector = ResourceCandidateSelector(clock = clock),
             runtimeClient = runtimeClient,
-            clock = clock,
+            clock = Clock.fixed(Instant.parse("2026-07-04T12:00:00Z"), ZoneOffset.UTC),
         )
-    }
 
     private fun newCreateRequest(): CreateInstanceRequest =
         CreateInstanceRequest(

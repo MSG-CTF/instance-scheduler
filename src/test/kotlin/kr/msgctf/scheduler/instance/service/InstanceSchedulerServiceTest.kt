@@ -10,12 +10,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
-import kr.msgctf.scheduler.broker.BrokerCandidateRequest
-import kr.msgctf.scheduler.broker.BrokerCandidateResponse
-import kr.msgctf.scheduler.broker.BrokerClient
-import kr.msgctf.scheduler.broker.FakeBrokerClient
-import kr.msgctf.scheduler.broker.FakeBrokerMode
-import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
@@ -43,9 +37,9 @@ class InstanceSchedulerServiceTest {
 
     private val testUserId: UUID = UUID.fromString("018f3f1e-0000-7a91-a30b-630000000001")
 
-    // create 요청이 RUNNING 인스턴스를 만드는지 확인
+    // create가 실행 스펙을 저장한 REQUESTED 인스턴스를 만드는지 확인
     @Test
-    fun `creates running instance`() {
+    fun `creates requested instance with stored workload spec`() {
         // given
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
@@ -58,115 +52,21 @@ class InstanceSchedulerServiceTest {
         // then
         val saved = savedInstances.single()
 
-        assertEquals(InstanceStatus.RUNNING, result.status)
-        assertEquals(InstanceStatus.RUNNING, saved.status)
+        assertEquals(InstanceStatus.REQUESTED, result.status)
+        assertNull(result.serviceUrl)
+        assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(InstanceAction.CREATE, saved.action)
-        assertEquals("SELF_HOSTED", saved.provider)
-        assertEquals("self-hosted-1", saved.accountId)
-        assertEquals("local", saved.region)
-        assertEquals(RuntimeType.KUBERNETES, saved.runtimeType)
-        assertEquals("cluster-main", saved.runtimeTargetId)
-        assertEquals("workload-${saved.instanceId}", saved.runtimeWorkloadId)
-        assertEquals("https://team-201.local", saved.serviceUrl)
+        assertEquals(command.containerImage, saved.containerImage)
+        assertEquals(command.containerPort, saved.containerPort)
+        assertEquals(command.architecture, saved.architecture)
+        assertEquals(command.resourceProfile.cpuMillicores, saved.cpuMillicores)
+        assertEquals(command.resourceProfile.memoryMib, saved.memoryMib)
+        assertEquals(command.resourceProfile.ephemeralStorageMib, saved.ephemeralStorageMib)
+        assertNull(saved.provider)
+        assertNull(saved.runtimeWorkloadId)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200), saved.expiresAt)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800), saved.hardExpiresAt)
         assertEquals(testUserId, saved.userId)
-    }
-
-    // broker 후보가 없으면 FAILED 상태로 끝나는지 확인
-    @Test
-    fun `marks failed when broker has no candidates`() {
-        // given
-        val savedInstances = mutableListOf<Instance>()
-        val instanceRepository = newInstanceRepository(savedInstances)
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository,
-            brokerClient = FakeBrokerClient(mode = FakeBrokerMode.EMPTY),
-        )
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 202L))
-        }
-
-        // then
-        val saved = savedInstances.single()
-
-        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
-        assertEquals(InstanceAction.CREATE, saved.action)
-    }
-
-    // runtime 생성 실패 시 CLEANUP_PENDING으로 파킹되는지 확인(남은 workload 회수 대상)
-    @Test
-    fun `parks cleanup pending when runtime create fails`() {
-        // given
-        val savedInstances = mutableListOf<Instance>()
-        val instanceRepository = newInstanceRepository(savedInstances)
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository,
-            runtimeClient = FakeRuntimeClient(mode = FakeRuntimeMode.CREATE_FAIL),
-        )
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 203L))
-        }
-
-        // then
-        val saved = savedInstances.single()
-
-        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
-        assertEquals(InstanceAction.CLEANUP, saved.action)
-        assertEquals("SELF_HOSTED", saved.provider)
-        assertEquals("self-hosted-1", saved.accountId)
-    }
-
-    // runtime이 SchedulerException이 아닌 예외(타임아웃 등)를 던져도 행이 CLEANUP_PENDING으로 남는지 확인
-    @Test
-    fun `parks cleanup pending when runtime throws non-scheduler exception`() {
-        // given
-        val savedInstances = mutableListOf<Instance>()
-        val instanceRepository = newInstanceRepository(savedInstances)
-        val runtimeClient = ThrowingRuntimeClient(IllegalStateException("connect timed out"))
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository,
-            runtimeClient = runtimeClient,
-        )
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 206L))
-        }
-
-        // then
-        val saved = savedInstances.single()
-        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
-    }
-
-    // broker가 SchedulerException이 아닌 예외(커넥션 오류 등)를 던져도 행이 FAILED로 남는지 확인
-    @Test
-    fun `records failed when broker throws non-scheduler exception`() {
-        // given
-        val savedInstances = mutableListOf<Instance>()
-        val instanceRepository = newInstanceRepository(savedInstances)
-        val brokerClient = ThrowingBrokerClient(IllegalStateException("connection refused"))
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository,
-            brokerClient = brokerClient,
-        )
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 207L))
-        }
-
-        // then
-        val saved = savedInstances.single()
-        assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
     }
 
     // 동시에 create가 들어와 DB unique 제약에 걸리면 중복 생성으로 처리
@@ -185,11 +85,7 @@ class InstanceSchedulerServiceTest {
                 ),
             ),
         )
-        val brokerClient = CountingBrokerClient()
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository,
-            brokerClient = brokerClient,
-        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
 
         // when
         val exception = assertFailsWith<SchedulerException> {
@@ -199,7 +95,6 @@ class InstanceSchedulerServiceTest {
         // then
         assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
         assertEquals("userId=${testUserId}, reason=active instance unique constraint", exception.adminDetail)
-        assertEquals(0, brokerClient.callCount)
     }
 
     // 유니크 위반이 아닌 저장 오류를 한도 충돌로 둔갑시키지 않는지 확인
@@ -236,8 +131,9 @@ class InstanceSchedulerServiceTest {
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
         assertEquals(InstanceAction.DELETE, previous.action)
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, previous.deleteReason)
         assertEquals(previous.instanceId, result.replacedInstanceId)
-        assertEquals(InstanceStatus.RUNNING, result.status)
+        assertEquals(InstanceStatus.REQUESTED, result.status)
     }
 
     // 이전 인스턴스가 아직 만들어지는 중이면 교체하지 않고 거절하는지 확인
@@ -271,7 +167,7 @@ class InstanceSchedulerServiceTest {
 
         // then
         assertNull(result.replacedInstanceId)
-        assertEquals(InstanceStatus.RUNNING, result.status)
+        assertEquals(InstanceStatus.REQUESTED, result.status)
     }
 
     // ttl이 hard timeout보다 크면 아무것도 저장/호출하지 않고 거절하는지 확인
@@ -280,11 +176,7 @@ class InstanceSchedulerServiceTest {
         // given
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
-        val brokerClient = CountingBrokerClient()
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository,
-            brokerClient = brokerClient,
-        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
 
         // when
         val exception = assertFailsWith<SchedulerException> {
@@ -296,7 +188,6 @@ class InstanceSchedulerServiceTest {
         // then
         assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
         assertEquals(0, savedInstances.size)
-        assertEquals(0, brokerClient.callCount)
     }
 
     // delete 요청이 CLEANED 상태로 끝나는지 확인
@@ -468,25 +359,18 @@ class InstanceSchedulerServiceTest {
 
     private fun newService(
         instanceRepository: InstanceRepository,
-        brokerClient: BrokerClient = FakeBrokerClient(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
         policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
-    ): InstanceSchedulerService {
-        val transitionService = InstanceStateTransitionService()
-        val clock = fixedClock()
-
-        return InstanceSchedulerService(
+    ): InstanceSchedulerService =
+        InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
                 policyProperties = policyProperties,
             ),
-            transitionService = transitionService,
+            transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
-            brokerClient = brokerClient,
-            resourceCandidateSelector = ResourceCandidateSelector(clock = clock),
             runtimeClient = runtimeClient,
-            clock = clock,
+            clock = fixedClock(),
         )
-    }
 
     private fun newCommand(
         teamId: Long,
@@ -544,11 +428,6 @@ class InstanceSchedulerServiceTest {
             hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
         )
 
-    // SchedulerException이 아닌 예외를 던지는 broker 이중구현
-    private class ThrowingBrokerClient(private val error: RuntimeException) : BrokerClient {
-        override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse = throw error
-    }
-
     // SchedulerException이 아닌 예외를 던지는 runtime 이중구현
     private class ThrowingRuntimeClient(private val error: RuntimeException) : RuntimeClient {
         override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse = throw error
@@ -580,12 +459,4 @@ class InstanceSchedulerServiceTest {
         override fun getOperation(operationId: String) = delegate.getOperation(operationId)
     }
 
-    private class CountingBrokerClient : BrokerClient {
-        var callCount = 0
-
-        override fun getCandidates(request: kr.msgctf.scheduler.broker.BrokerCandidateRequest): kr.msgctf.scheduler.broker.BrokerCandidateResponse {
-            callCount += 1
-            return FakeBrokerClient().getCandidates(request)
-        }
-    }
 }

@@ -5,9 +5,6 @@ import java.time.DateTimeException
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.UUID
-import kr.msgctf.scheduler.broker.BrokerCandidateRequest
-import kr.msgctf.scheduler.broker.BrokerClient
-import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
@@ -18,12 +15,9 @@ import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.InstanceResult
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
-import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
-import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeTarget
-import kr.msgctf.scheduler.runtime.RuntimeWorkload
 import org.hibernate.exception.ConstraintViolationException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
@@ -35,13 +29,12 @@ class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
-    private val brokerClient: BrokerClient,
-    private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
     private val clock: Clock,
 ) {
 
-    @Transactional(noRollbackFor = [InstanceStateSavedException::class])
+    // 접수만 하고 진행은 operation 워커가 맡는다
+    @Transactional
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
 
@@ -59,69 +52,16 @@ class InstanceSchedulerService(
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
+                containerImage = command.containerImage,
+                containerPort = command.containerPort,
+                architecture = command.architecture,
+                cpuMillicores = command.resourceProfile.cpuMillicores,
+                memoryMib = command.resourceProfile.memoryMib,
+                ephemeralStorageMib = command.resourceProfile.ephemeralStorageMib,
                 expiresAt = now.plusMinutesOrReject(command.ttlMinutes),
                 hardExpiresAt = now.plusMinutesOrReject(command.hardTimeoutMinutes),
             ),
         )
-
-        move(instance, InstanceStatus.SCHEDULING)
-
-        val candidate = try {
-            val brokerResponse = brokerClient.getCandidates(
-                BrokerCandidateRequest(
-                    requestId = "broker-${instance.instanceId}",
-                    requestedAt = now,
-                    teamId = command.teamId,
-                    challengeId = command.challengeId,
-                    instanceId = instance.instanceId,
-                    architecture = command.architecture,
-                    resourceProfile = command.resourceProfile,
-                ),
-            )
-            resourceCandidateSelector.select(brokerResponse, command.architecture)
-        } catch (exception: Exception) {
-            move(instance, InstanceStatus.FAILED)
-            throw keepFailedState(exception, SchedulerErrorCode.BROKER_CALL_FAILED)
-        }
-
-        instance.provider = candidate.provider
-        instance.accountId = candidate.accountId
-        instance.region = candidate.region
-        instance.runtimeType = candidate.runtime.type
-        instance.runtimeTargetId = candidate.runtime.targetId
-        move(instance, InstanceStatus.PROVISIONING)
-
-        val runtimeResponse = try {
-            runtimeClient.createWorkload(
-                RuntimeCreateRequest(
-                    requestId = "runtime-create-${instance.instanceId}",
-                    instanceId = instance.instanceId,
-                    teamId = command.teamId,
-                    target = RuntimeTarget(
-                        runtimeType = candidate.runtime.type,
-                        targetId = candidate.runtime.targetId,
-                    ),
-                    workload = RuntimeWorkload(
-                        image = command.containerImage,
-                        containerPort = command.containerPort,
-                        resourceLimits = RuntimeResourceLimits(
-                            cpuMillicores = command.resourceProfile.cpuMillicores,
-                            memoryMib = command.resourceProfile.memoryMib,
-                            ephemeralStorageMib = command.resourceProfile.ephemeralStorageMib,
-                        ),
-                    ),
-                ),
-            )
-        } catch (exception: Exception) {
-            // runtime에 workload가 남을 수 있어 FAILED 대신 정리 대기로 커밋한다
-            instance.action = InstanceAction.CLEANUP
-            move(instance, InstanceStatus.CLEANUP_PENDING)
-            throw keepFailedState(exception, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
-        }
-
-        instance.runtimeWorkloadId = runtimeResponse.runtimeWorkloadId
-        instance.serviceUrl = runtimeResponse.serviceUrl
-        move(instance, InstanceStatus.RUNNING)
 
         return InstanceResult.from(instance, replacedInstanceId)
     }
@@ -138,6 +78,7 @@ class InstanceSchedulerService(
         }
 
         previous.action = InstanceAction.DELETE
+        previous.deleteReason = RuntimeDeleteReason.USER_REQUESTED
         move(previous, InstanceStatus.CLEANUP_PENDING)
         // 교체 표시를 먼저 flush해야 새 행 INSERT가 유니크 인덱스에 걸리지 않는다
         instanceRepository.flush()
