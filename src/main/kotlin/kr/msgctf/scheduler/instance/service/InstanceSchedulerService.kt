@@ -14,10 +14,7 @@ import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.InstanceResult
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
-import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
-import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
-import kr.msgctf.scheduler.runtime.RuntimeTarget
 import org.hibernate.exception.ConstraintViolationException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
@@ -29,7 +26,6 @@ class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
-    private val runtimeClient: RuntimeClient,
     private val clock: Clock,
 ) {
 
@@ -116,7 +112,8 @@ class InstanceSchedulerService(
         return false
     }
 
-    @Transactional(noRollbackFor = [InstanceStateSavedException::class])
+    // 접수만 하고 runtime 삭제는 operation 워커가 맡는다
+    @Transactional
     fun deleteInstance(command: DeleteInstanceCommand): InstanceResult {
         // 동시 삭제 요청이 모두 통과하지 않도록 행을 잠그고 읽는다
         val instance = instanceRepository.findByIdForUpdate(command.instanceId)
@@ -125,67 +122,11 @@ class InstanceSchedulerService(
                 adminDetail = "instanceId=${command.instanceId}",
             )
 
-        // runtime 삭제 요청을 만들 수 있는지 먼저 확인
-        val deleteRequest = buildDeleteRequest(instance, command.reason)
-
         instance.action = InstanceAction.DELETE
+        instance.deleteReason = command.reason
         move(instance, InstanceStatus.STOPPING)
 
-        try {
-            runtimeClient.deleteWorkload(deleteRequest)
-        } catch (exception: Exception) {
-            // 삭제 재시도를 위해 CLEANUP_PENDING은 commit
-            move(instance, InstanceStatus.CLEANUP_PENDING)
-            throw keepFailedState(exception, SchedulerErrorCode.RUNTIME_DELETE_FAILED)
-        }
-
-        move(instance, InstanceStatus.STOPPED)
-        move(instance, InstanceStatus.CLEANED)
-
         return InstanceResult.from(instance)
-    }
-
-    // runtime 정보가 없으면 삭제 요청을 만들 수 없음
-    private fun buildDeleteRequest(
-        instance: Instance,
-        reason: RuntimeDeleteReason,
-    ): RuntimeDeleteRequest {
-        val runtimeType = instance.runtimeType
-        val runtimeTargetId = instance.runtimeTargetId
-        val runtimeWorkloadId = instance.runtimeWorkloadId
-
-        if (runtimeType == null || runtimeTargetId == null || runtimeWorkloadId == null) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
-                adminDetail = "instanceId=${instance.instanceId}, runtimeType=$runtimeType, " +
-                    "runtimeTargetId=$runtimeTargetId, runtimeWorkloadId=$runtimeWorkloadId",
-            )
-        }
-
-        return RuntimeDeleteRequest(
-            requestId = "runtime-delete-${instance.instanceId}",
-            instanceId = instance.instanceId,
-            teamId = instance.teamId,
-            target = RuntimeTarget(
-                runtimeType = runtimeType,
-                targetId = runtimeTargetId,
-            ),
-            runtimeWorkloadId = runtimeWorkloadId,
-            reason = reason,
-        )
-    }
-
-    // 외부 호출 실패를 상태 저장용 예외로 변환
-    private fun keepFailedState(
-        exception: Exception,
-        fallbackErrorCode: SchedulerErrorCode,
-    ): InstanceStateSavedException {
-        val schedulerException = exception as? SchedulerException
-        return InstanceStateSavedException(
-            errorCode = schedulerException?.errorCode ?: fallbackErrorCode,
-            adminDetail = schedulerException?.adminDetail ?: exception.message,
-            cause = exception,
-        )
     }
 
     // 분을 초로 바꾸는 곱셈은 Long을 넘으면 조용히 음수로 감긴다
@@ -217,14 +158,3 @@ class InstanceSchedulerService(
 }
 
 private const val SECONDS_PER_MINUTE = 60L
-
-// 실패 상태를 commit시키기 위한 예외
-private class InstanceStateSavedException(
-    errorCode: SchedulerErrorCode,
-    adminDetail: String?,
-    cause: Throwable,
-) : SchedulerException(
-    errorCode = errorCode,
-    adminDetail = adminDetail,
-    cause = cause,
-)

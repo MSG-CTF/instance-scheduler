@@ -203,8 +203,8 @@ class InstanceCommandIntegrationTest {
     }
 
     @Test
-    fun `delete api stores cleaned instance in postgres`() {
-        // delete API가 실제 DB 상태를 CLEANED로 바꾸는지 확인
+    fun `delete api stores stopping instance in postgres`() {
+        // delete 접수가 실제 DB 상태를 STOPPING으로 바꾸는지 확인
         // given: create가 접수만 하므로 RUNNING 행을 직접 심는다
         val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 300L)).instanceId
 
@@ -213,18 +213,19 @@ class InstanceCommandIntegrationTest {
             contentType = MediaType.APPLICATION_JSON
             content = """{ "delete_reason": "USER_REQUESTED" }"""
         }.andExpect {
-            status { isOk() }
+            status { isAccepted() }
             jsonPath("$.code") { value("SUCCESS") }
             jsonPath("$.data.instance_id") { value(instanceId.toString()) }
-            jsonPath("$.data.status") { value("CLEANED") }
+            jsonPath("$.data.status") { value("STOPPING") }
             jsonPath("$.data.service_url") { doesNotExist() }
         }
 
-        // then
+        // then: 실제 삭제는 워커 몫이라 사유와 함께 접수 상태로 남는다
         val saved = instanceRepository.findById(instanceId).orElse(null)
 
         assertNotNull(saved)
-        assertEquals(InstanceStatus.CLEANED, saved.status)
+        assertEquals(InstanceStatus.STOPPING, saved.status)
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, saved.deleteReason)
     }
 
     @Test
@@ -236,8 +237,8 @@ class InstanceCommandIntegrationTest {
         // when & then
         mockMvc.delete("/api/instances/$instanceId")
             .andExpect {
-                status { isOk() }
-                jsonPath("$.data.status") { value("CLEANED") }
+                status { isAccepted() }
+                jsonPath("$.data.status") { value("STOPPING") }
             }
     }
 
@@ -273,14 +274,14 @@ class InstanceCommandIntegrationTest {
             }
     }
 
-    // 이미 정리된 인스턴스는 다시 삭제할 수 없다
+    // 이미 삭제가 접수된 인스턴스는 다시 삭제할 수 없다
     @Test
-    fun `delete api rejects already cleaned instance`() {
+    fun `delete api rejects instance already being deleted`() {
         // given
         val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 600L)).instanceId
 
         mockMvc.delete("/api/instances/$instanceId")
-            .andExpect { status { isOk() } }
+            .andExpect { status { isAccepted() } }
 
         // when & then
         mockMvc.delete("/api/instances/$instanceId")

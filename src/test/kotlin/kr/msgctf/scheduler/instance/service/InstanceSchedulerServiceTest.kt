@@ -21,14 +21,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
-import kr.msgctf.scheduler.runtime.FakeRuntimeClient
-import kr.msgctf.scheduler.runtime.FakeRuntimeMode
-import kr.msgctf.scheduler.runtime.RuntimeClient
-import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
-import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
-import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
-import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
 import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
 import org.springframework.dao.DataIntegrityViolationException
@@ -190,9 +183,9 @@ class InstanceSchedulerServiceTest {
         assertEquals(0, savedInstances.size)
     }
 
-    // delete 요청이 CLEANED 상태로 끝나는지 확인
+    // delete가 사유를 저장하고 STOPPING 접수로 끝나는지 확인
     @Test
-    fun `deletes running instance`() {
+    fun `accepts delete and marks stopping`() {
         // given
         val instanceRepository = TestInstanceRepository()
         val runningInstance = instanceRepository.save(newRunningInstance())
@@ -204,8 +197,10 @@ class InstanceSchedulerServiceTest {
         )
 
         // then
-        assertEquals(InstanceStatus.CLEANED, result.status)
-        assertEquals(InstanceStatus.CLEANED, runningInstance.status)
+        assertEquals(InstanceStatus.STOPPING, result.status)
+        assertEquals(InstanceStatus.STOPPING, runningInstance.status)
+        assertEquals(InstanceAction.DELETE, runningInstance.action)
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, runningInstance.deleteReason)
     }
 
     // delete 대상이 없으면 not found 확인
@@ -226,93 +221,13 @@ class InstanceSchedulerServiceTest {
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
 
-    // runtime 삭제 실패 시 cleanup 대기 상태 확인
+    // 호출한 쪽이 준 삭제 사유가 행에 저장되는지 확인
     @Test
-    fun `marks cleanup pending when runtime delete fails`() {
+    fun `stores caller delete reason`() {
         // given
         val instanceRepository = TestInstanceRepository()
         val runningInstance = instanceRepository.save(newRunningInstance())
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository.repository,
-            runtimeClient = FakeRuntimeClient(mode = FakeRuntimeMode.DELETE_FAIL),
-        )
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.deleteInstance(
-                DeleteInstanceCommand(instanceId = runningInstance.instanceId),
-            )
-        }
-
-        // then
-        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.CLEANUP_PENDING, runningInstance.status)
-    }
-
-    // 타임아웃 같은 일반 예외에도 cleanup 대기 상태로 남는지 확인
-    @Test
-    fun `marks cleanup pending when runtime delete throws non scheduler exception`() {
-        // given
-        val instanceRepository = TestInstanceRepository()
-        val runningInstance = instanceRepository.save(newRunningInstance())
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository.repository,
-            runtimeClient = ThrowingRuntimeClient(IllegalStateException("connect timed out")),
-        )
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.deleteInstance(
-                DeleteInstanceCommand(instanceId = runningInstance.instanceId),
-            )
-        }
-
-        // then
-        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.CLEANUP_PENDING, runningInstance.status)
-    }
-
-    // runtime 실행 정보가 없으면 상태를 바꾸기 전에 거절하는지 확인
-    @Test
-    fun `rejects delete when runtime target is missing`() {
-        // given
-        val instanceRepository = TestInstanceRepository()
-        val instance = instanceRepository.save(
-            Instance(
-                teamId = 302L,
-                userId = testUserId,
-                challengeId = 10L,
-                status = InstanceStatus.RUNNING,
-                action = InstanceAction.CREATE,
-                expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
-                hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
-            ),
-        )
         val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.deleteInstance(
-                DeleteInstanceCommand(instanceId = instance.instanceId),
-            )
-        }
-
-        // then
-        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
-        assertEquals(InstanceStatus.RUNNING, instance.status)
-    }
-
-    // 호출한 쪽이 준 삭제 사유가 runtime 요청까지 전달되는지 확인
-    @Test
-    fun `passes delete reason to runtime`() {
-        // given
-        val instanceRepository = TestInstanceRepository()
-        val runningInstance = instanceRepository.save(newRunningInstance())
-        val runtimeClient = RecordingRuntimeClient()
-        val instanceSchedulerService = newService(
-            instanceRepository = instanceRepository.repository,
-            runtimeClient = runtimeClient,
-        )
 
         // when
         instanceSchedulerService.deleteInstance(
@@ -323,10 +238,7 @@ class InstanceSchedulerServiceTest {
         )
 
         // then
-        val request = requireNotNull(runtimeClient.lastDeleteRequest)
-        assertEquals(RuntimeDeleteReason.TTL_EXPIRED, request.reason)
-        assertEquals("workload-1", request.runtimeWorkloadId)
-        assertEquals(InstanceAction.DELETE, runningInstance.action)
+        assertEquals(RuntimeDeleteReason.TTL_EXPIRED, runningInstance.deleteReason)
     }
 
     // 상한을 크게 열어 validateTtl을 통과해도 만료 시각 곱셈이 Long을 넘으면 가드가 거절한다
@@ -359,7 +271,6 @@ class InstanceSchedulerServiceTest {
 
     private fun newService(
         instanceRepository: InstanceRepository,
-        runtimeClient: RuntimeClient = FakeRuntimeClient(),
         policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
     ): InstanceSchedulerService =
         InstanceSchedulerService(
@@ -368,7 +279,6 @@ class InstanceSchedulerServiceTest {
             ),
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
-            runtimeClient = runtimeClient,
             clock = fixedClock(),
         )
 
@@ -427,36 +337,5 @@ class InstanceSchedulerServiceTest {
             expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
             hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
         )
-
-    // SchedulerException이 아닌 예외를 던지는 runtime 이중구현
-    private class ThrowingRuntimeClient(private val error: RuntimeException) : RuntimeClient {
-        override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse = throw error
-        override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse = throw error
-        override fun submitCreate(request: RuntimeCreateRequest) = throw error
-        override fun submitDelete(request: RuntimeDeleteRequest) = throw error
-        override fun getOperation(operationId: String) = throw error
-    }
-
-    // 삭제 요청 내용을 확인하기 위한 runtime 이중구현
-    private class RecordingRuntimeClient : RuntimeClient {
-        var lastDeleteRequest: RuntimeDeleteRequest? = null
-            private set
-
-        private val delegate = FakeRuntimeClient()
-
-        override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse =
-            delegate.createWorkload(request)
-
-        override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse {
-            lastDeleteRequest = request
-            return delegate.deleteWorkload(request)
-        }
-
-        override fun submitCreate(request: RuntimeCreateRequest) = delegate.submitCreate(request)
-
-        override fun submitDelete(request: RuntimeDeleteRequest) = delegate.submitDelete(request)
-
-        override fun getOperation(operationId: String) = delegate.getOperation(operationId)
-    }
 
 }

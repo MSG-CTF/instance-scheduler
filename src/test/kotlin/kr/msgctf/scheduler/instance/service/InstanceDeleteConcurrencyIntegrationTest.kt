@@ -23,9 +23,8 @@ import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
-import kr.msgctf.scheduler.runtime.RuntimeCreateResponse
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
-import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
+import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -34,13 +33,13 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.testcontainers.junit.jupiter.Testcontainers
 
-// 같은 인스턴스에 동시에 들어온 삭제 요청이 Runtime을 한 번만 호출하는지 확인
-// 행 잠금이 없으면 두 요청이 모두 RUNNING을 읽어 외부 삭제가 두 번 나간다
+// 같은 인스턴스에 동시에 들어온 삭제 요청이 한 번만 접수되는지 확인
+// 행 잠금이 없으면 두 요청이 모두 RUNNING을 읽어 둘 다 접수된다
 @Import(
     TestcontainersConfiguration::class,
     InstanceDeleteConcurrencyIntegrationTest.ExternalClientConfig::class,
 )
-@SpringBootTest
+@SpringBootTest(properties = ["scheduler.operation.enabled=false"])
 @Testcontainers(disabledWithoutDocker = true)
 class InstanceDeleteConcurrencyIntegrationTest {
 
@@ -88,11 +87,11 @@ class InstanceDeleteConcurrencyIntegrationTest {
             executor.shutdownNow()
         }
 
-        // then: 외부 삭제는 한 번만 나가고, 한 요청만 성공한다
-        assertEquals(1, runtimeClient.deleteCount())
+        // then: 접수는 runtime을 부르지 않고, 한 요청만 성공한다
+        assertEquals(0, runtimeClient.deleteCount())
         assertEquals(1, results.count { error -> error == null })
 
-        // 늦게 처리된 요청은 이미 정리된 인스턴스를 보고 상태 전이로 거절되어야 한다
+        // 늦게 처리된 요청은 이미 접수된 인스턴스를 보고 상태 전이로 거절되어야 한다
         // deadlock이나 다른 실패로 통과하지 않도록 사유까지 확인한다
         val rejected = results.filterIsInstance<SchedulerException>().single()
 
@@ -100,7 +99,7 @@ class InstanceDeleteConcurrencyIntegrationTest {
 
         val saved = instanceRepository.findById(created.instanceId).orElseThrow()
 
-        assertEquals(InstanceStatus.CLEANED, saved.status)
+        assertEquals(InstanceStatus.STOPPING, saved.status)
     }
 
     // create가 접수만 하므로 삭제 대상 RUNNING 인스턴스를 저장소에 직접 넣는다
@@ -129,7 +128,7 @@ class InstanceDeleteConcurrencyIntegrationTest {
         fun runtimeClient(): CountingRuntimeClient = CountingRuntimeClient()
     }
 
-    // 삭제 호출 횟수를 세는 runtime 대역
+    // 삭제 접수 횟수를 세는 runtime 대역
     class CountingRuntimeClient : RuntimeClient {
 
         private val deleteCount = AtomicInteger()
@@ -140,17 +139,12 @@ class InstanceDeleteConcurrencyIntegrationTest {
 
         fun reset() = deleteCount.set(0)
 
-        override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse =
-            delegate.createWorkload(request)
-
-        override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse {
-            deleteCount.incrementAndGet()
-            return delegate.deleteWorkload(request)
-        }
-
         override fun submitCreate(request: RuntimeCreateRequest) = delegate.submitCreate(request)
 
-        override fun submitDelete(request: RuntimeDeleteRequest) = delegate.submitDelete(request)
+        override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+            deleteCount.incrementAndGet()
+            return delegate.submitDelete(request)
+        }
 
         override fun getOperation(operationId: String) = delegate.getOperation(operationId)
     }

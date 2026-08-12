@@ -39,13 +39,12 @@ class InstanceCleanupWorker(
         val ttlExpired = instanceRepository.findByStatusAndExpiresAtLessThanEqual(InstanceStatus.RUNNING, now)
         val hardTimedOut =
             instanceRepository.findByStatusInAndHardExpiresAtLessThanEqual(InstanceCleanupService.HARD_TIMEOUT_STATES, now)
-        val retryTargets = instanceRepository.findByStatusIn(RETRY_STATES)
-        return (ttlExpired + hardTimedOut + retryTargets).mapTo(LinkedHashSet()) { it.instanceId }
+        val routeLeftovers = instanceRepository.findByStatusIn(ROUTE_STATES)
+        return (ttlExpired + hardTimedOut + routeLeftovers).mapTo(LinkedHashSet()) { it.instanceId }
     }
 
     companion object {
-        // 삭제 실패로 정리가 남은 상태
-        // 한도를 넘긴 행도 같이 넘겨야 서비스가 FAILED로 정리할 수 있다
-        private val RETRY_STATES = listOf(InstanceStatus.EXPIRED, InstanceStatus.CLEANUP_PENDING)
+        // EXPIRED로 멈춰 남은 행도 다시 정리 대기로 보낸다, CLEANUP_PENDING부터는 operation 워커가 맡는다
+        private val ROUTE_STATES = listOf(InstanceStatus.EXPIRED)
     }
 }

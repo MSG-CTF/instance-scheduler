@@ -51,15 +51,6 @@ data class RuntimeResourceLimits(
     val ephemeralStorageMib: Int,
 )
 
-// Runtime이 생성 후 Scheduler에게 돌려주는 값
-data class RuntimeCreateResponse(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-
-    @JsonProperty("service_url")
-    val serviceUrl: String,
-)
-
 // Runtime에 workload 삭제를 요청할 때 보내는 값
 data class RuntimeDeleteRequest(
     @JsonProperty("request_id")
@@ -87,18 +78,6 @@ enum class RuntimeDeleteReason {
     HARD_TIMEOUT_EXPIRED,
     CREATE_FAILED_CLEANUP,
     ADMIN_FORCED,
-}
-
-// Runtime 작업 처리 결과
-data class RuntimeOperationResponse(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-
-    val status: RuntimeOperationStatus,
-)
-
-enum class RuntimeOperationStatus {
-    SUCCESS,
 }
 
 // 접수 결과, 202 접수와 삭제 404(지울 대상 없음)를 구분한다

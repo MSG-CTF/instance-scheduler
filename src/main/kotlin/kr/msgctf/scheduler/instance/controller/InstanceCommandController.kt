@@ -30,19 +30,20 @@ class InstanceCommandController(
         @Valid @RequestBody request: CreateInstanceRequest,
     ): ApiResponse<InstanceResponse> =
         ApiResponse.success(
-            message = "인스턴스 생성 접수 성공",
+            message = "인스턴스 생성 요청 성공",
             data = InstanceResponse.from(
                 instanceSchedulerService.createInstance(request.toCommand()),
             ),
         )
 
     @DeleteMapping("/{instanceId}")
+    @ResponseStatus(HttpStatus.ACCEPTED)
     fun deleteInstance(
         @PathVariable instanceId: UUID,
         @RequestBody(required = false) request: DeleteInstanceRequest?,
     ): ApiResponse<DeleteInstanceResponse> =
         ApiResponse.success(
-            message = "인스턴스 삭제 성공",
+            message = "인스턴스 삭제 요청 성공",
             data = DeleteInstanceResponse.from(
                 instanceSchedulerService.deleteInstance(
                     (request ?: DeleteInstanceRequest()).toCommand(instanceId),

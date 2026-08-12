@@ -14,31 +14,6 @@ class FakeRuntimeClient(
 
     private val operations = ConcurrentHashMap<String, RuntimeOperationResult>()
 
-    override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse {
-        if (mode == FakeRuntimeMode.CREATE_FAIL) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
-                adminDetail = "requestId=${request.requestId}, instanceId=${request.instanceId}",
-            )
-        }
-
-        return RuntimeCreateResponse(
-            runtimeWorkloadId = "workload-${request.instanceId}",
-            serviceUrl = "https://team-${request.teamId}.local",
-        )
-    }
-
-    override fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse {
-        if (mode == FakeRuntimeMode.DELETE_FAIL) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
-                adminDetail = "requestId=${request.requestId}, runtimeWorkloadId=${request.runtimeWorkloadId}",
-            )
-        }
-
-        return success(request.runtimeWorkloadId ?: request.instanceId.toString())
-    }
-
     override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
         failSubmitIfConfigured(request.requestId, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         val operationId = "op-create-${request.instanceId}"
@@ -90,18 +65,10 @@ class FakeRuntimeClient(
             throw SchedulerException(errorCode = errorCode, adminDetail = "requestId=$requestId")
         }
     }
-
-    private fun success(runtimeWorkloadId: String): RuntimeOperationResponse =
-        RuntimeOperationResponse(
-            runtimeWorkloadId = runtimeWorkloadId,
-            status = RuntimeOperationStatus.SUCCESS,
-        )
 }
 
 enum class FakeRuntimeMode {
     SUCCESS,
-    CREATE_FAIL,
-    DELETE_FAIL,
     SUBMIT_FAIL,
     OPERATION_FAIL,
     DELETE_TARGET_MISSING,

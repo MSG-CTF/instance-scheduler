@@ -9,9 +9,4 @@ interface RuntimeClient {
     fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult
 
     fun getOperation(operationId: String): RuntimeOperationSnapshot
-
-    // 동기 전환 기간에만 유지한다
-    fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse
-
-    fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse
 }

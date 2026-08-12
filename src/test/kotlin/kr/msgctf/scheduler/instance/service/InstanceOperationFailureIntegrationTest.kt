@@ -103,11 +103,5 @@ class InstanceOperationFailureIntegrationTest {
 
         override fun getOperation(operationId: String) =
             throw UnsupportedOperationException("not used")
-
-        override fun createWorkload(request: RuntimeCreateRequest) =
-            throw UnsupportedOperationException("not used")
-
-        override fun deleteWorkload(request: RuntimeDeleteRequest) =
-            throw UnsupportedOperationException("not used")
     }
 }
