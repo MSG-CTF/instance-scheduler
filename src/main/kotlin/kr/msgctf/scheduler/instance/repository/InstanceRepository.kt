@@ -12,8 +12,9 @@ import org.springframework.data.repository.query.Param
 
 interface InstanceRepository : JpaRepository<Instance, UUID> {
 
-    fun findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-        teamId: Long,
+    // 유니크 인덱스가 최대 1행을 보장한다
+    fun findFirstByUserIdAndStatusIn(
+        userId: UUID,
         statuses: Collection<InstanceStatus>,
     ): Instance?
 

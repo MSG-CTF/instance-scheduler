@@ -31,10 +31,10 @@ class InstanceQueryController(
     // Jackson의 snake_case 설정은 body에만 적용되고 파라미터 바인딩에는 걸리지 않는다
     @GetMapping("/active")
     fun getActiveInstance(
-        @RequestParam("team_id") teamId: Long,
+        @RequestParam("user_id") userId: UUID,
     ): ApiResponse<InstanceResponse> =
         ApiResponse.success(
-            message = "팀 active instance 조회 성공",
-            data = InstanceResponse.from(instanceQueryService.getActiveInstanceByTeam(teamId)),
+            message = "active instance 조회 성공",
+            data = InstanceResponse.from(instanceQueryService.getActiveInstanceByUser(userId)),
         )
 }

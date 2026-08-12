@@ -528,20 +528,6 @@ class InstanceSchedulerServiceTest {
             instance
         }
 
-        Mockito.`when`(
-            instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-                Mockito.anyLong(),
-                Mockito.anyCollection(),
-            ),
-        ).thenAnswer { invocation ->
-            val teamId = invocation.getArgument<Long>(0)
-            val statuses = invocation.getArgument<Collection<InstanceStatus>>(1)
-
-            savedInstances.firstOrNull { instance ->
-                instance.teamId == teamId && instance.status in statuses
-            }
-        }
-
         return instanceRepository
     }
 

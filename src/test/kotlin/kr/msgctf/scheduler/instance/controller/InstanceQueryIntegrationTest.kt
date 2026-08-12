@@ -145,19 +145,20 @@ class InstanceQueryIntegrationTest {
             }
     }
 
-    // 명세는 쿼리 파라미터 이름을 team_id로 정하고 있다
+    // 명세는 쿼리 파라미터 이름을 user_id로 정하고 있다
     // Jackson snake_case 설정은 body에만 적용되므로 이름을 직접 지정해야 바인딩된다
     @Test
-    fun `get active api binds snake case team id`() {
+    fun `get active api binds snake case user id`() {
         // given
-        val instanceId = createInstance(teamId = 200L)
+        val userId = UUID.randomUUID()
+        val instanceId = createInstance(teamId = 200L, userId = userId)
 
         // when & then
-        mockMvc.get("/api/instances/active?team_id=200")
+        mockMvc.get("/api/instances/active?user_id=$userId")
             .andExpect {
                 status { isOk() }
                 jsonPath("$.code") { value("SUCCESS") }
-                jsonPath("$.message") { value("팀 active instance 조회 성공") }
+                jsonPath("$.message") { value("active instance 조회 성공") }
                 jsonPath("$.data.instance_id") { value(instanceId.toString()) }
                 jsonPath("$.data.team_id") { value(200) }
                 jsonPath("$.data.status") { value("RUNNING") }
@@ -169,10 +170,11 @@ class InstanceQueryIntegrationTest {
     @Test
     fun `get active api does not expose runtime detail`() {
         // given
-        createInstance(teamId = 210L)
+        val userId = UUID.randomUUID()
+        createInstance(teamId = 210L, userId = userId)
 
         // when & then
-        mockMvc.get("/api/instances/active?team_id=210")
+        mockMvc.get("/api/instances/active?user_id=$userId")
             .andExpect {
                 status { isOk() }
                 jsonPath("$.data.runtime_target_id") { doesNotExist() }
@@ -183,9 +185,9 @@ class InstanceQueryIntegrationTest {
     // active 경로가 instanceId 자리로 새면 UUID 변환 실패로 400이 난다
     // 404가 나온다는 것은 라우팅이 의도대로 걸렸다는 뜻이다
     @Test
-    fun `get active api returns not found when team has no active instance`() {
+    fun `get active api returns not found when user has no active instance`() {
         // when & then
-        mockMvc.get("/api/instances/active?team_id=999")
+        mockMvc.get("/api/instances/active?user_id=${UUID.randomUUID()}")
             .andExpect {
                 status { isNotFound() }
                 jsonPath("$.code") { value("INSTANCE_NOT_FOUND") }
@@ -193,7 +195,7 @@ class InstanceQueryIntegrationTest {
     }
 
     @Test
-    fun `get active api rejects missing team id`() {
+    fun `get active api rejects missing user id`() {
         // when & then
         mockMvc.get("/api/instances/active")
             .andExpect {
@@ -203,9 +205,9 @@ class InstanceQueryIntegrationTest {
     }
 
     @Test
-    fun `get active api rejects non numeric team id`() {
+    fun `get active api rejects non uuid user id`() {
         // when & then
-        mockMvc.get("/api/instances/active?team_id=abc")
+        mockMvc.get("/api/instances/active?user_id=abc")
             .andExpect {
                 status { isBadRequest() }
                 jsonPath("$.code") { value("INVALID_REQUEST") }
@@ -259,13 +261,13 @@ class InstanceQueryIntegrationTest {
 
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
 
-    private fun createInstance(teamId: Long): UUID {
+    private fun createInstance(teamId: Long, userId: UUID = UUID.randomUUID()): UUID {
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             content = """
                 {
                   "team_id": $teamId,
-                  "user_id": "${UUID.randomUUID()}",
+                  "user_id": "$userId",
                   "challenge_id": 10,
                   "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
                   "container_port": 8080,

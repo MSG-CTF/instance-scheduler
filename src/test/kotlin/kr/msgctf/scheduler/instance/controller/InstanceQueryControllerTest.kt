@@ -38,22 +38,22 @@ class InstanceQueryControllerTest {
         assertEquals("cluster-main", response.data.runtimeTargetId)
     }
 
-    // 팀 active 조회 응답 확인
+    // user active 조회 응답 확인
     @Test
-    fun `wraps team active instance in success envelope`() {
+    fun `wraps user active instance in success envelope`() {
         // given
         val repository = TestInstanceRepository()
-        val instance = repository.save(newRunningInstance(teamId = 7L))
+        val userId = UUID.randomUUID()
+        val instance = repository.save(newRunningInstance(teamId = 7L, userId = userId))
         val controller = InstanceQueryController(newService(repository))
 
         // when
-        val response = controller.getActiveInstance(teamId = 7L)
+        val response = controller.getActiveInstance(userId = userId)
 
         // then
         assertEquals("SUCCESS", response.code)
-        assertEquals("팀 active instance 조회 성공", response.message)
+        assertEquals("active instance 조회 성공", response.message)
         assertEquals(instance.instanceId, response.data.instanceId)
-        assertEquals(7L, response.data.teamId)
         assertEquals(InstanceStatus.RUNNING, response.data.status)
     }
 
@@ -63,10 +63,10 @@ class InstanceQueryControllerTest {
             transitionService = InstanceStateTransitionService(),
         )
 
-    private fun newRunningInstance(teamId: Long): Instance =
+    private fun newRunningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
-            userId = UUID.randomUUID(),
+            userId = userId,
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
