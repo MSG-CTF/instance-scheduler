@@ -9,7 +9,9 @@ import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
 import java.util.UUID
+import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import org.springframework.data.annotation.CreatedDate
 import org.springframework.data.annotation.LastModifiedDate
 import org.springframework.data.jpa.domain.support.AuditingEntityListener
@@ -65,6 +67,38 @@ class Instance(
 
     @Column(name = "service_url")
     var serviceUrl: String? = null,
+
+    // create 진행이 워커로 미뤄지므로 요청의 실행 스펙을 행에 보관한다
+    @Column(name = "container_image")
+    var containerImage: String? = null,
+
+    @Column(name = "container_port")
+    var containerPort: Int? = null,
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "architecture")
+    var architecture: Architecture? = null,
+
+    @Column(name = "cpu_millicores")
+    var cpuMillicores: Int? = null,
+
+    @Column(name = "memory_mib")
+    var memoryMib: Int? = null,
+
+    @Column(name = "ephemeral_storage_mib")
+    var ephemeralStorageMib: Int? = null,
+
+    // null이면 미접수, 값이 있으면 폴링 중이다
+    @Column(name = "runtime_operation_id")
+    var runtimeOperationId: String? = null,
+
+    @Column(name = "next_poll_at")
+    var nextPollAt: Instant? = null,
+
+    // 정리 대기로 보낸 지점이 저장한다
+    @Enumerated(EnumType.STRING)
+    @Column(name = "delete_reason")
+    var deleteReason: RuntimeDeleteReason? = null,
 
     @CreatedDate
     @Column(name = "created_at", nullable = false, updatable = false)

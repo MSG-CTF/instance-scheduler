@@ -46,4 +46,13 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
 
     // EXPIRED/CLEANUP_PENDING 정리 재시도 대상을 조회한다
     fun findByStatusIn(statuses: Collection<InstanceStatus>): List<Instance>
+
+    // 워커가 진행할 REQUESTED를 조회한다
+    fun findByStatus(status: InstanceStatus): List<Instance>
+
+    // 접수 전 삭제 대상을 조회한다
+    fun findByStatusInAndRuntimeOperationIdIsNull(statuses: Collection<InstanceStatus>): List<Instance>
+
+    // 조회 시각이 된 폴링 대상을 조회한다
+    fun findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(nextPollAt: Instant): List<Instance>
 }
