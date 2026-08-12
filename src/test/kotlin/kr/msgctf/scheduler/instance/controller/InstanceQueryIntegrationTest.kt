@@ -9,6 +9,7 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -38,10 +39,14 @@ class InstanceQueryIntegrationTest {
     private lateinit var instanceRepository: InstanceRepository
 
     @Autowired
+    private lateinit var instanceEventRepository: InstanceEventRepository
+
+    @Autowired
     private lateinit var objectMapper: ObjectMapper
 
     @BeforeEach
     fun setUp() {
+        instanceEventRepository.deleteAll()
         instanceRepository.deleteAll()
     }
 

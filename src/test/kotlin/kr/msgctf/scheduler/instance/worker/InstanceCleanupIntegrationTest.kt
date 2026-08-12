@@ -10,6 +10,7 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
@@ -39,6 +40,9 @@ class InstanceCleanupIntegrationTest {
     private lateinit var instanceRepository: InstanceRepository
 
     @Autowired
+    private lateinit var instanceEventRepository: InstanceEventRepository
+
+    @Autowired
     private lateinit var cleanupService: InstanceCleanupService
 
     @Autowired
@@ -46,6 +50,7 @@ class InstanceCleanupIntegrationTest {
 
     @AfterEach
     fun cleanUp() {
+        instanceEventRepository.deleteAll()
         instanceRepository.deleteAll()
     }
 

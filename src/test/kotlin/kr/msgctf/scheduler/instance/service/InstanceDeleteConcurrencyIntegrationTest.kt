@@ -17,6 +17,7 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeClient
@@ -49,10 +50,14 @@ class InstanceDeleteConcurrencyIntegrationTest {
     private lateinit var instanceRepository: InstanceRepository
 
     @Autowired
+    private lateinit var instanceEventRepository: InstanceEventRepository
+
+    @Autowired
     private lateinit var runtimeClient: CountingRuntimeClient
 
     @BeforeEach
     fun setUp() {
+        instanceEventRepository.deleteAll()
         instanceRepository.deleteAll()
         runtimeClient.reset()
     }
