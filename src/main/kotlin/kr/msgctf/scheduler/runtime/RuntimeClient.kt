@@ -10,7 +10,7 @@ interface RuntimeClient {
 
     fun getOperation(operationId: String): RuntimeOperationSnapshot
 
-    // 동기 전환 기간에만 유지한다, 전환 완료 후 삭제 예정
+    // 동기 전환 기간에만 유지한다
     fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse
 
     fun deleteWorkload(request: RuntimeDeleteRequest): RuntimeOperationResponse

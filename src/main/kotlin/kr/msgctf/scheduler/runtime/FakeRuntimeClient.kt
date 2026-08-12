@@ -9,6 +9,9 @@ class FakeRuntimeClient(
     var mode: FakeRuntimeMode = FakeRuntimeMode.SUCCESS,
 ) : RuntimeClient {
 
+    // OPERATION_FAIL 모드가 돌려줄 last_error_code
+    var operationFailureCode: String = "FAKE_FAILURE"
+
     private val operations = ConcurrentHashMap<String, RuntimeOperationResult>()
 
     override fun createWorkload(request: RuntimeCreateRequest): RuntimeCreateResponse {
@@ -70,7 +73,7 @@ class FakeRuntimeClient(
                 status = RuntimeOperationState.FAILED,
                 retryAfterSeconds = null,
                 result = null,
-                lastErrorCode = "FAKE_FAILURE",
+                lastErrorCode = operationFailureCode,
             )
         }
         return RuntimeOperationSnapshot(

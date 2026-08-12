@@ -8,6 +8,7 @@ import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -18,6 +19,7 @@ import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
@@ -37,6 +39,7 @@ class InstanceOperationService(
     private val brokerClient: BrokerClient,
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
+    private val cleanupProperties: CleanupProperties,
     private val clock: Clock,
     private val tx: TransactionOperations,
 ) {
@@ -121,8 +124,63 @@ class InstanceOperationService(
                     instance.runtimeOperationId = submitted.operationId
                     instance.nextPollAt = clock.instant().plusSeconds(submitted.retryAfterSeconds ?: 0)
                 }
-                // create 접수에는 404가 없는 계약이라 도달하지 않는다, 방어적으로 파킹한다
+                // create 접수에는 404가 없다, 오면 방어적으로 파킹한다
                 RuntimeSubmitResult.TargetMissing -> parkForCreateCleanup(instance)
+            }
+        }
+    }
+
+    fun submitDelete(instanceId: UUID) {
+        val request = tx.execute {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
+            if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null) return@execute null
+            if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
+                parkFailed(instance, "retries=${instance.cleanupRetryCount}")
+                return@execute null
+            }
+            val runtimeType = instance.runtimeType
+            val runtimeTargetId = instance.runtimeTargetId
+            // runtime 좌표가 전혀 없으면 만들어진 workload도 없으므로 바로 정리 완료로 본다
+            if (runtimeType == null || runtimeTargetId == null) {
+                completeDelete(instance)
+                return@execute null
+            }
+            if (instance.deleteReason == null) {
+                // 사유 저장 전에 만들어진 행 폴백
+                instance.deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+            }
+            RuntimeDeleteRequest(
+                requestId = "runtime-delete-$instanceId",
+                instanceId = instanceId,
+                teamId = instance.teamId,
+                target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
+                // workloadId가 null이면 runtime이 instance_id로 삭제한다
+                runtimeWorkloadId = instance.runtimeWorkloadId,
+                reason = instance.deleteReason!!,
+            )
+        } ?: return
+
+        val submitted = try {
+            runtimeClient.submitDelete(request)
+        } catch (exception: Exception) {
+            tx.executeWithoutResult {
+                val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+                instance.cleanupRetryCount += 1
+                if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
+                    parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=${exception.message}")
+                }
+            }
+            return
+        }
+
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            when (submitted) {
+                is RuntimeSubmitResult.Accepted -> {
+                    instance.runtimeOperationId = submitted.operationId
+                    instance.nextPollAt = clock.instant().plusSeconds(submitted.retryAfterSeconds ?: 0)
+                }
+                RuntimeSubmitResult.TargetMissing -> completeDelete(instance)
             }
         }
     }
@@ -169,6 +227,7 @@ class InstanceOperationService(
                     instance.action = null
                     clearOperation(instance)
                 }
+                InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> completeDelete(instance)
                 else -> return@executeWithoutResult
             }
         }
@@ -186,12 +245,39 @@ class InstanceOperationService(
                         "operationId=${snapshot.operationId}, lastErrorCode=${snapshot.lastErrorCode}",
                     )
                 }
+                InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
+                    if (snapshot.lastErrorCode == NOT_FOUND_ERROR_CODE) {
+                        completeDelete(instance)
+                    } else {
+                        parkFailed(
+                            instance,
+                            "operationId=${snapshot.operationId}, lastErrorCode=${snapshot.lastErrorCode}",
+                        )
+                    }
+                }
                 else -> return@executeWithoutResult
             }
         }
     }
 
-    // create 실패 잔여는 delete 경로가 치우도록 정리 대기로 보낸다
+    private fun completeDelete(instance: Instance) {
+        if (instance.status == InstanceStatus.STOPPING) {
+            move(instance, InstanceStatus.STOPPED)
+        }
+        move(instance, InstanceStatus.CLEANED)
+        instance.action = null
+        clearOperation(instance)
+    }
+
+    private fun parkFailed(instance: Instance, detail: String?) {
+        if (instance.status == InstanceStatus.STOPPING) {
+            move(instance, InstanceStatus.CLEANUP_PENDING)
+        }
+        move(instance, InstanceStatus.FAILED)
+        clearOperation(instance)
+        recordError(instance, SchedulerErrorCode.RUNTIME_DELETE_FAILED, detail)
+    }
+
     private fun parkForCreateCleanup(instance: Instance) {
         instance.action = InstanceAction.CLEANUP
         instance.deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
@@ -220,9 +306,13 @@ class InstanceOperationService(
         transitionService.validateTransition(instance.status, to)
         instance.status = to
     }
+
+    companion object {
+        private val DELETE_SUBMIT_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
+        private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
+    }
 }
 
-// 워커 시점에 요청 객체가 없으므로 행에 보관된 실행 스펙을 쓴다
 private data class WorkloadSpec(
     val teamId: Long,
     val challengeId: Long,

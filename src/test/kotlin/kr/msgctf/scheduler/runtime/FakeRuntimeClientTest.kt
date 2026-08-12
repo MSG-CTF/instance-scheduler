@@ -62,7 +62,7 @@ class FakeRuntimeClientTest {
         assertFailsWith<SchedulerException> { client.getOperation("op-unknown") }
     }
 
-    // 아래 동기 메서드 테스트는 createWorkload와 deleteWorkload가 남아 있는 동안 유지한다
+    // 동기 메서드가 남아 있는 동안 유지한다
 
     // workload 생성 성공 확인
     @Test
