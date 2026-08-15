@@ -9,6 +9,7 @@ import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -121,6 +122,7 @@ class InstanceCommandControllerTest {
             instancePolicyService = InstancePolicyService(
                 instanceRepository = repository.repository,
                 transitionService = transitionService,
+                policyProperties = InstancePolicyProperties(),
             ),
             transitionService = transitionService,
             instanceRepository = repository.repository,

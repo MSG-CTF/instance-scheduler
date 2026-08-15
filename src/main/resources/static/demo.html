@@ -172,7 +172,14 @@
     .chip--status[data-tone="bad"] { background: var(--bad); }
     .entry__path { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .entry__time { margin-left: auto; font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
-    pre.json { margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: var(--ink); background: var(--surface-2); overflow-x: auto; border-top: 1px solid var(--line); }
+    .entry__label { font-family: var(--mono); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); padding: 8px 12px 0; }
+    pre.json { margin: 0; padding: 8px 12px 10px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: var(--ink); background: var(--surface-2); overflow-x: auto; }
+    .entry pre.json + .entry__label { border-top: 1px solid var(--line); }
+    pre.json .j-key  { color: var(--accent); }
+    pre.json .j-str  { color: #15803d; }
+    pre.json .j-num  { color: #b45309; }
+    pre.json .j-bool { color: #7c3aed; }
+    pre.json .j-null { color: var(--ink-3); }
 
     .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; font-size: 11.5px; color: var(--ink-2); }
     .legend span { display: inline-flex; align-items: center; gap: 5px; }
@@ -184,7 +191,7 @@
 <body>
   <header class="topbar">
     <div class="topbar__mark">MSG<span>/</span>SCHED</div>
-    <div class="topbar__title">인스턴스 콘솔<small>challenge instance · 생성 · 조회 · 삭제</small></div>
+    <div class="topbar__title">인스턴스 콘솔<small>challenge instance / 생성, 조회, 삭제</small></div>
     <div class="health" id="health" data-up="unknown">
       <span class="health__dot"></span><span id="healthText">서버 확인 중…</span>
     </div>
@@ -275,7 +282,7 @@
             <div class="lane__body" id="log-create"><div class="lane__empty">아직 호출 없음</div></div>
           </div>
           <div class="lane" data-lane="read">
-            <div class="lane__head"><span class="lane__tag">조회</span><span class="lane__meta">GET /api/instances · /active</span><span class="lane__count" id="count-read">0</span></div>
+            <div class="lane__head"><span class="lane__tag">조회</span><span class="lane__meta">GET /api/instances, /active</span><span class="lane__count" id="count-read">0</span></div>
             <div class="lane__body" id="log-read"><div class="lane__empty">아직 호출 없음</div></div>
           </div>
           <div class="lane" data-lane="delete">
@@ -331,23 +338,24 @@
         });
         json = await res.json().catch(() => ({}));
       } catch (err) {
-        pushLog(lane, method, path, 0, { error: String(err) });
+        pushLog(lane, method, path, body, 0, { error: String(err) });
         return { ok: false, status: 0, json: null };
       }
-      pushLog(lane, method, path, res.status, json);
+      pushLog(lane, method, path, body, res.status, json);
       return { ok: res.ok, status: res.status, json };
     }
 
-    function pushLog(lane, method, path, status, json) {
-      const body = $("log-" + lane);
+    function pushLog(lane, method, path, reqBody, status, json) {
+      const box = $("log-" + lane);
       const st = laneState[lane];
-      if (st.empty) { body.innerHTML = ""; st.empty = false; }
+      if (st.empty) { box.innerHTML = ""; st.empty = false; }
       st.n += 1; $("count-" + lane).textContent = st.n;
 
       const ok = status >= 200 && status < 300;
       const time = new Date().toLocaleTimeString("ko-KR", { hour12: false });
       const entry = document.createElement("div");
       entry.className = "entry";
+
       const bar = document.createElement("div");
       bar.className = "entry__bar";
       bar.innerHTML =
@@ -355,11 +363,45 @@
         `<span class="chip chip--status" data-tone="${ok ? "ok" : "bad"}">${status || "ERR"}</span>` +
         `<span class="entry__path"></span><span class="entry__time">${time}</span>`;
       bar.querySelector(".entry__path").textContent = path;
+      entry.appendChild(bar);
+
+      // 요청 본문이 있으면 요청과 응답을 나눠 보여주고, 없으면(GET/DELETE) 응답만 보여준다
+      if (reqBody !== undefined && reqBody !== null) {
+        appendJson(entry, "요청", reqBody);
+        appendJson(entry, "응답", json);
+      } else {
+        appendJson(entry, null, json);
+      }
+      box.prepend(entry);
+    }
+
+    function appendJson(entry, label, obj) {
+      if (label) {
+        const lab = document.createElement("div");
+        lab.className = "entry__label";
+        lab.textContent = label;
+        entry.appendChild(lab);
+      }
       const pre = document.createElement("pre");
       pre.className = "json";
-      pre.textContent = JSON.stringify(json, null, 2);
-      entry.appendChild(bar); entry.appendChild(pre);
-      body.prepend(entry);
+      pre.innerHTML = highlightJson(obj);
+      entry.appendChild(pre);
+    }
+
+    // JSON을 키, 문자열, 숫자, 불리언, null 색으로 구분해 보여준다
+    function highlightJson(obj) {
+      const json = JSON.stringify(obj, null, 2)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return json.replace(
+        /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
+        (m) => {
+          let cls = "j-num";
+          if (/^"/.test(m)) cls = /:$/.test(m) ? "j-key" : "j-str";
+          else if (/true|false/.test(m)) cls = "j-bool";
+          else if (/null/.test(m)) cls = "j-null";
+          return `<span class="${cls}">${m}</span>`;
+        },
+      );
     }
 
     function renderInstance(data) {

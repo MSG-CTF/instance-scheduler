@@ -30,7 +30,7 @@ class FakeRuntimeClient(
             )
         }
 
-        return success(request.runtimeWorkloadId)
+        return success(request.runtimeWorkloadId ?: request.instanceId.toString())
     }
 
     override fun restartWorkload(request: RuntimeRestartRequest): RuntimeOperationResponse =

@@ -105,7 +105,9 @@ class InstanceSchedulerService(
                 ),
             )
         } catch (exception: Exception) {
-            move(instance, InstanceStatus.FAILED)
+            // runtime에 workload가 남을 수 있어 FAILED 대신 정리 대기로 커밋한다
+            instance.action = InstanceAction.CLEANUP
+            move(instance, InstanceStatus.CLEANUP_PENDING)
             throw keepFailedState(exception, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         }
 
@@ -204,6 +206,7 @@ class InstanceSchedulerService(
     // 그대로 두면 이미 만료된 인스턴스가 성공 응답과 함께 생성되므로 여기서 막는다
     // service에서 검사해야 HTTP를 거치지 않는 호출자도 보호된다
     // 응답이 밀리초까지만 내보내므로 저장값도 같은 정밀도로 맞춘다
+    // validateTtl 상한이 보통 이 값을 먼저 거절하지만, 상한이 잘못 설정되거나 validateTtl을 건너뛴 호출자를 위해 남겨둔다
     private fun Instant.plusMinutesOrReject(minutes: Long): Instant =
         try {
             plusSeconds(Math.multiplyExact(minutes, SECONDS_PER_MINUTE))

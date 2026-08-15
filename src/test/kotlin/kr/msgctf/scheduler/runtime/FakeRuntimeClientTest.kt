@@ -87,6 +87,29 @@ class FakeRuntimeClientTest {
         assertEquals("requestId=req-02, runtimeWorkloadId=workload-1", exception.adminDetail)
     }
 
+    // workloadId 없이 instance_id 만으로 삭제를 요청해도 성공하는지 확인
+    @Test
+    fun `delete succeeds without workload id using instance id`() {
+        // given
+        val runtimeClient = FakeRuntimeClient()
+        val instanceId = UUID.randomUUID()
+        val request = RuntimeDeleteRequest(
+            requestId = "runtime-cleanup-$instanceId",
+            instanceId = instanceId,
+            teamId = 1L,
+            target = RuntimeTarget(runtimeType = RuntimeType.KUBERNETES, targetId = "cluster-main"),
+            runtimeWorkloadId = null,
+            reason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP,
+        )
+
+        // when
+        val response = runtimeClient.deleteWorkload(request)
+
+        // then
+        assertEquals(RuntimeOperationStatus.SUCCESS, response.status)
+        assertEquals(instanceId.toString(), response.runtimeWorkloadId)
+    }
+
     // workload 재시작 성공 확인
     @Test
     fun `restarts workload`() {

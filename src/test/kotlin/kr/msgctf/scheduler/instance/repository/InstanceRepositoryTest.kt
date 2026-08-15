@@ -113,6 +113,80 @@ class InstanceRepositoryTest {
         assertNotNull(events[0].createdAt)
     }
 
+    @Test
+    fun `persists cleanup retry count`() {
+        // cleanup 재시도 카운트가 기본 0으로 저장되고 증가분이 반영되는지 확인
+        // given
+        val saved = instanceRepository.saveAndFlush(newInstance(teamId = 5L, challengeId = 10L))
+        assertEquals(0, saved.cleanupRetryCount)
+
+        // when
+        saved.cleanupRetryCount += 1
+        instanceRepository.saveAndFlush(saved)
+        val found = instanceRepository.findById(saved.instanceId).orElse(null)
+
+        // then
+        assertNotNull(found)
+        assertEquals(1, found.cleanupRetryCount)
+    }
+
+    @Test
+    fun `finds ttl expired running instances at boundary`() {
+        // expiresAt <= now 인 RUNNING만 잡고, 미래 만료나 다른 상태는 제외하는지 확인
+        // given
+        val now = Instant.parse("2026-07-04T12:00:00Z")
+        val expired = instanceRepository.saveAndFlush(
+            runningInstance(teamId = 11L, expiresAt = now),
+        )
+        instanceRepository.saveAndFlush(runningInstance(teamId = 12L, expiresAt = now.plusSeconds(60)))
+
+        // when
+        val found = instanceRepository.findByStatusAndExpiresAtLessThanEqual(InstanceStatus.RUNNING, now)
+
+        // then
+        assertEquals(listOf(expired.instanceId), found.map { it.instanceId })
+    }
+
+    @Test
+    fun `finds hard timed out transitional instances`() {
+        // 전이 상태에서 hardExpiresAt <= now 인 것만 잡는지 확인
+        // given
+        val now = Instant.parse("2026-07-04T12:00:00Z")
+        val stuck = instanceRepository.saveAndFlush(
+            provisioningInstance(teamId = 13L, hardExpiresAt = now.minusSeconds(1)),
+        )
+        instanceRepository.saveAndFlush(provisioningInstance(teamId = 14L, hardExpiresAt = now.plusSeconds(60)))
+
+        // when
+        val found = instanceRepository.findByStatusInAndHardExpiresAtLessThanEqual(
+            listOf(InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING),
+            now,
+        )
+
+        // then
+        assertEquals(listOf(stuck.instanceId), found.map { it.instanceId })
+    }
+
+    @Test
+    fun `finds cleanup retry targets regardless of retry count`() {
+        // EXPIRED/CLEANUP_PENDING 이면 재시도 횟수와 무관하게 잡고, 다른 상태는 제외하는지 확인
+        // given
+        val now = Instant.parse("2026-07-04T12:00:00Z")
+        val retryable = instanceRepository.saveAndFlush(
+            pendingInstance(teamId = 15L, retryCount = 4, expiresAt = now),
+        )
+        val overLimit = instanceRepository.saveAndFlush(pendingInstance(teamId = 16L, retryCount = 5, expiresAt = now))
+        instanceRepository.saveAndFlush(runningInstance(teamId = 17L, expiresAt = now.plusSeconds(60)))
+
+        // when
+        val found = instanceRepository.findByStatusIn(
+            listOf(InstanceStatus.EXPIRED, InstanceStatus.CLEANUP_PENDING),
+        )
+
+        // then
+        assertEquals(setOf(retryable.instanceId, overLimit.instanceId), found.map { it.instanceId }.toSet())
+    }
+
     private fun newInstance(
         teamId: Long,
         challengeId: Long,
@@ -128,4 +202,34 @@ class InstanceRepositoryTest {
             hardExpiresAt = now.plusSeconds(10800),
         )
     }
+
+    private fun runningInstance(teamId: Long, expiresAt: Instant): Instance =
+        Instance(
+            teamId = teamId,
+            challengeId = 10L,
+            status = InstanceStatus.RUNNING,
+            runtimeWorkloadId = "workload-$teamId",
+            expiresAt = expiresAt,
+            hardExpiresAt = expiresAt.plusSeconds(3600),
+        )
+
+    private fun provisioningInstance(teamId: Long, hardExpiresAt: Instant): Instance =
+        Instance(
+            teamId = teamId,
+            challengeId = 10L,
+            status = InstanceStatus.PROVISIONING,
+            expiresAt = hardExpiresAt.plusSeconds(3600),
+            hardExpiresAt = hardExpiresAt,
+        )
+
+    private fun pendingInstance(teamId: Long, retryCount: Int, expiresAt: Instant): Instance =
+        Instance(
+            teamId = teamId,
+            challengeId = 10L,
+            status = InstanceStatus.CLEANUP_PENDING,
+            runtimeWorkloadId = "workload-$teamId",
+            expiresAt = expiresAt,
+            hardExpiresAt = expiresAt.plusSeconds(3600),
+            cleanupRetryCount = retryCount,
+        )
 }

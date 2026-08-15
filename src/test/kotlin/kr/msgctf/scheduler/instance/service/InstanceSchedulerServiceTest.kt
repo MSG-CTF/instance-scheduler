@@ -18,6 +18,7 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -92,9 +93,9 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.CREATE, saved.action)
     }
 
-    // runtime 생성 실패 시 FAILED 상태로 끝나는지 확인
+    // runtime 생성 실패 시 CLEANUP_PENDING으로 파킹되는지 확인(남은 workload 회수 대상)
     @Test
-    fun `marks failed when runtime create fails`() {
+    fun `parks cleanup pending when runtime create fails`() {
         // given
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
@@ -112,14 +113,15 @@ class InstanceSchedulerServiceTest {
         val saved = savedInstances.single()
 
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
+        assertEquals(InstanceAction.CLEANUP, saved.action)
         assertEquals("SELF_HOSTED", saved.provider)
         assertEquals("self-hosted-1", saved.accountId)
     }
 
-    // runtime이 SchedulerException이 아닌 예외(타임아웃 등)를 던져도 행이 FAILED로 남는지 확인
+    // runtime이 SchedulerException이 아닌 예외(타임아웃 등)를 던져도 행이 CLEANUP_PENDING으로 남는지 확인
     @Test
-    fun `records failed when runtime throws non-scheduler exception`() {
+    fun `parks cleanup pending when runtime throws non-scheduler exception`() {
         // given
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
@@ -137,7 +139,7 @@ class InstanceSchedulerServiceTest {
         // then
         val saved = savedInstances.single()
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.errorCode)
-        assertEquals(InstanceStatus.FAILED, saved.status)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
     }
 
     // broker가 SchedulerException이 아닌 예외(커넥션 오류 등)를 던져도 행이 FAILED로 남는지 확인
@@ -352,10 +354,39 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.DELETE, runningInstance.action)
     }
 
+    // 상한을 크게 열어 validateTtl을 통과해도 만료 시각 곱셈이 Long을 넘으면 가드가 거절한다
+    // 이 가드를 걷으면 ArithmeticException이 그대로 새서 이 테스트가 실패한다
+    @Test
+    fun `rejects create when ttl overflows the timestamp even under a raised cap`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            policyProperties = InstancePolicyProperties(maxHardTimeoutMinutes = Long.MAX_VALUE),
+        )
+        val command = newCommand(
+            teamId = 202L,
+            ttlMinutes = Long.MAX_VALUE,
+            hardTimeoutMinutes = Long.MAX_VALUE,
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(command)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
+        // 시각 계산에서 막혔으므로 저장까지 가면 안 된다
+        assertEquals(0, savedInstances.size)
+    }
+
     private fun newService(
         instanceRepository: InstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
+        policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
     ): InstanceSchedulerService {
         val transitionService = InstanceStateTransitionService()
         val clock = fixedClock()
@@ -364,6 +395,7 @@ class InstanceSchedulerServiceTest {
             instancePolicyService = InstancePolicyService(
                 instanceRepository = instanceRepository,
                 transitionService = transitionService,
+                policyProperties = policyProperties,
             ),
             transitionService = transitionService,
             instanceRepository = instanceRepository,
