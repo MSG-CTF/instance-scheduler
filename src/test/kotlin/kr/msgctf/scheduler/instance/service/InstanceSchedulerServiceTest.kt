@@ -24,6 +24,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
+import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
@@ -352,6 +353,161 @@ class InstanceSchedulerServiceTest {
         assertEquals(RuntimeDeleteReason.TTL_EXPIRED, request.reason)
         assertEquals("workload-1", request.runtimeWorkloadId)
         assertEquals(InstanceAction.DELETE, runningInstance.action)
+    }
+
+    // 실행 중 인스턴스의 만료 시각이 연장되고 action이 EXTEND로 기록되는지 확인
+    @Test
+    fun `extends running instance expiry`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.extendInstance(
+            ExtendInstanceCommand(instanceId = runningInstance.instanceId, extendMinutes = 30),
+        )
+
+        // then
+        val expected = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200 + 1800)
+        assertEquals(expected, result.expiresAt)
+        assertEquals(expected, runningInstance.expiresAt)
+        assertEquals(InstanceStatus.RUNNING, runningInstance.status)
+        assertEquals(InstanceAction.EXTEND, runningInstance.action)
+    }
+
+    // 새 만료 시각이 hard timeout과 같아지는 경계까지는 허용하는지 확인
+    @Test
+    fun `allows extend up to hard timeout boundary`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.extendInstance(
+            ExtendInstanceCommand(instanceId = runningInstance.instanceId, extendMinutes = 60),
+        )
+
+        // then
+        assertEquals(runningInstance.hardExpiresAt, result.expiresAt)
+    }
+
+    // hard timeout을 넘기는 연장은 거절하고 expiresAt을 그대로 두는지 확인
+    @Test
+    fun `rejects extend beyond hard timeout`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val originalExpiresAt = runningInstance.expiresAt
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.extendInstance(
+                ExtendInstanceCommand(instanceId = runningInstance.instanceId, extendMinutes = 61),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.HARD_TIMEOUT_EXCEEDED, exception.errorCode)
+        assertEquals(originalExpiresAt, runningInstance.expiresAt)
+    }
+
+    // RUNNING이 아닌 상태는 연장 대상이 아님을 확인
+    @Test
+    fun `rejects extend when instance is not running`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            Instance(
+                teamId = 310L,
+                challengeId = 10L,
+                status = InstanceStatus.CLEANUP_PENDING,
+                action = InstanceAction.CLEANUP,
+                expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
+                hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
+            ),
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.extendInstance(
+                ExtendInstanceCommand(instanceId = instance.instanceId, extendMinutes = 10),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200), instance.expiresAt)
+    }
+
+    // 없는 인스턴스는 not found로 거절하는지 확인
+    @Test
+    fun `rejects extend when instance is not found`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.extendInstance(
+                ExtendInstanceCommand(instanceId = UUID.randomUUID(), extendMinutes = 10),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
+    }
+
+    // 표현할 수 없는 큰 연장은 오버플로 가드로 거절하는지 확인
+    @Test
+    fun `rejects extend that overflows the timestamp`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val originalExpiresAt = runningInstance.expiresAt
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.extendInstance(
+                ExtendInstanceCommand(instanceId = runningInstance.instanceId, extendMinutes = Long.MAX_VALUE),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.HARD_TIMEOUT_EXCEEDED, exception.errorCode)
+        assertEquals(originalExpiresAt, runningInstance.expiresAt)
+    }
+
+    // 이미 만료 시각이 지난 RUNNING 인스턴스는 현재 시각을 기준으로 연장해 즉시 재만료를 막는지 확인
+    @Test
+    fun `extends an already expired running instance from now`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val expiredInstance = instanceRepository.save(
+            Instance(
+                teamId = 320L,
+                challengeId = 10L,
+                status = InstanceStatus.RUNNING,
+                action = InstanceAction.CREATE,
+                expiresAt = Instant.parse("2026-07-04T12:00:00Z").minusSeconds(3600),
+                hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(3600),
+            ),
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.extendInstance(
+            ExtendInstanceCommand(instanceId = expiredInstance.instanceId, extendMinutes = 30),
+        )
+
+        // then
+        val expected = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(1800)
+        assertEquals(expected, result.expiresAt)
+        assertEquals(expected, expiredInstance.expiresAt)
     }
 
     // 상한을 크게 열어 validateTtl을 통과해도 만료 시각 곱셈이 Long을 넘으면 가드가 거절한다

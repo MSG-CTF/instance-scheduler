@@ -4,6 +4,7 @@ import java.time.Clock
 import java.time.DateTimeException
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.UUID
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
@@ -14,6 +15,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
+import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.dto.InstanceResult
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
@@ -159,6 +161,38 @@ class InstanceSchedulerService(
         return InstanceResult.from(instance)
     }
 
+    @Transactional
+    fun extendInstance(command: ExtendInstanceCommand): InstanceResult {
+        // 같은 인스턴스에 동시에 들어온 삭제, 정리와 겹치지 않게 행을 잠근다
+        val instance = instanceRepository.findByIdForUpdate(command.instanceId)
+            ?: throw SchedulerException(
+                errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
+                adminDetail = "instanceId=${command.instanceId}",
+            )
+
+        // 연장은 실행 중인 인스턴스에만 의미가 있다
+        if (instance.status != InstanceStatus.RUNNING) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=${command.instanceId}, status=${instance.status}",
+            )
+        }
+
+        // 이미 만료 시각이 지난 인스턴스는 현재 시각을 기준으로 잡아 연장 직후 재만료를 막는다
+        val base = maxOf(clock.instant(), instance.expiresAt)
+        val extended = base.plusMinutesWithinHardTimeout(
+            minutes = command.extendMinutes,
+            hardExpiresAt = instance.hardExpiresAt,
+            instanceId = command.instanceId,
+        )
+
+        // 상태는 그대로 두고 만료 시각과 수행한 작업만 갱신한다
+        instance.expiresAt = extended
+        instance.action = InstanceAction.EXTEND
+
+        return InstanceResult.from(instance)
+    }
+
     // runtime 정보가 없으면 삭제 요청을 만들 수 없음
     private fun buildDeleteRequest(
         instance: Instance,
@@ -221,6 +255,40 @@ class InstanceSchedulerService(
         SchedulerException(
             errorCode = SchedulerErrorCode.INVALID_TTL_RANGE,
             adminDetail = "minutes=$minutes",
+            cause = cause,
+        )
+
+    // 연장한 만료 시각이 hard timeout을 넘거나 표현할 수 없으면 거절한다
+    private fun Instant.plusMinutesWithinHardTimeout(
+        minutes: Long,
+        hardExpiresAt: Instant,
+        instanceId: UUID,
+    ): Instant {
+        val extended = try {
+            plusSeconds(Math.multiplyExact(minutes, SECONDS_PER_MINUTE))
+                .truncatedTo(ChronoUnit.MILLIS)
+        } catch (exception: ArithmeticException) {
+            throw hardTimeoutExceeded(instanceId, minutes, hardExpiresAt, exception)
+        } catch (exception: DateTimeException) {
+            throw hardTimeoutExceeded(instanceId, minutes, hardExpiresAt, exception)
+        }
+
+        if (extended.isAfter(hardExpiresAt)) {
+            throw hardTimeoutExceeded(instanceId, minutes, hardExpiresAt, null)
+        }
+
+        return extended
+    }
+
+    private fun hardTimeoutExceeded(
+        instanceId: UUID,
+        minutes: Long,
+        hardExpiresAt: Instant,
+        cause: Exception?,
+    ): SchedulerException =
+        SchedulerException(
+            errorCode = SchedulerErrorCode.HARD_TIMEOUT_EXCEEDED,
+            adminDetail = "instanceId=$instanceId, extendMinutes=$minutes, hardExpiresAt=$hardExpiresAt",
             cause = cause,
         )
 
