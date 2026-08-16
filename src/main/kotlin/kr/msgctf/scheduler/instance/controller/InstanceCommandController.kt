@@ -6,6 +6,8 @@ import kr.msgctf.scheduler.common.response.ApiResponse
 import kr.msgctf.scheduler.instance.dto.CreateInstanceRequest
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceRequest
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceResponse
+import kr.msgctf.scheduler.instance.dto.ExtendInstanceRequest
+import kr.msgctf.scheduler.instance.dto.ExtendInstanceResponse
 import kr.msgctf.scheduler.instance.dto.InstanceResponse
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import org.springframework.http.HttpStatus
@@ -48,6 +50,18 @@ class InstanceCommandController(
                 instanceSchedulerService.deleteInstance(
                     (request ?: DeleteInstanceRequest()).toCommand(instanceId),
                 ),
+            ),
+        )
+
+    @PostMapping("/{instanceId}/extend")
+    fun extendInstance(
+        @PathVariable instanceId: UUID,
+        @Valid @RequestBody request: ExtendInstanceRequest,
+    ): ApiResponse<ExtendInstanceResponse> =
+        ApiResponse.success(
+            message = "인스턴스 시간 연장 성공",
+            data = ExtendInstanceResponse.from(
+                instanceSchedulerService.extendInstance(request.toCommand(instanceId)),
             ),
         )
 }

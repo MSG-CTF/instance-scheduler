@@ -107,6 +107,19 @@ data class DeleteInstanceRequest(
     }
 }
 
+// extend API 요청 body
+data class ExtendInstanceRequest(
+    @field:Positive
+    val extendMinutes: Long,
+) {
+
+    fun toCommand(instanceId: UUID): ExtendInstanceCommand =
+        ExtendInstanceCommand(
+            instanceId = instanceId,
+            extendMinutes = extendMinutes,
+        )
+}
+
 // create / delete 이후 상태와 active 조회에 공통으로 쓰는 응답 body
 data class InstanceResponse(
     val instanceId: UUID,
@@ -199,6 +212,26 @@ data class DeleteInstanceResponse(
                 teamId = result.teamId,
                 challengeId = result.challengeId,
                 status = result.status,
+            )
+    }
+}
+
+// extend API 응답 body
+data class ExtendInstanceResponse(
+    val instanceId: UUID,
+    val status: InstanceStatus,
+    val expiresAt: Instant,
+    val hardExpiresAt: Instant,
+) {
+
+    companion object {
+
+        fun from(result: InstanceResult): ExtendInstanceResponse =
+            ExtendInstanceResponse(
+                instanceId = result.instanceId,
+                status = result.status,
+                expiresAt = result.expiresAt,
+                hardExpiresAt = result.hardExpiresAt,
             )
     }
 }

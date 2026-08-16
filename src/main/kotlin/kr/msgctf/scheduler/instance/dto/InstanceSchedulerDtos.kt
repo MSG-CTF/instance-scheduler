@@ -27,6 +27,12 @@ data class DeleteInstanceCommand(
     val reason: RuntimeDeleteReason = RuntimeDeleteReason.USER_REQUESTED,
 )
 
+// extend 서비스에 넘기는 요청 값
+data class ExtendInstanceCommand(
+    val instanceId: UUID,
+    val extendMinutes: Long,
+)
+
 // create/delete/active 조회가 공통으로 돌려주는 결과 값
 data class InstanceResult(
     val instanceId: UUID,

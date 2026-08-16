@@ -393,6 +393,85 @@ class InstanceCommandIntegrationTest {
         assertEquals(saved.hardExpiresAt, parseTime(data.get("hard_expires_at").asString()))
     }
 
+    // extend가 만료 시각을 늘리고 DB에 반영되는지 확인
+    @Test
+    fun `extend api extends expiry`() {
+        // given
+        val createResponse = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 1000L, challengeId = 10L)
+        }.andReturn().response.contentAsString
+
+        val instanceId = readInstanceId(createResponse)
+        val originalExpiresAt = parseTime(
+            objectMapper.readTree(createResponse).get("data").get("expires_at").asString(),
+        )
+
+        // when & then
+        val extendResponse = mockMvc.post("/api/instances/$instanceId/extend") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "extend_minutes": 30 }"""
+        }.andExpect {
+            status { isOk() }
+            jsonPath("$.code") { value("SUCCESS") }
+            jsonPath("$.data.instance_id") { value(instanceId.toString()) }
+            jsonPath("$.data.status") { value("RUNNING") }
+            jsonPath("$.data.expires_at") { exists() }
+            jsonPath("$.data.hard_expires_at") { exists() }
+        }.andReturn().response.contentAsString
+
+        // then: 연장된 만료 시각이 원래보다 뒤이고 DB 저장값과 같아야 한다
+        val extendedExpiresAt = parseTime(
+            objectMapper.readTree(extendResponse).get("data").get("expires_at").asString(),
+        )
+        assertTrue(extendedExpiresAt.isAfter(originalExpiresAt), "extended=$extendedExpiresAt original=$originalExpiresAt")
+
+        val saved = instanceRepository.findById(instanceId).orElseThrow()
+        assertEquals(saved.expiresAt, extendedExpiresAt)
+    }
+
+    // hard timeout을 넘기는 연장은 400 HARD_TIMEOUT_EXCEEDED로 거절하는지 확인
+    @Test
+    fun `extend api rejects extend beyond hard timeout`() {
+        // given: ttl 120, hard 180 이라 남은 여유는 60분이다
+        val createResponse = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 1100L, challengeId = 10L)
+        }.andReturn().response.contentAsString
+
+        val instanceId = readInstanceId(createResponse)
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/extend") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "extend_minutes": 100 }"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("HARD_TIMEOUT_EXCEEDED") }
+        }
+    }
+
+    // 0이나 음수 연장은 400 INVALID_REQUEST로 거절하는지 확인
+    @Test
+    fun `extend api rejects non positive extend minutes`() {
+        // given
+        val createResponse = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 1200L, challengeId = 10L)
+        }.andReturn().response.contentAsString
+
+        val instanceId = readInstanceId(createResponse)
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/extend") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "extend_minutes": 0 }"""
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
 
     private fun runningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
