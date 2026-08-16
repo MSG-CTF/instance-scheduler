@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.runtime
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.util.UUID
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -109,6 +110,7 @@ data class RuntimeOperationSnapshot(
 )
 
 // SUCCEEDED일 때만 존재한다
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class RuntimeOperationResult(
     @JsonProperty("runtime_workload_id")
     val runtimeWorkloadId: String,
@@ -116,4 +118,25 @@ data class RuntimeOperationResult(
     // DELETE operation에는 없다
     @JsonProperty("service_url")
     val serviceUrl: String?,
+)
+
+// 접수 202 응답 body
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeOperationAcceptedResponse(
+    @JsonProperty("operation_id")
+    val operationId: String,
+)
+
+// operation 조회 200 응답 body
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeOperationStatusResponse(
+    @JsonProperty("operation_id")
+    val operationId: String,
+
+    val status: RuntimeOperationState,
+
+    val result: RuntimeOperationResult?,
+
+    @JsonProperty("last_error_code")
+    val lastErrorCode: String?,
 )

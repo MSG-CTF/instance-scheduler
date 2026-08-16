@@ -9,8 +9,6 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.TestcontainersConfiguration
-import kr.msgctf.scheduler.broker.BrokerClient
-import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -31,14 +29,17 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
+import org.springframework.context.annotation.Primary
+import org.springframework.test.context.ActiveProfiles
 import org.testcontainers.junit.jupiter.Testcontainers
 
 // 같은 인스턴스에 동시에 들어온 삭제 요청이 한 번만 접수되는지 확인
 // 행 잠금이 없으면 두 요청이 모두 RUNNING을 읽어 둘 다 접수된다
 @Import(
     TestcontainersConfiguration::class,
-    InstanceDeleteConcurrencyIntegrationTest.ExternalClientConfig::class,
+    InstanceDeleteConcurrencyIntegrationTest.CountingRuntimeConfig::class,
 )
+@ActiveProfiles("test")
 @SpringBootTest(properties = ["scheduler.operation.enabled=false"])
 @Testcontainers(disabledWithoutDocker = true)
 class InstanceDeleteConcurrencyIntegrationTest {
@@ -119,13 +120,11 @@ class InstanceDeleteConcurrencyIntegrationTest {
         )
 
     @TestConfiguration
-    class ExternalClientConfig {
+    class CountingRuntimeConfig {
 
         @Bean
-        fun brokerClient(): BrokerClient = FakeBrokerClient()
-
-        @Bean
-        fun runtimeClient(): CountingRuntimeClient = CountingRuntimeClient()
+        @Primary
+        fun countingRuntimeClient(): CountingRuntimeClient = CountingRuntimeClient()
     }
 
     // 삭제 접수 횟수를 세는 runtime 대역
