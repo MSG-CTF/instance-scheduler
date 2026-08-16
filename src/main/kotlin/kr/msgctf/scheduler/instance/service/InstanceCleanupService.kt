@@ -44,9 +44,9 @@ class InstanceCleanupService(
         }
     }
 
-    // runtime을 아직 안 부른 SCHEDULING은 지울 게 없어 FAILED로, workload가 남았을 수 있는 나머지는 CLEANUP_PENDING으로 보낸다
+    // runtime을 아직 안 부른 REQUESTED와 SCHEDULING은 지울 게 없어 FAILED로, workload가 남았을 수 있는 나머지는 CLEANUP_PENDING으로 보낸다
     private fun routeHardTimeout(instance: Instance) {
-        if (instance.status == InstanceStatus.SCHEDULING) {
+        if (instance.status == InstanceStatus.REQUESTED || instance.status == InstanceStatus.SCHEDULING) {
             move(instance, InstanceStatus.FAILED)
             return
         }
@@ -75,6 +75,7 @@ class InstanceCleanupService(
         // 하드타임아웃으로 정리하는 전이 상태 (RUNNING은 TTL 경로가 맡아 제외)
         // 워커의 하드타임아웃 조회도 이 집합을 그대로 써서 조회 대상과 처리 대상이 어긋나지 않게 한다
         internal val HARD_TIMEOUT_STATES = setOf(
+            InstanceStatus.REQUESTED,
             InstanceStatus.SCHEDULING,
             InstanceStatus.PROVISIONING,
             InstanceStatus.RESTARTING,

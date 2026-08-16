@@ -28,7 +28,10 @@ class InstanceStateTransitionService {
     companion object {
         // 표에 적어둔 상태 이동만 허용
         private val allowedTransitions = mapOf(
-            InstanceStatus.REQUESTED to setOf(InstanceStatus.SCHEDULING),
+            InstanceStatus.REQUESTED to setOf(
+                InstanceStatus.SCHEDULING,
+                InstanceStatus.FAILED,
+            ),
             InstanceStatus.SCHEDULING to setOf(
                 InstanceStatus.PROVISIONING,
                 InstanceStatus.FAILED,

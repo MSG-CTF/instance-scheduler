@@ -157,7 +157,22 @@ class InstanceCleanupServiceTest {
     fun `fails hard timed out scheduling instance`() {
         // given
         val repo = TestInstanceRepository()
-        val instance = repo.save(schedulingHardTimedOut())
+        val instance = repo.save(hardTimedOutBeforeRuntime(InstanceStatus.SCHEDULING))
+        val service = newService(repo)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+    }
+
+    // 워커가 못 집어간 REQUESTED도 하드타임아웃이 지나면 FAILED로 끝나는지 확인
+    @Test
+    fun `fails hard timed out requested instance`() {
+        // given
+        val repo = TestInstanceRepository()
+        val instance = repo.save(hardTimedOutBeforeRuntime(InstanceStatus.REQUESTED))
         val service = newService(repo)
 
         // when
@@ -228,12 +243,12 @@ class InstanceCleanupServiceTest {
             hardExpiresAt = NOW.minusSeconds(60),
         )
 
-    private fun schedulingHardTimedOut(): Instance =
+    private fun hardTimedOutBeforeRuntime(status: InstanceStatus): Instance =
         Instance(
             teamId = 403L,
             userId = UUID.randomUUID(),
             challengeId = 10L,
-            status = InstanceStatus.SCHEDULING,
+            status = status,
             action = InstanceAction.CREATE,
             expiresAt = NOW.minusSeconds(120),
             hardExpiresAt = NOW.minusSeconds(60),
