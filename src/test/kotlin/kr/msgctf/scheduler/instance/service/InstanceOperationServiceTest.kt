@@ -24,6 +24,7 @@ import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import org.springframework.transaction.support.TransactionOperations
 
@@ -328,6 +329,35 @@ class InstanceOperationServiceTest {
 
         // then
         assertEquals(InstanceStatus.CLEANED, instance.status)
+    }
+
+    // 폴링 조회 중에 하드타임아웃 정리가 끼어들면 낡은 생성 결과를 반영하지 않는지 확인
+    @Test
+    fun `does not apply stale operation result after cleanup rerouted the instance`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot {
+                instance.status = InstanceStatus.CLEANUP_PENDING
+                instance.action = InstanceAction.CLEANUP
+                instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
+                instance.runtimeOperationId = null
+                instance.nextPollAt = null
+                instance.pollDeadlineAt = null
+                return delegate.getOperation(operationId)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNull(instance.runtimeOperationId)
     }
 
     // 접수가 폴링 시한을 함께 저장하는지 확인

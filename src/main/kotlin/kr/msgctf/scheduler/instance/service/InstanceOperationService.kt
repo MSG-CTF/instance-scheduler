@@ -214,7 +214,7 @@ class InstanceOperationService(
                 operationId,
                 exception.message,
             )
-            reschedulePoll(instanceId, retryAfterSeconds = null)
+            reschedulePoll(instanceId, operationId, retryAfterSeconds = null)
             return
         }
 
@@ -222,15 +222,16 @@ class InstanceOperationService(
             RuntimeOperationState.QUEUED,
             RuntimeOperationState.RUNNING,
             RuntimeOperationState.RETRYING,
-            -> reschedulePoll(instanceId, snapshot.retryAfterSeconds)
+            -> reschedulePoll(instanceId, operationId, snapshot.retryAfterSeconds)
             RuntimeOperationState.SUCCEEDED -> applySucceeded(instanceId, snapshot)
             RuntimeOperationState.FAILED -> applyFailed(instanceId, snapshot)
         }
     }
 
-    private fun reschedulePoll(instanceId: UUID, retryAfterSeconds: Long?) {
+    private fun reschedulePoll(instanceId: UUID, operationId: String, retryAfterSeconds: Long?) {
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            if (instance.runtimeOperationId != operationId) return@executeWithoutResult
             instance.nextPollAt = clock.instant().plusSeconds(retryAfterSeconds ?: 0)
         }
     }
@@ -238,6 +239,8 @@ class InstanceOperationService(
     private fun applySucceeded(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            // 조회하는 사이 operation이 바뀌었거나 지워졌으면 낡은 결과라 반영하지 않는다
+            if (instance.runtimeOperationId != snapshot.operationId) return@executeWithoutResult
             when (instance.status) {
                 InstanceStatus.PROVISIONING -> {
                     val result = checkNotNull(snapshot.result) { "operation result missing: $instanceId" }
@@ -256,6 +259,7 @@ class InstanceOperationService(
     private fun applyFailed(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            if (instance.runtimeOperationId != snapshot.operationId) return@executeWithoutResult
             when (instance.status) {
                 InstanceStatus.PROVISIONING -> {
                     parkForCreateCleanup(instance)
