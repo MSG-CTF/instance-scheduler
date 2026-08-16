@@ -309,6 +309,7 @@ class InstanceSchedulerServiceTest {
         val instance = instanceRepository.save(
             Instance(
                 teamId = 310L,
+                userId = testUserId,
                 challengeId = 10L,
                 status = InstanceStatus.CLEANUP_PENDING,
                 action = InstanceAction.CLEANUP,
@@ -377,6 +378,7 @@ class InstanceSchedulerServiceTest {
         val expiredInstance = instanceRepository.save(
             Instance(
                 teamId = 320L,
+                userId = testUserId,
                 challengeId = 10L,
                 status = InstanceStatus.RUNNING,
                 action = InstanceAction.CREATE,

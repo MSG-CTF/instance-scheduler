@@ -396,16 +396,10 @@ class InstanceCommandIntegrationTest {
     // extend가 만료 시각을 늘리고 DB에 반영되는지 확인
     @Test
     fun `extend api extends expiry`() {
-        // given
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 1000L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
-        val originalExpiresAt = parseTime(
-            objectMapper.readTree(createResponse).get("data").get("expires_at").asString(),
-        )
+        // given: create는 202 접수라 RUNNING을 직접 시딩한다
+        val instance = instanceRepository.saveAndFlush(runningInstance(teamId = 1000L))
+        val instanceId = instance.instanceId
+        val originalExpiresAt = instance.expiresAt
 
         // when & then
         val extendResponse = mockMvc.post("/api/instances/$instanceId/extend") {
@@ -433,13 +427,8 @@ class InstanceCommandIntegrationTest {
     // hard timeout을 넘기는 연장은 400 HARD_TIMEOUT_EXCEEDED로 거절하는지 확인
     @Test
     fun `extend api rejects extend beyond hard timeout`() {
-        // given: ttl 120, hard 180 이라 남은 여유는 60분이다
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 1100L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
+        // given: 만료까지 120분, hard까지 180분이라 남은 여유는 60분이다
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 1100L)).instanceId
 
         // when & then
         mockMvc.post("/api/instances/$instanceId/extend") {
