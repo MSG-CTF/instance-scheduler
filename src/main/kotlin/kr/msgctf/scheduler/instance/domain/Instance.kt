@@ -95,6 +95,10 @@ class Instance(
     @Column(name = "next_poll_at")
     var nextPollAt: Instant? = null,
 
+    // 이 시각까지 안 끝난 operation은 폴링을 멈추고 실패로 처리한다
+    @Column(name = "poll_deadline_at")
+    var pollDeadlineAt: Instant? = null,
+
     // 정리 대기로 보낸 지점이 저장한다
     @Enumerated(EnumType.STRING)
     @Column(name = "delete_reason")

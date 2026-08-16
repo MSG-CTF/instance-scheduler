@@ -112,6 +112,7 @@ class InstanceCleanupServiceTest {
             hardTimedOut(status = InstanceStatus.PROVISIONING).apply {
                 runtimeOperationId = "op-create-1"
                 nextPollAt = NOW
+                pollDeadlineAt = NOW.plusSeconds(600)
             },
         )
         val service = newService(repo)
@@ -123,6 +124,7 @@ class InstanceCleanupServiceTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertNull(instance.runtimeOperationId)
         assertNull(instance.nextPollAt)
+        assertNull(instance.pollDeadlineAt)
     }
 
     // STOPPING은 삭제 operation이 도는 중이라 지우지 않는지 확인
@@ -136,6 +138,7 @@ class InstanceCleanupServiceTest {
                 deleteReason = RuntimeDeleteReason.USER_REQUESTED
                 runtimeOperationId = "op-delete-1"
                 nextPollAt = NOW
+                pollDeadlineAt = NOW.plusSeconds(600)
             },
         )
         val service = newService(repo)
@@ -146,6 +149,7 @@ class InstanceCleanupServiceTest {
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals("op-delete-1", instance.runtimeOperationId)
+        assertEquals(NOW.plusSeconds(600), instance.pollDeadlineAt)
     }
 
     // runtime 미호출 상태(SCHEDULING)는 지울 게 없어 FAILED로 끝나는지 확인

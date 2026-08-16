@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.UUID
@@ -14,6 +15,7 @@ import kr.msgctf.scheduler.broker.FakeBrokerMode
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -204,6 +206,7 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.STOPPING, instance.status)
         assertNotNull(instance.runtimeOperationId)
+        assertNotNull(instance.pollDeadlineAt)
 
         // when
         service.pollOperation(instance.instanceId)
@@ -327,12 +330,93 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANED, instance.status)
     }
 
+    // 접수가 폴링 시한을 함께 저장하는지 확인
+    @Test
+    fun `stores poll deadline on accept`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(
+            repository,
+            operationProperties = OperationProperties(pollTimeout = Duration.ofMinutes(5)),
+        )
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plus(Duration.ofMinutes(5)), instance.pollDeadlineAt)
+    }
+
+    // 시한이 지난 생성 폴링은 멈추고 정리 대기로 보내는지 확인
+    @Test
+    fun `parks provisioning instance when poll deadline passed`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, events = events)
+        service.progressRequested(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant()
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
+        assertNull(instance.runtimeOperationId)
+        assertNull(instance.pollDeadlineAt)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 정리 대기 상태의 삭제 폴링도 시한이 지나면 FAILED로 남는지 확인
+    @Test
+    fun `parks cleanup pending instance failed when poll deadline passed`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newCleanupPending())
+        val service = newService(repository, events = events)
+        service.submitDelete(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant()
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.runtimeOperationId)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 시한이 지난 삭제 폴링은 멈추고 FAILED로 남기는지 확인
+    @Test
+    fun `parks stopping instance failed when poll deadline passed`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping())
+        val service = newService(repository, events = events)
+        service.submitDelete(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant()
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.runtimeOperationId)
+        assertEquals(1, events.saved.size)
+    }
+
     private fun newService(
         repository: TestInstanceRepository,
         brokerClient: FakeBrokerClient = FakeBrokerClient(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
         events: TestInstanceEventRepository = TestInstanceEventRepository(),
         cleanupProperties: CleanupProperties = CleanupProperties(),
+        operationProperties: OperationProperties = OperationProperties(),
     ): InstanceOperationService =
         InstanceOperationService(
             transitionService = InstanceStateTransitionService(),
@@ -342,6 +426,7 @@ class InstanceOperationServiceTest {
             resourceCandidateSelector = ResourceCandidateSelector(clock),
             runtimeClient = runtimeClient,
             cleanupProperties = cleanupProperties,
+            operationProperties = operationProperties,
             clock = clock,
             tx = TransactionOperations.withoutTransaction(),
         )

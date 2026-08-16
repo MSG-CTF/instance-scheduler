@@ -10,4 +10,6 @@ data class OperationProperties(
     val enabled: Boolean = true,
     // 워커 실행 주기, @Scheduled는 fixed-delay placeholder를 읽으므로 이 필드는 문서용이다
     val fixedDelay: Duration = Duration.ofSeconds(2),
+    // 접수한 operation의 결과를 기다리는 상한
+    val pollTimeout: Duration = Duration.ofMinutes(10),
 )

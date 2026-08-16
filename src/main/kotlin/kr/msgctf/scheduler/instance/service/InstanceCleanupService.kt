@@ -55,6 +55,7 @@ class InstanceCleanupService(
         if (instance.status != InstanceStatus.STOPPING) {
             instance.runtimeOperationId = null
             instance.nextPollAt = null
+            instance.pollDeadlineAt = null
         }
         instance.action = InstanceAction.CLEANUP
         if (instance.deleteReason == null) {

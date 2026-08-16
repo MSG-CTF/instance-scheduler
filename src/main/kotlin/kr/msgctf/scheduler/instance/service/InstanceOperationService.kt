@@ -9,6 +9,7 @@ import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -41,6 +42,7 @@ class InstanceOperationService(
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
     private val cleanupProperties: CleanupProperties,
+    private val operationProperties: OperationProperties,
     private val clock: Clock,
     private val tx: TransactionOperations,
 ) {
@@ -125,10 +127,7 @@ class InstanceOperationService(
             // 접수를 기다리는 사이 상태가 바뀌었으면 operation을 저장하지 않는다
             if (instance.status != InstanceStatus.PROVISIONING) return@executeWithoutResult
             when (submitted) {
-                is RuntimeSubmitResult.Accepted -> {
-                    instance.runtimeOperationId = submitted.operationId
-                    instance.nextPollAt = clock.instant().plusSeconds(submitted.retryAfterSeconds ?: 0)
-                }
+                is RuntimeSubmitResult.Accepted -> storeAcceptedOperation(instance, submitted)
                 // create 접수에는 404가 없다, 오면 방어적으로 파킹한다
                 RuntimeSubmitResult.TargetMissing -> parkForCreateCleanup(instance)
             }
@@ -187,10 +186,7 @@ class InstanceOperationService(
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             when (submitted) {
-                is RuntimeSubmitResult.Accepted -> {
-                    instance.runtimeOperationId = submitted.operationId
-                    instance.nextPollAt = clock.instant().plusSeconds(submitted.retryAfterSeconds ?: 0)
-                }
+                is RuntimeSubmitResult.Accepted -> storeAcceptedOperation(instance, submitted)
                 RuntimeSubmitResult.TargetMissing -> completeDelete(instance)
             }
         }
@@ -198,7 +194,14 @@ class InstanceOperationService(
 
     fun pollOperation(instanceId: UUID) {
         val operationId = tx.execute {
-            instanceRepository.findByIdForUpdate(instanceId)?.runtimeOperationId
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
+            val operationId = instance.runtimeOperationId ?: return@execute null
+            val deadline = instance.pollDeadlineAt
+            if (deadline != null && !clock.instant().isBefore(deadline)) {
+                giveUpPolling(instance, operationId)
+                return@execute null
+            }
+            operationId
         } ?: return
 
         val snapshot = try {
@@ -277,6 +280,19 @@ class InstanceOperationService(
         }
     }
 
+    private fun giveUpPolling(instance: Instance, operationId: String) {
+        log.warn("operation poll timed out: instanceId={}, operationId={}", instance.instanceId, operationId)
+        val detail = "operationId=$operationId, reason=poll timeout"
+        when (instance.status) {
+            InstanceStatus.PROVISIONING -> {
+                parkForCreateCleanup(instance)
+                recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, detail)
+            }
+            InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> parkFailed(instance, detail)
+            else -> clearOperation(instance)
+        }
+    }
+
     private fun completeDelete(instance: Instance) {
         if (instance.status == InstanceStatus.STOPPING) {
             move(instance, InstanceStatus.STOPPED)
@@ -302,9 +318,17 @@ class InstanceOperationService(
         clearOperation(instance)
     }
 
+    private fun storeAcceptedOperation(instance: Instance, accepted: RuntimeSubmitResult.Accepted) {
+        val now = clock.instant()
+        instance.runtimeOperationId = accepted.operationId
+        instance.nextPollAt = now.plusSeconds(accepted.retryAfterSeconds ?: 0)
+        instance.pollDeadlineAt = now.plus(operationProperties.pollTimeout)
+    }
+
     private fun clearOperation(instance: Instance) {
         instance.runtimeOperationId = null
         instance.nextPollAt = null
+        instance.pollDeadlineAt = null
     }
 
     private fun recordError(instance: Instance, errorCode: SchedulerErrorCode, detail: String?) {
