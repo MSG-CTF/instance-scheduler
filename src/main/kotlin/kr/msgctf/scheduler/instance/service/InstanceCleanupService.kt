@@ -50,6 +50,12 @@ class InstanceCleanupService(
             move(instance, InstanceStatus.FAILED)
             return
         }
+        // 생성 operation이 남아 있으면 삭제가 시작되지 않으므로 지운다
+        // STOPPING은 이미 삭제 operation이 도는 중이라 그대로 둔다
+        if (instance.status != InstanceStatus.STOPPING) {
+            instance.runtimeOperationId = null
+            instance.nextPollAt = null
+        }
         instance.action = InstanceAction.CLEANUP
         if (instance.deleteReason == null) {
             instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED

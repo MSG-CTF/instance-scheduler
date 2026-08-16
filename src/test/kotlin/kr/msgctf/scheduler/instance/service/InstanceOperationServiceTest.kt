@@ -20,7 +20,9 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.RuntimeClient
+import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import org.springframework.transaction.support.TransactionOperations
 
 class InstanceOperationServiceTest {
@@ -95,6 +97,32 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceAction.CLEANUP, instance.action)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
         assertNull(instance.runtimeOperationId)
+    }
+
+    // 접수를 기다리는 사이 정리 대상이 되면 operation을 저장하지 않는지 확인
+    @Test
+    fun `does not store operation when instance left provisioning during submit`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                instance.status = InstanceStatus.CLEANUP_PENDING
+                instance.action = InstanceAction.CLEANUP
+                instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNull(instance.runtimeOperationId)
+        assertNull(instance.nextPollAt)
     }
 
     // SUCCEEDED result를 반영해 RUNNING으로 확정하는지 확인

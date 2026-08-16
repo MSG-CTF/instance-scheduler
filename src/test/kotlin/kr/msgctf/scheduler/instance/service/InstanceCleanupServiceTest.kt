@@ -102,6 +102,52 @@ class InstanceCleanupServiceTest {
         assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
     }
 
+    // 하드타임아웃 정리가 남아 있던 생성 operation을 지우는지 확인
+    // 안 지우면 삭제가 시작되지 않는다
+    @Test
+    fun `clears create operation when routing hard timed out provisioning`() {
+        // given
+        val repo = TestInstanceRepository()
+        val instance = repo.save(
+            hardTimedOut(status = InstanceStatus.PROVISIONING).apply {
+                runtimeOperationId = "op-create-1"
+                nextPollAt = NOW
+            },
+        )
+        val service = newService(repo)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNull(instance.runtimeOperationId)
+        assertNull(instance.nextPollAt)
+    }
+
+    // STOPPING은 삭제 operation이 도는 중이라 지우지 않는지 확인
+    @Test
+    fun `keeps delete operation when routing hard timed out stopping`() {
+        // given
+        val repo = TestInstanceRepository()
+        val instance = repo.save(
+            hardTimedOut(status = InstanceStatus.STOPPING).apply {
+                action = InstanceAction.DELETE
+                deleteReason = RuntimeDeleteReason.USER_REQUESTED
+                runtimeOperationId = "op-delete-1"
+                nextPollAt = NOW
+            },
+        )
+        val service = newService(repo)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("op-delete-1", instance.runtimeOperationId)
+    }
+
     // runtime 미호출 상태(SCHEDULING)는 지울 게 없어 FAILED로 끝나는지 확인
     @Test
     fun `fails hard timed out scheduling instance`() {

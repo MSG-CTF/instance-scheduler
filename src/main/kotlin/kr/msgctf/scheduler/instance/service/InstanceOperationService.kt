@@ -26,6 +26,7 @@ import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionOperations
 
@@ -43,6 +44,8 @@ class InstanceOperationService(
     private val clock: Clock,
     private val tx: TransactionOperations,
 ) {
+
+    private val log = LoggerFactory.getLogger(javaClass)
 
     fun progressRequested(instanceId: UUID) {
         val spec = tx.execute {
@@ -119,6 +122,8 @@ class InstanceOperationService(
 
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            // 접수를 기다리는 사이 상태가 바뀌었으면 operation을 저장하지 않는다
+            if (instance.status != InstanceStatus.PROVISIONING) return@executeWithoutResult
             when (submitted) {
                 is RuntimeSubmitResult.Accepted -> {
                     instance.runtimeOperationId = submitted.operationId
@@ -163,6 +168,12 @@ class InstanceOperationService(
         val submitted = try {
             runtimeClient.submitDelete(request)
         } catch (exception: Exception) {
+            log.warn(
+                "runtime delete submit failed: instanceId={}, requestId={}, reason={}",
+                instanceId,
+                request.requestId,
+                exception.message,
+            )
             tx.executeWithoutResult {
                 val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
                 instance.cleanupRetryCount += 1
@@ -194,6 +205,12 @@ class InstanceOperationService(
             runtimeClient.getOperation(operationId)
         } catch (exception: Exception) {
             // 조회 오류는 인스턴스 상태를 바꾸지 않는다
+            log.warn(
+                "operation lookup failed: instanceId={}, operationId={}, reason={}",
+                instanceId,
+                operationId,
+                exception.message,
+            )
             reschedulePoll(instanceId, retryAfterSeconds = null)
             return
         }
