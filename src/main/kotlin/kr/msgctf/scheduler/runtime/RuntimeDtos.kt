@@ -14,7 +14,7 @@ data class RuntimeCreateRequest(
     val instanceId: UUID,
 
     @JsonProperty("team_id")
-    val teamId: Long,
+    val teamId: UUID,
 
     val target: RuntimeTarget,
     val workload: RuntimeWorkload,
@@ -61,7 +61,7 @@ data class RuntimeDeleteRequest(
     val instanceId: UUID,
 
     @JsonProperty("team_id")
-    val teamId: Long,
+    val teamId: UUID,
 
     val target: RuntimeTarget,
 

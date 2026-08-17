@@ -11,6 +11,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.service.InstanceQueryService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
+import kr.msgctf.scheduler.testUuid
 
 // controller는 서비스 결과를 성공 응답으로 감싸는지만 확인
 // HTTP 직렬화와 파라미터 바인딩은 integration test에서 확인
@@ -23,7 +24,7 @@ class InstanceQueryControllerTest {
     fun `wraps instance detail in success envelope`() {
         // given
         val repository = TestInstanceRepository()
-        val instance = repository.save(newRunningInstance(teamId = 1L))
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
         val controller = InstanceQueryController(newService(repository))
 
         // when
@@ -44,7 +45,7 @@ class InstanceQueryControllerTest {
         // given
         val repository = TestInstanceRepository()
         val userId = UUID.randomUUID()
-        val instance = repository.save(newRunningInstance(teamId = 7L, userId = userId))
+        val instance = repository.save(newRunningInstance(teamId = testUuid(7), userId = userId))
         val controller = InstanceQueryController(newService(repository))
 
         // when
@@ -63,11 +64,11 @@ class InstanceQueryControllerTest {
             transitionService = InstanceStateTransitionService(),
         )
 
-    private fun newRunningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
+    private fun newRunningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
             userId = userId,
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             provider = "SELF_HOSTED",

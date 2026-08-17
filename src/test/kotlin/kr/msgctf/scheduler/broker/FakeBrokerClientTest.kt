@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.testUuid
 
 class FakeBrokerClientTest {
 
@@ -62,8 +63,8 @@ class FakeBrokerClientTest {
         BrokerCandidateRequest(
             requestId = "req-01",
             requestedAt = Instant.parse("2026-07-06T13:30:00Z"),
-            teamId = 1L,
-            challengeId = 10L,
+            teamId = testUuid(1),
+            challengeId = testUuid(10),
             instanceId = UUID.fromString("018f3f1e-21b8-7a1e-a30b-63b3400fd001"),
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(

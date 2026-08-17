@@ -27,13 +27,13 @@ class Instance(
     val instanceId: UUID = UUID.randomUUID(),
 
     @Column(name = "team_id", nullable = false)
-    val teamId: Long,
+    val teamId: UUID,
 
     @Column(name = "user_id", nullable = false, updatable = false)
     val userId: UUID,
 
     @Column(name = "challenge_id", nullable = false)
-    val challengeId: Long,
+    val challengeId: UUID,
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)

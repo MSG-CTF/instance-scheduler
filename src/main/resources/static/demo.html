@@ -206,8 +206,8 @@
           <div class="fieldset">
             <div class="fieldset__legend">인스턴스</div>
             <div class="grid2">
-              <div class="field"><label for="team_id">team_id</label><input id="team_id" type="number" value="1" min="1" /></div>
-              <div class="field"><label for="challenge_id">challenge_id</label><input id="challenge_id" type="number" value="100" min="1" /></div>
+              <div class="field"><label for="team_id">team_id</label><input id="team_id" type="text" value="00000000-0000-0000-0000-000000000001" /></div>
+              <div class="field"><label for="challenge_id">challenge_id</label><input id="challenge_id" type="text" value="00000000-0000-0000-0000-000000000100" /></div>
             </div>
             <div class="field" style="margin-top:10px"><label for="user_id">user_id</label><input id="user_id" type="text" value="018f3f1e-0000-7a91-a30b-630000000001" /></div>
           </div>
@@ -314,9 +314,9 @@
 
     function requestBody() {
       return {
-        team_id: num("team_id"),
+        team_id: val("team_id"),
         user_id: val("user_id"),
-        challenge_id: num("challenge_id"),
+        challenge_id: val("challenge_id"),
         container_image: val("container_image"),
         container_port: num("container_port"),
         architecture: val("architecture"),

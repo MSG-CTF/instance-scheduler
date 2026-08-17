@@ -10,6 +10,8 @@
 
 @host = http://localhost:8080
 @user_id = 018f3f1e-0000-7a91-a30b-630000000001
+@team_id = 00000000-0000-0000-0000-000000000001
+@challenge_id = 00000000-0000-0000-0000-000000000100
 
 ### 1. 인스턴스 생성 접수 -> instance_id 저장
 # 응답은 202 + status REQUESTED이고 service_url은 아직 null이다.
@@ -19,9 +21,9 @@ POST {{host}}/api/instances
 Content-Type: application/json
 
 {
-  "team_id": 1,
+  "team_id": "{{team_id}}",
   "user_id": "{{user_id}}",
-  "challenge_id": 100,
+  "challenge_id": "{{challenge_id}}",
   "container_image": "ghcr.io/example/web:latest",
   "container_port": 8080,
   "architecture": "AMD64",
@@ -61,9 +63,9 @@ POST {{host}}/api/instances
 Content-Type: application/json
 
 {
-  "team_id": 1,
+  "team_id": "{{team_id}}",
   "user_id": "{{user_id}}",
-  "challenge_id": 100,
+  "challenge_id": "{{challenge_id}}",
   "container_image": "ghcr.io/example/web:latest",
   "container_port": 8080,
   "architecture": "AMD64",

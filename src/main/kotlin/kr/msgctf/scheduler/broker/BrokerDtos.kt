@@ -26,10 +26,10 @@ data class BrokerCandidateRequest(
     val requestedAt: Instant,
 
     @JsonProperty("team_id")
-    val teamId: Long,
+    val teamId: UUID,
 
     @JsonProperty("challenge_id")
-    val challengeId: Long,
+    val challengeId: UUID,
 
     @JsonProperty("instance_id")
     val instanceId: UUID,

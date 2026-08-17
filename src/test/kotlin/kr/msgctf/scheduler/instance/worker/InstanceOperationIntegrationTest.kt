@@ -16,6 +16,7 @@ import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.AfterEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -95,9 +96,9 @@ class InstanceOperationIntegrationTest {
     private fun newRequested(): Instance {
         val now = Instant.now()
         return Instance(
-            teamId = 900L,
+            teamId = testUuid(900),
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.REQUESTED,
             action = InstanceAction.CREATE,
             containerImage = "ghcr.io/example/web:latest",

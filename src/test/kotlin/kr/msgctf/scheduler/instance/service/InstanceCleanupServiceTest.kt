@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testUuid
 
 class InstanceCleanupServiceTest {
 
@@ -216,9 +217,9 @@ class InstanceCleanupServiceTest {
         userId: UUID = UUID.randomUUID(),
     ): Instance =
         Instance(
-            teamId = 401L,
+            teamId = testUuid(401),
             userId = userId,
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = status,
             action = if (status == InstanceStatus.RUNNING) InstanceAction.CREATE else InstanceAction.CLEANUP,
             runtimeType = RuntimeType.KUBERNETES,
@@ -231,9 +232,9 @@ class InstanceCleanupServiceTest {
 
     private fun hardTimedOut(status: InstanceStatus): Instance =
         Instance(
-            teamId = 402L,
+            teamId = testUuid(402),
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = status,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,
@@ -245,9 +246,9 @@ class InstanceCleanupServiceTest {
 
     private fun hardTimedOutBeforeRuntime(status: InstanceStatus): Instance =
         Instance(
-            teamId = 403L,
+            teamId = testUuid(403),
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = status,
             action = InstanceAction.CREATE,
             expiresAt = NOW.minusSeconds(120),

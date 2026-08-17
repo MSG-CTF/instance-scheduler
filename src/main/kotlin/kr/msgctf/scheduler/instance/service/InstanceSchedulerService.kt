@@ -36,7 +36,7 @@ class InstanceSchedulerService(
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
 
         // 팀 잠금을 행 잠금보다 먼저 잡아 같은 팀의 create끼리 잠금 순서를 통일한다
-        instanceRepository.lockTeam(command.teamId)
+        instanceRepository.lockTeam(command.teamId.toString())
 
         val previous = instanceRepository.findByUserIdAndStatusInForUpdate(
             userId = command.userId,

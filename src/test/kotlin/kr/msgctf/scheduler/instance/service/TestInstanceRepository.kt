@@ -57,7 +57,7 @@ class TestInstanceRepository {
                 "lockTeam" -> null
                 "countByTeamIdAndStatusIn" -> {
                     @Suppress("UNCHECKED_CAST")
-                    val teamId = args?.get(0) as Long
+                    val teamId = args?.get(0) as UUID
                     val statuses = args[1] as Collection<InstanceStatus>
                     savedInstances.count { it.teamId == teamId && it.status in statuses }.toLong()
                 }
