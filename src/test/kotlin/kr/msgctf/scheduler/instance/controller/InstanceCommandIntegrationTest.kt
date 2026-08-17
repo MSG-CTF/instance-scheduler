@@ -128,6 +128,48 @@ class InstanceCommandIntegrationTest {
         assertEquals(2, instanceRepository.findAll().count { it.status == InstanceStatus.REQUESTED })
     }
 
+    // 팀 활성 인스턴스가 상한(2)이면 세 번째 user의 생성은 거절된다
+    @Test
+    fun `create api rejects third instance of a full team`() {
+        // given
+        instanceRepository.saveAndFlush(runningInstance(teamId = 220L))
+        instanceRepository.saveAndFlush(runningInstance(teamId = 220L))
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 220L, challengeId = 30L)
+        }.andExpect {
+            status { isConflict() }
+            jsonPath("$.code") { value("TEAM_INSTANCE_LIMIT_EXCEEDED") }
+        }
+
+        // then: 거절된 요청이 행을 남기면 안 된다
+        assertEquals(2, instanceRepository.findAll().count { it.teamId == 220L })
+    }
+
+    // 꽉 찬 팀이라도 자기 인스턴스 교체는 개수가 늘지 않아 접수된다
+    @Test
+    fun `create api replaces own instance in a full team`() {
+        // given
+        val userId = UUID.randomUUID()
+        val own = instanceRepository.saveAndFlush(runningInstance(teamId = 230L, userId = userId))
+        instanceRepository.saveAndFlush(runningInstance(teamId = 230L))
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = createRequestBody(teamId = 230L, challengeId = 30L, userId = userId)
+        }.andExpect {
+            status { isAccepted() }
+            jsonPath("$.data.replaced_instance_id") { value(own.instanceId.toString()) }
+        }
+
+        // then: 이전 자기 인스턴스는 정리 대기로 빠진다
+        val replaced = instanceRepository.findById(own.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.CLEANUP_PENDING, replaced.status)
+    }
+
     @Test
     fun `create api rejects invalid request body`() {
         // 잘못된 요청값은 service로 넘기지 않고 거절

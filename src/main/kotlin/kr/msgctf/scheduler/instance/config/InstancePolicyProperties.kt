@@ -13,4 +13,9 @@ data class InstancePolicyProperties(
     // 0이나 음수면 모든 생성이 거절되므로 양수만 허용해 기동 시점에 걸러낸다
     @field:Positive
     val maxHardTimeoutMinutes: Long = 360,
+
+    // 한 팀이 동시에 유지할 수 있는 활성 인스턴스 최대 개수
+    // 0이나 음수면 모든 생성이 거절되므로 양수만 허용해 기동 시점에 걸러낸다
+    @field:Positive
+    val maxTeamActiveInstances: Long = 2,
 )

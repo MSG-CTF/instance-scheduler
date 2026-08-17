@@ -53,6 +53,14 @@ class TestInstanceRepository {
                     val statuses = args[1] as Collection<InstanceStatus>
                     savedInstances.firstOrNull { it.userId == userId && it.status in statuses }
                 }
+                // 단위 테스트에는 동시성이 없어 잠금 없이 지나간다
+                "lockTeam" -> null
+                "countByTeamIdAndStatusIn" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val teamId = args?.get(0) as Long
+                    val statuses = args[1] as Collection<InstanceStatus>
+                    savedInstances.count { it.teamId == teamId && it.status in statuses }.toLong()
+                }
                 "flush" -> null
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }

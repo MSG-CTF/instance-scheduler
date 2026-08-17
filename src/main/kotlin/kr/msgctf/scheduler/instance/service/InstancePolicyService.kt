@@ -31,4 +31,16 @@ class InstancePolicyService(
             )
         }
     }
+
+    // 팀의 활성 인스턴스가 상한에 이르렀으면 새 생성을 거절한다
+    // user당 1개 제한과 별개로 두는 이유는 팀 인원이 늘어도 팀 총량이 상한을 넘지 않게 하기 위함
+    fun validateTeamActiveCount(teamId: Long, activeCount: Long) {
+        val maxActive = policyProperties.maxTeamActiveInstances
+        if (activeCount >= maxActive) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED,
+                adminDetail = "teamId=$teamId, activeCount=$activeCount, maxTeamActiveInstances=$maxActive",
+            )
+        }
+    }
 }

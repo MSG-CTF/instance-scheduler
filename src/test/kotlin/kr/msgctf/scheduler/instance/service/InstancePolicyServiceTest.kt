@@ -92,6 +92,49 @@ class InstancePolicyServiceTest {
         assertEquals(SchedulerErrorCode.HARD_TIMEOUT_LIMIT_EXCEEDED, exception.errorCode)
     }
 
+    // 팀 활성 개수가 상한 미만이면 create 허용 확인
+    @Test
+    fun `allows create when team active count is below max`() {
+        // when & then (예외가 발생하지 않아야 한다)
+        instancePolicyService.validateTeamActiveCount(
+            teamId = 1L,
+            activeCount = policyProperties.maxTeamActiveInstances - 1,
+        )
+    }
+
+    // 팀 활성 개수가 상한에 이르면 create 거절 확인
+    @Test
+    fun `rejects create when team active count reaches max`() {
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateTeamActiveCount(
+                teamId = 1L,
+                activeCount = policyProperties.maxTeamActiveInstances,
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, exception.errorCode)
+    }
+
+    // 설정한 상한값을 그대로 쓰는지 확인
+    @Test
+    fun `applies configured team active limit`() {
+        // given
+        val raisedLimitService = InstancePolicyService(
+            policyProperties = InstancePolicyProperties(maxTeamActiveInstances = 3),
+        )
+
+        // when & then (상한 3에서 2개는 허용해야 한다)
+        raisedLimitService.validateTeamActiveCount(teamId = 1L, activeCount = 2)
+
+        // 상한 3에서 3개는 거절해야 한다
+        val exception = assertFailsWith<SchedulerException> {
+            raisedLimitService.validateTeamActiveCount(teamId = 1L, activeCount = 3)
+        }
+        assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, exception.errorCode)
+    }
+
     // inactive 상태는 active 조회 대상에 포함되지 않는지 확인
     @Test
     fun `does not include cleaned status as active`() {
