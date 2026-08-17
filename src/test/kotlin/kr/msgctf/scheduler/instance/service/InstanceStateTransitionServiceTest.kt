@@ -22,6 +22,7 @@ class InstanceStateTransitionServiceTest {
             InstanceStatus.SCHEDULING to InstanceStatus.PROVISIONING,
             InstanceStatus.PROVISIONING to InstanceStatus.RUNNING,
             InstanceStatus.RUNNING to InstanceStatus.EXPIRED,
+            InstanceStatus.RUNNING to InstanceStatus.CLEANUP_PENDING,
             InstanceStatus.EXPIRED to InstanceStatus.CLEANUP_PENDING,
             InstanceStatus.CLEANUP_PENDING to InstanceStatus.CLEANED,
         )
@@ -58,9 +59,9 @@ class InstanceStateTransitionServiceTest {
         assertEquals("from=CLEANED, to=RUNNING", exception.adminDetail)
     }
 
-    // 같은 팀의 새 create 요청을 막는 active 상태 확인
+    // 같은 user의 새 create 요청을 막는 active 상태 확인
     @Test
-    fun `identifies active statuses that block team create`() {
+    fun `identifies active statuses that block create`() {
         // given
         val activeStatuses = setOf(
             InstanceStatus.REQUESTED,
@@ -69,8 +70,6 @@ class InstanceStateTransitionServiceTest {
             InstanceStatus.RUNNING,
             InstanceStatus.RESTARTING,
             InstanceStatus.RESETTING,
-            InstanceStatus.STOPPING,
-            InstanceStatus.CLEANUP_PENDING,
         )
 
         // when & then
@@ -79,15 +78,17 @@ class InstanceStateTransitionServiceTest {
         }
     }
 
-    // 같은 팀의 새 create 요청을 허용하는 inactive 상태 확인
+    // 같은 user의 새 create 요청을 허용하는 inactive 상태 확인
     @Test
-    fun `identifies inactive statuses that do not block team create`() {
+    fun `identifies inactive statuses that do not block create`() {
         // given
         val inactiveStatuses = setOf(
             InstanceStatus.STOPPED,
             InstanceStatus.FAILED,
             InstanceStatus.EXPIRED,
             InstanceStatus.CLEANED,
+            InstanceStatus.STOPPING,
+            InstanceStatus.CLEANUP_PENDING,
         )
 
         // when & then
@@ -96,7 +97,7 @@ class InstanceStateTransitionServiceTest {
         }
     }
 
-    // DB가 팀당 1개 제한에 사용하는 상태 목록과 코드의 active 상태 목록이 같은지 확인
+    // DB가 user당 1개 제한에 사용하는 상태 목록과 코드의 active 상태 목록이 같은지 확인
     // (목록이 다르면 DB와 코드가 서로 다른 기준으로 create를 막는다)
     @Test
     fun `active statuses match sql partial unique index`() {
@@ -111,12 +112,12 @@ class InstanceStateTransitionServiceTest {
     }
 
     private fun activeStatusesInUniqueIndex(): Set<String> {
-        val sql = javaClass.getResource("/db/migration/V1__create_challenge_instance.sql")
+        val sql = javaClass.getResource("/db/migration/V4__add_user_id_to_challenge_instance.sql")
             ?.readText()
-            ?: error("V1 migration not found on test classpath")
+            ?: error("V4 migration not found on test classpath")
 
         val uniqueIndexWhereClause = sql
-            .substringAfter("uq_team_active_instance")
+            .substringAfter("uq_user_active_instance")
             .substringBefore(";")
             .substringAfter("WHERE")
 

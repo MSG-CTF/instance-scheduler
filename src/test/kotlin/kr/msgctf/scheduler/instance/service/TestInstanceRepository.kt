@@ -13,12 +13,6 @@ class TestInstanceRepository {
 
     val savedInstances = mutableListOf<Instance>()
 
-    var lastTeamId: Long? = null
-        private set
-
-    var lastStatuses: Collection<InstanceStatus> = emptyList()
-        private set
-
     val repository: InstanceRepository =
         Proxy.newProxyInstance(
             InstanceRepository::class.java.classLoader,
@@ -30,12 +24,11 @@ class TestInstanceRepository {
                 "findById" -> findById(args?.first() as UUID)
                 // 단위 테스트에는 동시성이 없어 잠금 없이 같은 행을 돌려준다
                 "findByIdForUpdate" -> findByIdOrNull(args?.first() as UUID)
-                "findFirstByTeamIdAndStatusInOrderByCreatedAtAsc" -> {
+                "findFirstByUserIdAndStatusIn" -> {
                     @Suppress("UNCHECKED_CAST")
-                    findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-                        teamId = args?.get(0) as Long,
-                        statuses = args[1] as Collection<InstanceStatus>,
-                    )
+                    val userId = args?.get(0) as UUID
+                    val statuses = args[1] as Collection<InstanceStatus>
+                    savedInstances.firstOrNull { it.userId == userId && it.status in statuses }
                 }
                 "findByStatusAndExpiresAtLessThanEqual" -> {
                     val status = args?.get(0) as InstanceStatus
@@ -53,6 +46,14 @@ class TestInstanceRepository {
                     val statuses = args?.first() as Collection<InstanceStatus>
                     savedInstances.filter { it.status in statuses }
                 }
+                // 단위 테스트에는 동시성이 없어 잠금 없이 같은 행을 돌려준다
+                "findByUserIdAndStatusInForUpdate" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val userId = args?.get(0) as UUID
+                    val statuses = args[1] as Collection<InstanceStatus>
+                    savedInstances.firstOrNull { it.userId == userId && it.status in statuses }
+                }
+                "flush" -> null
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }
         } as InstanceRepository
@@ -68,15 +69,4 @@ class TestInstanceRepository {
 
     private fun findByIdOrNull(instanceId: UUID): Instance? =
         savedInstances.firstOrNull { instance -> instance.instanceId == instanceId }
-
-    private fun findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-        teamId: Long,
-        statuses: Collection<InstanceStatus>,
-    ): Instance? {
-        lastTeamId = teamId
-        lastStatuses = statuses
-        return savedInstances.firstOrNull { instance ->
-            instance.teamId == teamId && instance.status in statuses
-        }
-    }
 }

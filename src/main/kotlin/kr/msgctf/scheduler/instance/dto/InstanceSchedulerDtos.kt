@@ -11,6 +11,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 // create 서비스에 넘기는 요청 값
 data class CreateInstanceCommand(
     val teamId: Long,
+    val userId: UUID,
     val challengeId: Long,
     val containerImage: String,
     val containerPort: Int,
@@ -41,11 +42,12 @@ data class InstanceResult(
     val serviceUrl: String?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
+    val replacedInstanceId: UUID? = null,
 ) {
 
     companion object {
 
-        fun from(instance: Instance): InstanceResult =
+        fun from(instance: Instance, replacedInstanceId: UUID? = null): InstanceResult =
             InstanceResult(
                 instanceId = instance.instanceId,
                 teamId = instance.teamId,
@@ -54,6 +56,7 @@ data class InstanceResult(
                 serviceUrl = instance.serviceUrl,
                 expiresAt = instance.expiresAt,
                 hardExpiresAt = instance.hardExpiresAt,
+                replacedInstanceId = replacedInstanceId,
             )
     }
 }

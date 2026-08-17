@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.service
 
+import java.sql.SQLException
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -7,6 +8,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
@@ -36,10 +38,13 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationResponse
 import kr.msgctf.scheduler.runtime.RuntimeResetRequest
 import kr.msgctf.scheduler.runtime.RuntimeRestartRequest
+import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
 import org.springframework.dao.DataIntegrityViolationException
 
 class InstanceSchedulerServiceTest {
+
+    private val testUserId: UUID = UUID.fromString("018f3f1e-0000-7a91-a30b-630000000001")
 
     // create 요청이 RUNNING 인스턴스를 만드는지 확인
     @Test
@@ -68,6 +73,7 @@ class InstanceSchedulerServiceTest {
         assertEquals("https://team-201.local", saved.serviceUrl)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200), saved.expiresAt)
         assertEquals(Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800), saved.hardExpiresAt)
+        assertEquals(testUserId, saved.userId)
     }
 
     // broker 후보가 없으면 FAILED 상태로 끝나는지 확인
@@ -173,7 +179,14 @@ class InstanceSchedulerServiceTest {
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(
             savedInstances = savedInstances,
-            saveAndFlushException = DataIntegrityViolationException("duplicate active instance"),
+            saveAndFlushException = DataIntegrityViolationException(
+                "duplicate active instance",
+                ConstraintViolationException(
+                    "duplicate key value",
+                    SQLException("duplicate key value violates unique constraint \"uq_user_active_instance\""),
+                    "uq_user_active_instance",
+                ),
+            ),
         )
         val brokerClient = CountingBrokerClient()
         val instanceSchedulerService = newService(
@@ -188,8 +201,80 @@ class InstanceSchedulerServiceTest {
 
         // then
         assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
-        assertEquals("teamId=204, reason=active instance unique constraint", exception.adminDetail)
+        assertEquals("userId=${testUserId}, reason=active instance unique constraint", exception.adminDetail)
         assertEquals(0, brokerClient.callCount)
+    }
+
+    // 유니크 위반이 아닌 저장 오류를 한도 충돌로 둔갑시키지 않는지 확인
+    @Test
+    fun `classifies non-unique save failure as internal error`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(
+            savedInstances = savedInstances,
+            saveAndFlushException = DataIntegrityViolationException("value too long for column"),
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 208L))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+    }
+
+    // 같은 user의 RUNNING 인스턴스가 있으면 교체하고 이전 id를 알려주는지 확인
+    @Test
+    fun `replaces own running instance on create`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+        assertEquals(InstanceAction.DELETE, previous.action)
+        assertEquals(previous.instanceId, result.replacedInstanceId)
+        assertEquals(InstanceStatus.RUNNING, result.status)
+    }
+
+    // 이전 인스턴스가 아직 만들어지는 중이면 교체하지 않고 거절하는지 확인
+    @Test
+    fun `rejects create while previous instance is in transition`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance().apply { status = InstanceStatus.PROVISIONING })
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS, exception.errorCode)
+        assertEquals(InstanceStatus.PROVISIONING, previous.status)
+    }
+
+    // 이전 인스턴스가 지워지는 중이면 한도에 세지 않고 일반 생성하는지 확인
+    @Test
+    fun `creates plainly when previous instance is already being cleaned`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        instanceRepository.save(newRunningInstance().apply { status = InstanceStatus.CLEANUP_PENDING })
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+
+        // then
+        assertNull(result.replacedInstanceId)
+        assertEquals(InstanceStatus.RUNNING, result.status)
     }
 
     // ttl이 hard timeout보다 크면 아무것도 저장/호출하지 않고 거절하는지 확인
@@ -307,6 +392,7 @@ class InstanceSchedulerServiceTest {
         val instance = instanceRepository.save(
             Instance(
                 teamId = 302L,
+                userId = testUserId,
                 challengeId = 10L,
                 status = InstanceStatus.RUNNING,
                 action = InstanceAction.CREATE,
@@ -549,8 +635,6 @@ class InstanceSchedulerServiceTest {
 
         return InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
-                instanceRepository = instanceRepository,
-                transitionService = transitionService,
                 policyProperties = policyProperties,
             ),
             transitionService = transitionService,
@@ -566,9 +650,11 @@ class InstanceSchedulerServiceTest {
         teamId: Long,
         ttlMinutes: Long = 120,
         hardTimeoutMinutes: Long = 180,
+        userId: UUID = testUserId,
     ): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
@@ -598,26 +684,13 @@ class InstanceSchedulerServiceTest {
             instance
         }
 
-        Mockito.`when`(
-            instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-                Mockito.anyLong(),
-                Mockito.anyCollection(),
-            ),
-        ).thenAnswer { invocation ->
-            val teamId = invocation.getArgument<Long>(0)
-            val statuses = invocation.getArgument<Collection<InstanceStatus>>(1)
-
-            savedInstances.firstOrNull { instance ->
-                instance.teamId == teamId && instance.status in statuses
-            }
-        }
-
         return instanceRepository
     }
 
     private fun newRunningInstance(): Instance =
         Instance(
             teamId = 301L,
+            userId = testUserId,
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,

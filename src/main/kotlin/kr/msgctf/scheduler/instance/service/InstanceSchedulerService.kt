@@ -25,6 +25,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
+import org.hibernate.exception.ConstraintViolationException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -44,12 +45,18 @@ class InstanceSchedulerService(
     @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
-        instancePolicyService.validateTeamCanCreate(command.teamId)
+
+        val previous = instanceRepository.findByUserIdAndStatusInForUpdate(
+            userId = command.userId,
+            statuses = transitionService.activeStatuses(),
+        )
+        val replacedInstanceId = previous?.let { replaceOwnInstance(it) }
 
         val now = clock.instant()
         val instance = saveRequestedInstance(
             Instance(
                 teamId = command.teamId,
+                userId = command.userId,
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
@@ -117,7 +124,26 @@ class InstanceSchedulerService(
         instance.serviceUrl = runtimeResponse.serviceUrl
         move(instance, InstanceStatus.RUNNING)
 
-        return InstanceResult.from(instance)
+        return InstanceResult.from(instance, replacedInstanceId)
+    }
+
+    // user의 이전 인스턴스는 RUNNING일 때만 교체 대상이다
+    // 전이 상태면 이전 요청이 아직 처리 중이므로 거절한다
+    private fun replaceOwnInstance(previous: Instance): UUID {
+        if (previous.status != InstanceStatus.RUNNING) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
+                adminDetail = "userId=${previous.userId}, activeInstanceId=${previous.instanceId}, " +
+                    "status=${previous.status}",
+            )
+        }
+
+        previous.action = InstanceAction.DELETE
+        move(previous, InstanceStatus.CLEANUP_PENDING)
+        // 교체 표시를 먼저 flush해야 새 행 INSERT가 유니크 인덱스에 걸리지 않는다
+        instanceRepository.flush()
+
+        return previous.instanceId
     }
 
     // REQUESTED를 바로 flush해 중복 active 인스턴스 차단
@@ -125,12 +151,30 @@ class InstanceSchedulerService(
         try {
             instanceRepository.saveAndFlush(instance)
         } catch (exception: DataIntegrityViolationException) {
+            if (isActiveUniqueViolation(exception)) {
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
+                    adminDetail = "userId=${instance.userId}, reason=active instance unique constraint",
+                    cause = exception,
+                )
+            }
             throw SchedulerException(
-                errorCode = SchedulerErrorCode.ACTIVE_INSTANCE_EXISTS,
-                adminDetail = "teamId=${instance.teamId}, reason=active instance unique constraint",
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${instance.instanceId}, reason=${exception.message}",
                 cause = exception,
             )
         }
+
+    private fun isActiveUniqueViolation(exception: DataIntegrityViolationException): Boolean {
+        var cause: Throwable? = exception.cause
+        while (cause != null) {
+            if (cause is ConstraintViolationException) {
+                return cause.constraintName?.contains("uq_user_active_instance") == true
+            }
+            cause = cause.cause
+        }
+        return false
+    }
 
     @Transactional(noRollbackFor = [InstanceStateSavedException::class])
     fun deleteInstance(command: DeleteInstanceCommand): InstanceResult {

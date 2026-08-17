@@ -29,15 +29,15 @@ class InstanceQueryService(
         return InstanceDetailResult.from(instance)
     }
 
-    // active 판정 기준은 상태 머신이 정한 진행 중 상태를 그대로 따른다
+    // active 판정 기준은 상태 머신이 정한 수렴 중 상태를 그대로 따른다
     @Transactional(readOnly = true)
-    fun getActiveInstanceByTeam(teamId: Long): InstanceResult {
-        val instance = instanceRepository.findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-            teamId = teamId,
+    fun getActiveInstanceByUser(userId: UUID): InstanceResult {
+        val instance = instanceRepository.findFirstByUserIdAndStatusIn(
+            userId = userId,
             statuses = transitionService.activeStatuses(),
         ) ?: throw SchedulerException(
             errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
-            adminDetail = "teamId=$teamId",
+            adminDetail = "userId=$userId",
         )
 
         return InstanceResult.from(instance)

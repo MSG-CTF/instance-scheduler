@@ -117,6 +117,8 @@ class InstanceCleanupService(
             instance.status == InstanceStatus.RUNNING || instance.status == InstanceStatus.EXPIRED ->
                 RuntimeDeleteReason.TTL_EXPIRED
             instance.status in HARD_TIMEOUT_STATES -> RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
+            // 교체나 사용자 삭제가 남긴 행, 하드타임아웃 회수와 구분하려고 상태 분기 뒤에 둔다
+            instance.action == InstanceAction.DELETE -> RuntimeDeleteReason.USER_REQUESTED
             isExpired(instance.expiresAt, now) -> RuntimeDeleteReason.TTL_EXPIRED
             isExpired(instance.hardExpiresAt, now) -> RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
             else -> RuntimeDeleteReason.CREATE_FAILED_CLEANUP

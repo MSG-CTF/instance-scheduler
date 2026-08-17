@@ -25,6 +25,8 @@ data class CreateInstanceRequest(
     @field:Positive
     val teamId: Long,
 
+    val userId: UUID,
+
     @field:Positive
     val challengeId: Long,
 
@@ -51,6 +53,7 @@ data class CreateInstanceRequest(
     fun toCommand(): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
+            userId = userId,
             challengeId = challengeId,
             containerImage = containerImage,
             containerPort = containerPort,
@@ -126,6 +129,7 @@ data class InstanceResponse(
     val serviceUrl: String?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
+    val replacedInstanceId: UUID?,
 ) {
 
     companion object {
@@ -139,6 +143,7 @@ data class InstanceResponse(
                 serviceUrl = result.serviceUrl,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
+                replacedInstanceId = result.replacedInstanceId,
             )
     }
 }

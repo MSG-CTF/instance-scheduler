@@ -4,6 +4,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.TestcontainersConfiguration
@@ -101,6 +102,7 @@ class InstanceDeleteConcurrencyIntegrationTest {
     private fun newCommand(teamId: Long): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,

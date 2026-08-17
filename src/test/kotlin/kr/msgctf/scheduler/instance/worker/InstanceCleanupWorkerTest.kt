@@ -69,19 +69,19 @@ class InstanceCleanupWorkerTest {
 
     private fun running(expiresAt: Instant, hardExpiresAt: Instant): Instance =
         Instance(
-            teamId = 701L, challengeId = 10L, status = InstanceStatus.RUNNING,
+            teamId = 701L, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.RUNNING,
             runtimeWorkloadId = "workload-1", expiresAt = expiresAt, hardExpiresAt = hardExpiresAt,
         )
 
     private fun provisioning(hardExpiresAt: Instant): Instance =
         Instance(
-            teamId = 702L, challengeId = 10L, status = InstanceStatus.PROVISIONING,
+            teamId = 702L, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.PROVISIONING,
             expiresAt = hardExpiresAt.plusSeconds(3600), hardExpiresAt = hardExpiresAt,
         )
 
     private fun cleanupPending(teamId: Long = 703L, retryCount: Int = 0): Instance =
         Instance(
-            teamId = teamId, challengeId = 10L, status = InstanceStatus.CLEANUP_PENDING,
+            teamId = teamId, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.CLEANUP_PENDING,
             runtimeWorkloadId = "workload-$teamId", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
             cleanupRetryCount = retryCount,
         )

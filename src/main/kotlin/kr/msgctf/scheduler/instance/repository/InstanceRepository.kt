@@ -12,8 +12,9 @@ import org.springframework.data.repository.query.Param
 
 interface InstanceRepository : JpaRepository<Instance, UUID> {
 
-    fun findFirstByTeamIdAndStatusInOrderByCreatedAtAsc(
-        teamId: Long,
+    // 유니크 인덱스가 최대 1행을 보장한다
+    fun findFirstByUserIdAndStatusIn(
+        userId: UUID,
         statuses: Collection<InstanceStatus>,
     ): Instance?
 
@@ -22,6 +23,14 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select i from Instance i where i.instanceId = :instanceId")
     fun findByIdForUpdate(@Param("instanceId") instanceId: UUID): Instance?
+
+    // 같은 user의 create와 cleanup 워커가 이전 인스턴스를 동시에 만지지 않게 잠근다
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select i from Instance i where i.userId = :userId and i.status in :statuses")
+    fun findByUserIdAndStatusInForUpdate(
+        @Param("userId") userId: UUID,
+        @Param("statuses") statuses: Collection<InstanceStatus>,
+    ): Instance?
 
     // RUNNING 이면서 expiresAt 가 지난 TTL 만료 대상을 조회한다
     fun findByStatusAndExpiresAtLessThanEqual(

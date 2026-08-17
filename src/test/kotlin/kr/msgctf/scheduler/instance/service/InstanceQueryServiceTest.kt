@@ -77,46 +77,48 @@ class InstanceQueryServiceTest {
     }
 
     @Test
-    fun `finds active instance by team id`() {
+    fun `finds active instance by user id`() {
         // given
         val repository = TestInstanceRepository()
-        val instance = repository.save(newRunningInstance(teamId = 7L))
+        val userId = UUID.randomUUID()
+        val instance = repository.save(newRunningInstance(teamId = 7L, userId = userId))
         val service = newService(repository)
 
         // when
-        val result = service.getActiveInstanceByTeam(7L)
+        val result = service.getActiveInstanceByUser(userId)
 
         // then
         assertEquals(instance.instanceId, result.instanceId)
-        assertEquals(7L, result.teamId)
         assertEquals(InstanceStatus.RUNNING, result.status)
-        assertEquals("https://team-1.local", result.serviceUrl)
     }
 
     @Test
-    fun `rejects team without any instance`() {
+    fun `rejects user without any instance`() {
         // given
         val service = newService(TestInstanceRepository())
 
         // when & then
         val exception = assertFailsWith<SchedulerException> {
-            service.getActiveInstanceByTeam(7L)
+            service.getActiveInstanceByUser(UUID.randomUUID())
         }
 
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
 
-    // 정리가 끝난 인스턴스는 active로 보지 않는다
+    // 지워지는 중인 인스턴스는 active로 보지 않는다
     @Test
-    fun `rejects team whose instance is already cleaned`() {
+    fun `rejects user whose instance is being cleaned`() {
         // given
         val repository = TestInstanceRepository()
-        repository.save(newRunningInstance(teamId = 7L).apply { status = InstanceStatus.CLEANED })
+        val userId = UUID.randomUUID()
+        repository.save(
+            newRunningInstance(teamId = 7L, userId = userId).apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
         val service = newService(repository)
 
         // when & then
         val exception = assertFailsWith<SchedulerException> {
-            service.getActiveInstanceByTeam(7L)
+            service.getActiveInstanceByUser(userId)
         }
 
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
@@ -128,9 +130,10 @@ class InstanceQueryServiceTest {
             transitionService = InstanceStateTransitionService(),
         )
 
-    private fun newRunningInstance(teamId: Long): Instance =
+    private fun newRunningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
+            userId = userId,
             challengeId = 10L,
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,

@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.service
 
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -99,6 +100,7 @@ class InstanceDeleteFailureIntegrationTest {
     private fun newCommand(teamId: Long): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
+            userId = UUID.randomUUID(),
             challengeId = 10L,
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
