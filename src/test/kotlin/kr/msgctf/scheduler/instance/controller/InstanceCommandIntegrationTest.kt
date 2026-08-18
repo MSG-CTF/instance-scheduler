@@ -8,8 +8,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -41,40 +45,45 @@ class InstanceCommandIntegrationTest {
     private lateinit var instanceRepository: InstanceRepository
 
     @Autowired
+    private lateinit var instanceEventRepository: InstanceEventRepository
+
+    @Autowired
     private lateinit var objectMapper: ObjectMapper
 
     @BeforeEach
     fun setUp() {
+        instanceEventRepository.deleteAll()
         instanceRepository.deleteAll()
     }
 
     @Test
-    fun `create api stores running instance in postgres`() {
-        // create 결과가 DB와 응답에 반영되는지 확인
+    fun `create api stores requested instance in postgres`() {
+        // create 접수 결과가 DB와 응답에 반영되는지 확인
         // when
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             content = createRequestBody(teamId = 100L, challengeId = 10L)
         }.andExpect {
-            status { isOk() }
+            status { isAccepted() }
             jsonPath("$.code") { value("SUCCESS") }
             jsonPath("$.data.team_id") { value(100) }
             jsonPath("$.data.challenge_id") { value(10) }
-            jsonPath("$.data.status") { value("RUNNING") }
-            jsonPath("$.data.service_url") { value("https://team-100.local") }
+            jsonPath("$.data.status") { value("REQUESTED") }
+            jsonPath("$.data.service_url") { doesNotExist() }
             jsonPath("$.data.hard_expires_at") { exists() }
         }.andReturn().response.contentAsString
 
-        // then
+        // then: 워커가 진행할 실행 스펙까지 행에 저장돼야 한다
         val instanceId = readInstanceId(response)
         val saved = instanceRepository.findById(instanceId).orElse(null)
 
         assertNotNull(saved)
-        assertEquals(InstanceStatus.RUNNING, saved.status)
-        assertEquals("SELF_HOSTED", saved.provider)
-        assertEquals("self-hosted-1", saved.accountId)
-        assertEquals("workload-$instanceId", saved.runtimeWorkloadId)
-        assertEquals("https://team-100.local", saved.serviceUrl)
+        assertEquals(InstanceStatus.REQUESTED, saved.status)
+        assertEquals("registry.msgctf.local/challenges/web-01:2026.07.01", saved.containerImage)
+        assertEquals(8080, saved.containerPort)
+        assertEquals(500, saved.cpuMillicores)
+        assertEquals(null, saved.provider)
+        assertEquals(null, saved.runtimeWorkloadId)
     }
 
     // 같은 user의 재생성은 거절이 아니라 이전 인스턴스 교체다
@@ -82,26 +91,23 @@ class InstanceCommandIntegrationTest {
     fun `create api replaces own running instance`() {
         // given
         val userId = UUID.randomUUID()
-        val firstResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 200L, challengeId = 10L, userId = userId)
-        }.andExpect { status { isOk() } }.andReturn().response.contentAsString
-        val firstId = readInstanceId(firstResponse)
+        val previous = instanceRepository.saveAndFlush(runningInstance(teamId = 200L, userId = userId))
 
         // when
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             content = createRequestBody(teamId = 200L, challengeId = 20L, userId = userId)
         }.andExpect {
-            status { isOk() }
-            jsonPath("$.data.status") { value("RUNNING") }
-            jsonPath("$.data.replaced_instance_id") { value(firstId.toString()) }
+            status { isAccepted() }
+            jsonPath("$.data.status") { value("REQUESTED") }
+            jsonPath("$.data.replaced_instance_id") { value(previous.instanceId.toString()) }
         }
 
         // then: 이전 인스턴스는 워커가 지울 정리 대기로 남는다
-        val previous = instanceRepository.findById(firstId).orElseThrow()
-        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
-        assertEquals(InstanceAction.DELETE, previous.action)
+        val replaced = instanceRepository.findById(previous.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.CLEANUP_PENDING, replaced.status)
+        assertEquals(InstanceAction.DELETE, replaced.action)
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, replaced.deleteReason)
     }
 
     // 같은 팀이라도 user가 다르면 병렬로 만들 수 있다
@@ -111,15 +117,15 @@ class InstanceCommandIntegrationTest {
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             content = createRequestBody(teamId = 210L, challengeId = 10L)
-        }.andExpect { status { isOk() } }
+        }.andExpect { status { isAccepted() } }
 
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             content = createRequestBody(teamId = 210L, challengeId = 20L)
-        }.andExpect { status { isOk() } }
+        }.andExpect { status { isAccepted() } }
 
-        // then: 교체 없이 두 인스턴스가 모두 RUNNING으로 남는다
-        assertEquals(2, instanceRepository.findAll().count { it.status == InstanceStatus.RUNNING })
+        // then: 교체 없이 두 인스턴스가 모두 접수된다
+        assertEquals(2, instanceRepository.findAll().count { it.status == InstanceStatus.REQUESTED })
     }
 
     @Test
@@ -180,7 +186,7 @@ class InstanceCommandIntegrationTest {
             contentType = MediaType.APPLICATION_JSON
             content = requestBody
         }.andExpect {
-            status { isOk() }
+            status { isAccepted() }
             jsonPath("$.data.team_id") { value(900) }
         }
     }
@@ -197,53 +203,42 @@ class InstanceCommandIntegrationTest {
     }
 
     @Test
-    fun `delete api stores cleaned instance in postgres`() {
-        // delete API가 실제 DB 상태를 CLEANED로 바꾸는지 확인
-        // given
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 300L, challengeId = 10L)
-        }.andExpect {
-            status { isOk() }
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
+    fun `delete api stores stopping instance in postgres`() {
+        // delete 접수가 실제 DB 상태를 STOPPING으로 바꾸는지 확인
+        // given: create가 접수만 하므로 RUNNING 행을 직접 심는다
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 300L)).instanceId
 
         // when
         mockMvc.delete("/api/instances/$instanceId") {
             contentType = MediaType.APPLICATION_JSON
             content = """{ "delete_reason": "USER_REQUESTED" }"""
         }.andExpect {
-            status { isOk() }
+            status { isAccepted() }
             jsonPath("$.code") { value("SUCCESS") }
             jsonPath("$.data.instance_id") { value(instanceId.toString()) }
-            jsonPath("$.data.status") { value("CLEANED") }
+            jsonPath("$.data.status") { value("STOPPING") }
             jsonPath("$.data.service_url") { doesNotExist() }
         }
 
-        // then
+        // then: 실제 삭제는 워커 몫이라 사유와 함께 접수 상태로 남는다
         val saved = instanceRepository.findById(instanceId).orElse(null)
 
         assertNotNull(saved)
-        assertEquals(InstanceStatus.CLEANED, saved.status)
+        assertEquals(InstanceStatus.STOPPING, saved.status)
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, saved.deleteReason)
     }
 
     @Test
     fun `delete api works without request body`() {
         // body 없이 delete 가능 확인
         // given
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 400L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 400L)).instanceId
 
         // when & then
         mockMvc.delete("/api/instances/$instanceId")
             .andExpect {
-                status { isOk() }
-                jsonPath("$.data.status") { value("CLEANED") }
+                status { isAccepted() }
+                jsonPath("$.data.status") { value("STOPPING") }
             }
     }
 
@@ -251,12 +246,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `delete api rejects delete reason other than user requested`() {
         // given
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 500L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 500L)).instanceId
 
         // when & then
         mockMvc.delete("/api/instances/$instanceId") {
@@ -284,19 +274,14 @@ class InstanceCommandIntegrationTest {
             }
     }
 
-    // 이미 정리된 인스턴스는 다시 삭제할 수 없다
+    // 이미 삭제가 접수된 인스턴스는 다시 삭제할 수 없다
     @Test
-    fun `delete api rejects already cleaned instance`() {
+    fun `delete api rejects instance already being deleted`() {
         // given
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 600L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 600L)).instanceId
 
         mockMvc.delete("/api/instances/$instanceId")
-            .andExpect { status { isOk() } }
+            .andExpect { status { isAccepted() } }
 
         // when & then
         mockMvc.delete("/api/instances/$instanceId")
@@ -388,7 +373,7 @@ class InstanceCommandIntegrationTest {
             contentType = MediaType.APPLICATION_JSON
             content = createRequestBody(teamId = 800L, challengeId = 10L)
         }.andExpect {
-            status { isOk() }
+            status { isAccepted() }
         }.andReturn().response.contentAsString
 
         // then
@@ -411,16 +396,10 @@ class InstanceCommandIntegrationTest {
     // extend가 만료 시각을 늘리고 DB에 반영되는지 확인
     @Test
     fun `extend api extends expiry`() {
-        // given
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 1000L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
-        val originalExpiresAt = parseTime(
-            objectMapper.readTree(createResponse).get("data").get("expires_at").asString(),
-        )
+        // given: create는 202 접수라 RUNNING을 직접 시딩한다
+        val instance = instanceRepository.saveAndFlush(runningInstance(teamId = 1000L))
+        val instanceId = instance.instanceId
+        val originalExpiresAt = instance.expiresAt
 
         // when & then
         val extendResponse = mockMvc.post("/api/instances/$instanceId/extend") {
@@ -448,13 +427,8 @@ class InstanceCommandIntegrationTest {
     // hard timeout을 넘기는 연장은 400 HARD_TIMEOUT_EXCEEDED로 거절하는지 확인
     @Test
     fun `extend api rejects extend beyond hard timeout`() {
-        // given: ttl 120, hard 180 이라 남은 여유는 60분이다
-        val createResponse = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 1100L, challengeId = 10L)
-        }.andReturn().response.contentAsString
-
-        val instanceId = readInstanceId(createResponse)
+        // given: 만료까지 120분, hard까지 180분이라 남은 여유는 60분이다
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 1100L)).instanceId
 
         // when & then
         mockMvc.post("/api/instances/$instanceId/extend") {
@@ -488,6 +462,21 @@ class InstanceCommandIntegrationTest {
     }
 
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
+
+    private fun runningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
+        Instance(
+            teamId = teamId,
+            userId = userId,
+            challengeId = 10L,
+            status = InstanceStatus.RUNNING,
+            action = InstanceAction.CREATE,
+            runtimeType = RuntimeType.KUBERNETES,
+            runtimeTargetId = "cluster-main",
+            runtimeWorkloadId = "workload-$teamId",
+            serviceUrl = "https://team-$teamId.local",
+            expiresAt = Instant.now().plusSeconds(7200),
+            hardExpiresAt = Instant.now().plusSeconds(10800),
+        )
 
     private fun createRequestBody(
         teamId: Long,

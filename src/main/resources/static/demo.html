@@ -444,9 +444,48 @@
       $("btnDelete").disabled = !instanceId;
     }
 
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let pollSeq = 0;
+
+    // 202 접수 후 조회를 2초 간격 최대 30회 반복해 완료를 확인한다
+    // 생성은 active 조회로 RUNNING, 삭제는 단건 조회로 CLEANED가 되면 멈춘다
+    // 삭제 접수 직후부터 active 조회는 404라 완료 신호로 못 쓴다
+    async function pollUntilSettled(kind) {
+      const seq = ++pollSeq;
+      const id = instanceId;
+      for (let i = 0; i < 30; i++) {
+        await sleep(2000);
+        if (seq !== pollSeq) return;
+        const path = kind === "create" ? `${API}/active?user_id=${val("user_id")}` : `${API}/${id}`;
+        const r = await call("read", "GET", path);
+        if (!r.ok || !r.json?.data) continue;
+        const data = r.json.data;
+        instanceId = data.instance_id;
+        renderInstance(data);
+        if (kind === "create" && data.status === "RUNNING") {
+          $("stateHint").textContent = `id ${instanceId.slice(0, 8)}… / 생성 완료`;
+          return;
+        }
+        if (kind === "delete" && (data.status === "CLEANED" || data.status === "FAILED")) {
+          $("stateHint").textContent = `id ${instanceId.slice(0, 8)}… / ` + (data.status === "CLEANED" ? "삭제 완료" : "삭제 실패");
+          instanceId = null;
+          $("btnGet").disabled = true;
+          $("btnDelete").disabled = true;
+          return;
+        }
+        $("stateHint").textContent = `id ${instanceId.slice(0, 8)}… / ` + (kind === "create" ? "생성 진행 중" : "삭제 진행 중");
+      }
+      $("stateHint").textContent = "완료 확인 실패, 조회 버튼으로 직접 확인";
+    }
+
     async function doCreate() {
       const r = await call("create", "POST", API, requestBody());
-      if (r.ok && r.json?.data) { instanceId = r.json.data.instance_id; renderInstance(r.json.data); }
+      if (r.ok && r.json?.data) {
+        instanceId = r.json.data.instance_id;
+        renderInstance(r.json.data);
+        $("stateHint").textContent = `id ${instanceId.slice(0, 8)}… / 생성 접수됨, 완료 확인 중`;
+        pollUntilSettled("create");
+      }
     }
     async function doGet() {
       if (!instanceId) return;
@@ -460,7 +499,11 @@
     async function doDelete() {
       if (!instanceId) return;
       const r = await call("delete", "DELETE", `${API}/${instanceId}`);
-      if (r.ok && r.json?.data) renderInstance(r.json.data);
+      if (r.ok && r.json?.data) {
+        renderInstance(r.json.data);
+        $("stateHint").textContent = `id ${instanceId.slice(0, 8)}… / 삭제 접수됨, 완료 확인 중`;
+        pollUntilSettled("delete");
+      }
     }
 
     async function checkHealth() {

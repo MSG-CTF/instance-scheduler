@@ -2,24 +2,26 @@ package kr.msgctf.scheduler.instance.controller
 
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
+import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.context.annotation.Import
-import org.springframework.http.MediaType
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
-import org.springframework.test.web.servlet.post
 import org.testcontainers.junit.jupiter.Testcontainers
 import tools.jackson.databind.ObjectMapper
 
@@ -38,10 +40,14 @@ class InstanceQueryIntegrationTest {
     private lateinit var instanceRepository: InstanceRepository
 
     @Autowired
+    private lateinit var instanceEventRepository: InstanceEventRepository
+
+    @Autowired
     private lateinit var objectMapper: ObjectMapper
 
     @BeforeEach
     fun setUp() {
+        instanceEventRepository.deleteAll()
         instanceRepository.deleteAll()
     }
 
@@ -261,32 +267,27 @@ class InstanceQueryIntegrationTest {
 
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
 
+    // create가 접수만 하므로 조회 대상 RUNNING 인스턴스를 저장소에 직접 넣는다
+    // 만료 시각은 응답 직렬화 정밀도(밀리초)에 맞춘다
     private fun createInstance(teamId: Long, userId: UUID = UUID.randomUUID()): UUID {
-        val response = mockMvc.post("/api/instances") {
-            contentType = MediaType.APPLICATION_JSON
-            content = """
-                {
-                  "team_id": $teamId,
-                  "user_id": "$userId",
-                  "challenge_id": 10,
-                  "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
-                  "container_port": 8080,
-                  "architecture": "AMD64",
-                  "resource_profile": {
-                    "cpu_millicores": 500,
-                    "memory_mib": 512,
-                    "ephemeral_storage_mib": 1024
-                  },
-                  "ttl_minutes": 120,
-                  "hard_timeout_minutes": 180
-                }
-            """.trimIndent()
-        }.andExpect {
-            status { isOk() }
-        }.andReturn().response.contentAsString
-
-        return UUID.fromString(
-            objectMapper.readTree(response).get("data").get("instance_id").asString(),
+        val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+        val instance = Instance(
+            teamId = teamId,
+            userId = userId,
+            challengeId = 10L,
+            status = InstanceStatus.RUNNING,
+            action = InstanceAction.CREATE,
+            provider = "SELF_HOSTED",
+            accountId = "self-hosted-1",
+            region = "local",
+            runtimeType = RuntimeType.KUBERNETES,
+            runtimeTargetId = "cluster-main",
+            serviceUrl = "https://team-$teamId.local",
+            expiresAt = now.plusSeconds(7200),
+            hardExpiresAt = now.plusSeconds(10800),
         )
+        instance.runtimeWorkloadId = "workload-${instance.instanceId}"
+
+        return instanceRepository.saveAndFlush(instance).instanceId
     }
 }

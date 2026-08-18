@@ -219,9 +219,52 @@ class InstanceRepositoryTest {
         assertEquals(setOf(retryable.instanceId, overLimit.instanceId), found.map { it.instanceId }.toSet())
     }
 
+    // 접수 전 삭제 대상만 잡는지 확인
+    @Test
+    fun `finds delete submit targets without operation id`() {
+        val pending = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.CLEANUP_PENDING))
+        val stopping = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.STOPPING))
+        val alreadySubmitted = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.CLEANUP_PENDING).apply { runtimeOperationId = "op-1" },
+        )
+
+        val found = instanceRepository.findByStatusInAndRuntimeOperationIdIsNull(
+            listOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
+        )
+
+        assertEquals(
+            setOf(pending.instanceId, stopping.instanceId),
+            found.map { it.instanceId }.toSet(),
+        )
+        assertEquals(false, found.any { it.instanceId == alreadySubmitted.instanceId })
+    }
+
+    // next_poll_at이 지난 폴링 대상만 잡는지 확인
+    @Test
+    fun `finds poll targets past next poll at`() {
+        val now = Instant.now()
+        val due = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.PROVISIONING).apply {
+                runtimeOperationId = "op-due"
+                nextPollAt = now.minusSeconds(1)
+            },
+        )
+        instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.PROVISIONING).apply {
+                runtimeOperationId = "op-later"
+                nextPollAt = now.plusSeconds(60)
+            },
+        )
+        instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.REQUESTED))
+
+        val found = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(now)
+
+        assertEquals(listOf(due.instanceId), found.map { it.instanceId })
+    }
+
     private fun newInstance(
-        teamId: Long,
-        challengeId: Long,
+        teamId: Long = 100L,
+        challengeId: Long = 10L,
         status: InstanceStatus = InstanceStatus.REQUESTED,
         userId: UUID = UUID.randomUUID(),
     ): Instance {

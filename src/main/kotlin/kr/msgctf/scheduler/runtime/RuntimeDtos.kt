@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.runtime
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.util.UUID
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -51,15 +52,6 @@ data class RuntimeResourceLimits(
     val ephemeralStorageMib: Int,
 )
 
-// Runtime이 생성 후 Scheduler에게 돌려주는 값
-data class RuntimeCreateResponse(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-
-    @JsonProperty("service_url")
-    val serviceUrl: String,
-)
-
 // Runtime에 workload 삭제를 요청할 때 보내는 값
 data class RuntimeDeleteRequest(
     @JsonProperty("request_id")
@@ -89,26 +81,62 @@ enum class RuntimeDeleteReason {
     ADMIN_FORCED,
 }
 
-// Runtime에 workload 재시작을 요청할 때 보내는 값
-data class RuntimeRestartRequest(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-)
+// 접수 결과, 202 접수와 삭제 404(지울 대상 없음)를 구분한다
+sealed interface RuntimeSubmitResult {
 
-// Runtime에 workload 초기화를 요청할 때 보내는 값
-data class RuntimeResetRequest(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-)
+    data class Accepted(
+        val operationId: String,
+        val retryAfterSeconds: Long?,
+    ) : RuntimeSubmitResult
 
-// Runtime 작업 처리 결과
-data class RuntimeOperationResponse(
-    @JsonProperty("runtime_workload_id")
-    val runtimeWorkloadId: String,
-
-    val status: RuntimeOperationStatus,
-)
-
-enum class RuntimeOperationStatus {
-    SUCCESS,
+    data object TargetMissing : RuntimeSubmitResult
 }
+
+enum class RuntimeOperationState {
+    QUEUED,
+    RUNNING,
+    RETRYING,
+    SUCCEEDED,
+    FAILED,
+}
+
+// operation 조회 결과
+data class RuntimeOperationSnapshot(
+    val operationId: String,
+    val status: RuntimeOperationState,
+    val retryAfterSeconds: Long?,
+    val result: RuntimeOperationResult?,
+    val lastErrorCode: String?,
+)
+
+// SUCCEEDED일 때만 존재한다
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeOperationResult(
+    @JsonProperty("runtime_workload_id")
+    val runtimeWorkloadId: String,
+
+    // DELETE operation에는 없다
+    @JsonProperty("service_url")
+    val serviceUrl: String?,
+)
+
+// 접수 202 응답 body
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeOperationAcceptedResponse(
+    @JsonProperty("operation_id")
+    val operationId: String,
+)
+
+// operation 조회 200 응답 body
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeOperationStatusResponse(
+    @JsonProperty("operation_id")
+    val operationId: String,
+
+    val status: RuntimeOperationState,
+
+    val result: RuntimeOperationResult?,
+
+    @JsonProperty("last_error_code")
+    val lastErrorCode: String?,
+)

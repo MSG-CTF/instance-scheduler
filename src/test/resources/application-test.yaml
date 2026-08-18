@@ -1,0 +1,4 @@
+# 스케줄 워커가 통합 테스트에 끼어들지 않도록 끈다
+scheduler:
+  operation:
+    enabled: false
