@@ -21,6 +21,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
+import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testUuid
@@ -264,6 +265,147 @@ class InstanceSchedulerServiceTest {
         // then
         assertEquals(SchedulerErrorCode.INVALID_TTL_RANGE, exception.errorCode)
         assertEquals(0, savedInstances.size)
+    }
+
+    // 초기화가 실행 스펙과 만료 시각을 복사한 새 인스턴스로 교체하는지 확인
+    @Test
+    fun `resets running instance into a fresh replacement`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.resetInstance(
+            ResetInstanceCommand(instanceId = previous.instanceId),
+        )
+
+        // then: 옛 인스턴스는 정리 대기로 빠진다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+        assertEquals(InstanceAction.DELETE, previous.action)
+        assertEquals(RuntimeDeleteReason.USER_REQUESTED, previous.deleteReason)
+        assertEquals(previous.instanceId, result.replacedInstanceId)
+
+        // 새 인스턴스는 스펙과 만료 시각을 그대로 물려받는다
+        val fresh = instanceRepository.savedInstances.single { it.status == InstanceStatus.REQUESTED }
+        assertEquals(fresh.instanceId, result.instanceId)
+        assertEquals(previous.teamId, fresh.teamId)
+        assertEquals(previous.userId, fresh.userId)
+        assertEquals(previous.challengeId, fresh.challengeId)
+        assertEquals(previous.containerImage, fresh.containerImage)
+        assertEquals(previous.containerPort, fresh.containerPort)
+        assertEquals(previous.architecture, fresh.architecture)
+        assertEquals(previous.cpuMillicores, fresh.cpuMillicores)
+        assertEquals(previous.memoryMib, fresh.memoryMib)
+        assertEquals(previous.ephemeralStorageMib, fresh.ephemeralStorageMib)
+        assertEquals(previous.expiresAt, fresh.expiresAt)
+        assertEquals(previous.hardExpiresAt, fresh.hardExpiresAt)
+        assertNull(fresh.runtimeWorkloadId)
+        assertNull(fresh.serviceUrl)
+    }
+
+    // 실행 중이 아닌 인스턴스는 초기화 대상이 아님을 확인
+    @Test
+    fun `rejects reset when instance is not running`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+    }
+
+    // 없는 인스턴스의 초기화는 not found로 거절하는지 확인
+    @Test
+    fun `rejects reset when instance is not found`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = UUID.randomUUID()))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
+    }
+
+    // 만료 시각이 지난 인스턴스는 새로 만들어도 바로 만료되므로 초기화를 거절하는지 확인
+    @Test
+    fun `rejects reset when instance is already expired`() {
+        // given: 정리 워커가 아직 처리하지 않은 만료 RUNNING 인스턴스다
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply {
+                expiresAt = Instant.parse("2026-07-04T12:00:00Z").minusSeconds(60)
+            },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 상태가 바뀌지 않고 그대로 남아야 한다
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 실행 스펙이 저장되기 전에 만들어진 행은 복사할 값이 없어 초기화를 거절하는지 확인
+    @Test
+    fun `rejects reset when workload spec is missing`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            Instance(
+                teamId = testUuid(330),
+                userId = testUserId,
+                challengeId = testUuid(10),
+                status = InstanceStatus.RUNNING,
+                action = InstanceAction.CREATE,
+                expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
+                hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
+            ),
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 그대로 남아야 한다
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+    }
+
+    // 꽉 찬 팀에서도 자기 초기화는 개수가 늘지 않아 허용하는지 확인
+    @Test
+    fun `resets own instance when team is full`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val own = instanceRepository.save(newRunningInstance(teamId = testUuid(404)))
+        instanceRepository.save(newRunningInstance(teamId = testUuid(404), userId = UUID.randomUUID()))
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = own.instanceId))
+
+        // then
+        assertEquals(own.instanceId, result.replacedInstanceId)
+        assertEquals(InstanceStatus.REQUESTED, result.status)
     }
 
     // delete가 사유를 저장하고 STOPPING 접수로 끝나는지 확인
@@ -570,6 +712,12 @@ class InstanceSchedulerServiceTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
+            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
+            containerPort = 8080,
+            architecture = Architecture.AMD64,
+            cpuMillicores = 500,
+            memoryMib = 512,
+            ephemeralStorageMib = 1024,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
             runtimeWorkloadId = "workload-1",

@@ -49,6 +49,8 @@ class InstanceStateTransitionService {
                 // 같은 user가 재생성하면 이전 RUNNING 행을 교체 표시만 하고 정리 대기로 넘긴다
                 InstanceStatus.CLEANUP_PENDING,
             ),
+            // reset은 교체 방식으로 구현되어 이 두 상태로 들어오는 코드가 없다
+            // 명세의 상태 목록에서 빼기 전까지 전이만 남겨둔다
             InstanceStatus.RESTARTING to setOf(
                 InstanceStatus.RUNNING,
                 InstanceStatus.FAILED,

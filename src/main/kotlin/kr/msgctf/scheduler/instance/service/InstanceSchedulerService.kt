@@ -14,6 +14,7 @@ import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.dto.InstanceResult
+import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import org.hibernate.exception.ConstraintViolationException
@@ -140,6 +141,75 @@ class InstanceSchedulerService(
         move(instance, InstanceStatus.STOPPING)
 
         return InstanceResult.from(instance)
+    }
+
+    // 초기화는 저장된 실행 스펙으로 새 인스턴스를 만들어 자기 인스턴스를 교체한다
+    // runtime은 같은 request_id를 다시 받으면 새로 만들지 않고 이전 결과를 돌려준다
+    // 새 인스턴스라 request_id가 새로 나와 이 중복 걸러내기에 걸리지 않는다
+    @Transactional
+    fun resetInstance(command: ResetInstanceCommand): InstanceResult {
+        // 같은 인스턴스에 동시에 들어온 삭제, 연장과 겹치지 않게 행을 잠근다
+        val previous = instanceRepository.findByIdForUpdate(command.instanceId)
+            ?: throw SchedulerException(
+                errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
+                adminDetail = "instanceId=${command.instanceId}",
+            )
+
+        // 초기화는 실행 중인 인스턴스에만 의미가 있다
+        if (previous.status != InstanceStatus.RUNNING) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=${command.instanceId}, status=${previous.status}",
+            )
+        }
+
+        // 만료 시각이 이미 지난 인스턴스는 새 인스턴스도 그 시각을 물려받아 뜨자마자 정리된다
+        // 정리 워커가 아직 처리하지 않아 RUNNING으로 남아 있어도 거절한다
+        if (!previous.expiresAt.isAfter(clock.instant())) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=${command.instanceId}, expiresAt=${previous.expiresAt}",
+            )
+        }
+
+        // 실행 스펙을 저장하기 전에 만들어진 행은 새 인스턴스에 복사할 값이 없어 초기화할 수 없다
+        val containerImage = previous.containerImage
+        val containerPort = previous.containerPort
+        val architecture = previous.architecture
+        val cpuMillicores = previous.cpuMillicores
+        val memoryMib = previous.memoryMib
+        val ephemeralStorageMib = previous.ephemeralStorageMib
+        if (containerImage == null || containerPort == null || architecture == null ||
+            cpuMillicores == null || memoryMib == null || ephemeralStorageMib == null
+        ) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${command.instanceId}, reason=workload spec missing",
+            )
+        }
+
+        val replacedInstanceId = replaceOwnInstance(previous)
+
+        // 만료 시각을 그대로 복사해 초기화가 시간 연장 수단이 되지 않게 한다
+        val instance = saveRequestedInstance(
+            Instance(
+                teamId = previous.teamId,
+                userId = previous.userId,
+                challengeId = previous.challengeId,
+                status = InstanceStatus.REQUESTED,
+                action = InstanceAction.CREATE,
+                containerImage = containerImage,
+                containerPort = containerPort,
+                architecture = architecture,
+                cpuMillicores = cpuMillicores,
+                memoryMib = memoryMib,
+                ephemeralStorageMib = ephemeralStorageMib,
+                expiresAt = previous.expiresAt,
+                hardExpiresAt = previous.hardExpiresAt,
+            ),
+        )
+
+        return InstanceResult.from(instance, replacedInstanceId)
     }
 
     @Transactional
