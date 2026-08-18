@@ -10,9 +10,9 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
 // create 서비스에 넘기는 요청 값
 data class CreateInstanceCommand(
-    val teamId: Long,
+    val teamId: UUID,
     val userId: UUID,
-    val challengeId: Long,
+    val challengeId: UUID,
     val containerImage: String,
     val containerPort: Int,
     val architecture: Architecture,
@@ -36,8 +36,8 @@ data class ExtendInstanceCommand(
 // create/delete/active 조회가 공통으로 돌려주는 결과 값
 data class InstanceResult(
     val instanceId: UUID,
-    val teamId: Long,
-    val challengeId: Long,
+    val teamId: UUID,
+    val challengeId: UUID,
     val status: InstanceStatus,
     val serviceUrl: String?,
     val expiresAt: Instant,

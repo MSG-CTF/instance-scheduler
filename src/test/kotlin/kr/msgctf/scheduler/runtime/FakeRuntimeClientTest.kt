@@ -7,6 +7,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.testUuid
 
 class FakeRuntimeClientTest {
 
@@ -22,7 +23,7 @@ class FakeRuntimeClientTest {
         val snapshot = client.getOperation(accepted.operationId)
         assertEquals(RuntimeOperationState.SUCCEEDED, snapshot.status)
         assertEquals("workload-$instanceId", snapshot.result?.runtimeWorkloadId)
-        assertEquals("https://team-7.local", snapshot.result?.serviceUrl)
+        assertEquals("https://team-${testUuid(7)}.local", snapshot.result?.serviceUrl)
     }
 
     // OPERATION_FAIL 모드가 FAILED와 last_error_code를 돌려주는지 확인
@@ -67,7 +68,7 @@ class FakeRuntimeClientTest {
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
-            teamId = 7L,
+            teamId = testUuid(7),
             target = RuntimeTarget(RuntimeType.KUBERNETES, "cluster-main"),
             workload = RuntimeWorkload(
                 image = "registry.msgctf.local/challenges/web-01:2026.07.01",
@@ -80,7 +81,7 @@ class FakeRuntimeClientTest {
         RuntimeDeleteRequest(
             requestId = "runtime-delete-$instanceId",
             instanceId = instanceId,
-            teamId = 7L,
+            teamId = testUuid(7),
             target = RuntimeTarget(RuntimeType.KUBERNETES, "cluster-main"),
             runtimeWorkloadId = "workload-$instanceId",
             reason = RuntimeDeleteReason.USER_REQUESTED,

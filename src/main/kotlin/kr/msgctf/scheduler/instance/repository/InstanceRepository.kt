@@ -18,6 +18,20 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
         statuses: Collection<InstanceStatus>,
     ): Instance?
 
+    // 같은 팀의 create를 트랜잭션이 끝날 때까지 직렬화한다
+    // 잠금이 없으면 두 create가 같은 개수를 읽어 팀 상한을 넘겨 저장한다
+    // 잠금 키는 BIGINT만 받아 UUID 문자열을 해시한 값으로 잠근다
+    // 해시가 겹치면 다른 팀 create가 잠깐 함께 직렬화될 뿐 개수 검사는 팀별이라 어긋나지 않는다
+    // advisory lock 키공간은 DB 전역이라 team_id가 아닌 키로 잠그는 기능을 더하면 키 분리를 먼저 정해야 한다
+    @Query(value = "select pg_advisory_xact_lock(hashtextextended(:teamId, 0))", nativeQuery = true)
+    fun lockTeam(@Param("teamId") teamId: String)
+
+    // 팀 상한 검사에 쓸 활성 인스턴스 개수를 센다
+    fun countByTeamIdAndStatusIn(
+        teamId: UUID,
+        statuses: Collection<InstanceStatus>,
+    ): Long
+
     // 같은 인스턴스에 동시에 들어온 삭제 요청을 직렬화한다
     // 행 잠금이 없으면 두 요청이 모두 RUNNING을 읽어 Runtime 삭제를 두 번 호출한다
     @Lock(LockModeType.PESSIMISTIC_WRITE)

@@ -23,6 +23,7 @@ import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testUuid
 import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
 import org.springframework.dao.DataIntegrityViolationException
@@ -38,7 +39,7 @@ class InstanceSchedulerServiceTest {
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
         val instanceSchedulerService = newService(instanceRepository = instanceRepository)
-        val command = newCommand(teamId = 201L)
+        val command = newCommand(teamId = testUuid(201))
 
         // when
         val result = instanceSchedulerService.createInstance(command)
@@ -83,7 +84,7 @@ class InstanceSchedulerServiceTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 204L))
+            instanceSchedulerService.createInstance(newCommand(teamId = testUuid(204)))
         }
 
         // then
@@ -104,7 +105,7 @@ class InstanceSchedulerServiceTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 208L))
+            instanceSchedulerService.createInstance(newCommand(teamId = testUuid(208)))
         }
 
         // then
@@ -120,7 +121,7 @@ class InstanceSchedulerServiceTest {
         val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
 
         // when
-        val result = instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = testUuid(301)))
 
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
@@ -140,7 +141,7 @@ class InstanceSchedulerServiceTest {
 
         // when
         val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+            instanceSchedulerService.createInstance(newCommand(teamId = testUuid(301)))
         }
 
         // then
@@ -157,11 +158,92 @@ class InstanceSchedulerServiceTest {
         val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
 
         // when
-        val result = instanceSchedulerService.createInstance(newCommand(teamId = 301L))
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = testUuid(301)))
 
         // then
         assertNull(result.replacedInstanceId)
         assertEquals(InstanceStatus.REQUESTED, result.status)
+    }
+
+    // 팀 활성 인스턴스가 상한이면 다른 user의 생성도 거절하는지 확인
+    @Test
+    fun `rejects create when team active limit is reached`() {
+        // given: 같은 팀의 다른 user 둘이 상한 2를 채운 상태다
+        val instanceRepository = TestInstanceRepository()
+        instanceRepository.save(newRunningInstance(teamId = testUuid(400), userId = UUID.randomUUID()))
+        instanceRepository.save(newRunningInstance(teamId = testUuid(400), userId = UUID.randomUUID()))
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = testUuid(400)))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, exception.errorCode)
+        assertEquals(2, instanceRepository.savedInstances.size)
+    }
+
+    // 꽉 찬 팀에서도 자기 인스턴스 교체는 개수가 늘지 않아 허용하는지 확인
+    @Test
+    fun `replaces own instance when team is full`() {
+        // given: 상한 2 중 하나가 자기 인스턴스다
+        val instanceRepository = TestInstanceRepository()
+        val own = instanceRepository.save(newRunningInstance(teamId = testUuid(401)))
+        instanceRepository.save(newRunningInstance(teamId = testUuid(401), userId = UUID.randomUUID()))
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = testUuid(401)))
+
+        // then
+        assertEquals(own.instanceId, result.replacedInstanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, own.status)
+        assertEquals(InstanceStatus.REQUESTED, result.status)
+    }
+
+    // RUNNING 전이 아니어도 활성 상태면 팀 상한 개수에 세는지 확인
+    @Test
+    fun `counts in-transition instances toward team limit`() {
+        // given: RUNNING 하나에 아직 만들어지는 중인 REQUESTED 하나가 있다
+        val instanceRepository = TestInstanceRepository()
+        instanceRepository.save(newRunningInstance(teamId = testUuid(403), userId = UUID.randomUUID()))
+        instanceRepository.save(
+            newRunningInstance(teamId = testUuid(403), userId = UUID.randomUUID())
+                .apply { status = InstanceStatus.REQUESTED },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(newCommand(teamId = testUuid(403)))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, exception.errorCode)
+    }
+
+    // 정리 중이거나 끝난 인스턴스는 팀 상한 개수에 세지 않는지 확인
+    @Test
+    fun `does not count finished instances toward team limit`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        instanceRepository.save(
+            newRunningInstance(teamId = testUuid(402), userId = UUID.randomUUID())
+                .apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
+        instanceRepository.save(
+            newRunningInstance(teamId = testUuid(402), userId = UUID.randomUUID())
+                .apply { status = InstanceStatus.FAILED },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = testUuid(402)))
+
+        // then
+        assertEquals(InstanceStatus.REQUESTED, result.status)
+        assertNull(result.replacedInstanceId)
     }
 
     // ttl이 hard timeout보다 크면 아무것도 저장/호출하지 않고 거절하는지 확인
@@ -175,7 +257,7 @@ class InstanceSchedulerServiceTest {
         // when
         val exception = assertFailsWith<SchedulerException> {
             instanceSchedulerService.createInstance(
-                newCommand(teamId = 205L, ttlMinutes = 200, hardTimeoutMinutes = 120),
+                newCommand(teamId = testUuid(205), ttlMinutes = 200, hardTimeoutMinutes = 120),
             )
         }
 
@@ -308,9 +390,9 @@ class InstanceSchedulerServiceTest {
         val instanceRepository = TestInstanceRepository()
         val instance = instanceRepository.save(
             Instance(
-                teamId = 310L,
+                teamId = testUuid(310),
                 userId = testUserId,
-                challengeId = 10L,
+                challengeId = testUuid(10),
                 status = InstanceStatus.CLEANUP_PENDING,
                 action = InstanceAction.CLEANUP,
                 expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
@@ -377,9 +459,9 @@ class InstanceSchedulerServiceTest {
         val instanceRepository = TestInstanceRepository()
         val expiredInstance = instanceRepository.save(
             Instance(
-                teamId = 320L,
+                teamId = testUuid(320),
                 userId = testUserId,
-                challengeId = 10L,
+                challengeId = testUuid(10),
                 status = InstanceStatus.RUNNING,
                 action = InstanceAction.CREATE,
                 expiresAt = Instant.parse("2026-07-04T12:00:00Z").minusSeconds(3600),
@@ -411,7 +493,7 @@ class InstanceSchedulerServiceTest {
             policyProperties = InstancePolicyProperties(maxHardTimeoutMinutes = Long.MAX_VALUE),
         )
         val command = newCommand(
-            teamId = 202L,
+            teamId = testUuid(202),
             ttlMinutes = Long.MAX_VALUE,
             hardTimeoutMinutes = Long.MAX_VALUE,
         )
@@ -441,7 +523,7 @@ class InstanceSchedulerServiceTest {
         )
 
     private fun newCommand(
-        teamId: Long,
+        teamId: UUID,
         ttlMinutes: Long = 120,
         hardTimeoutMinutes: Long = 180,
         userId: UUID = testUserId,
@@ -449,7 +531,7 @@ class InstanceSchedulerServiceTest {
         CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
-            challengeId = 10L,
+            challengeId = testUuid(10),
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
             architecture = Architecture.AMD64,
@@ -481,11 +563,11 @@ class InstanceSchedulerServiceTest {
         return instanceRepository
     }
 
-    private fun newRunningInstance(): Instance =
+    private fun newRunningInstance(teamId: UUID = testUuid(301), userId: UUID = testUserId): Instance =
         Instance(
-            teamId = 301L,
-            userId = testUserId,
-            challengeId = 10L,
+            teamId = teamId,
+            userId = userId,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,

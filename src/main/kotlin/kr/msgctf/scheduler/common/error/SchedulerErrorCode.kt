@@ -39,6 +39,10 @@ enum class SchedulerErrorCode(
         HttpStatus.CONFLICT,
         "이미 실행 중인 인스턴스가 있습니다.",
     ),
+    TEAM_INSTANCE_LIMIT_EXCEEDED(
+        HttpStatus.CONFLICT,
+        "팀에서 실행할 수 있는 인스턴스 한도에 도달했습니다.",
+    ),
     RESOURCE_UNAVAILABLE(
         HttpStatus.SERVICE_UNAVAILABLE,
         "현재 사용 가능한 리소스가 없습니다. 잠시 후 다시 시도해주세요.",

@@ -35,11 +35,23 @@ class InstanceSchedulerService(
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
 
+        // 팀 잠금을 행 잠금보다 먼저 잡아 같은 팀의 create끼리 잠금 순서를 통일한다
+        instanceRepository.lockTeam(command.teamId.toString())
+
         val previous = instanceRepository.findByUserIdAndStatusInForUpdate(
             userId = command.userId,
             statuses = transitionService.activeStatuses(),
         )
         val replacedInstanceId = previous?.let { replaceOwnInstance(it) }
+
+        // 교체로 빠진 이전 인스턴스를 개수에서 뺀 뒤 세어야 꽉 찬 팀에서도 자기 교체가 된다
+        instancePolicyService.validateTeamActiveCount(
+            teamId = command.teamId,
+            activeCount = instanceRepository.countByTeamIdAndStatusIn(
+                teamId = command.teamId,
+                statuses = transitionService.activeStatuses(),
+            ),
+        )
 
         val now = clock.instant()
         val instance = saveRequestedInstance(

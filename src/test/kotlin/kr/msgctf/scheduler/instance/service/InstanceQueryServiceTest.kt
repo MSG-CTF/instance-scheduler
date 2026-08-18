@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.testUuid
 
 // 조회 서비스는 상태를 바꾸지 않고 저장된 값을 그대로 돌려준다
 class InstanceQueryServiceTest {
@@ -22,7 +23,7 @@ class InstanceQueryServiceTest {
     fun `finds instance detail by id`() {
         // given
         val repository = TestInstanceRepository()
-        val instance = repository.save(newRunningInstance(teamId = 1L))
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
         val service = newService(repository)
 
         // when
@@ -30,8 +31,8 @@ class InstanceQueryServiceTest {
 
         // then: 운영자가 실행 위치를 파악할 수 있도록 runtime 정보까지 담는다
         assertEquals(instance.instanceId, result.instanceId)
-        assertEquals(1L, result.teamId)
-        assertEquals(10L, result.challengeId)
+        assertEquals(testUuid(1), result.teamId)
+        assertEquals(testUuid(10), result.challengeId)
         assertEquals(InstanceStatus.RUNNING, result.status)
         assertEquals(InstanceAction.CREATE, result.action)
         assertEquals("SELF_HOSTED", result.provider)
@@ -52,7 +53,7 @@ class InstanceQueryServiceTest {
     fun `returns null for idle fields that are not filled yet`() {
         // given
         val repository = TestInstanceRepository()
-        val instance = repository.save(newRunningInstance(teamId = 1L))
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
         val service = newService(repository)
 
         // when
@@ -81,7 +82,7 @@ class InstanceQueryServiceTest {
         // given
         val repository = TestInstanceRepository()
         val userId = UUID.randomUUID()
-        val instance = repository.save(newRunningInstance(teamId = 7L, userId = userId))
+        val instance = repository.save(newRunningInstance(teamId = testUuid(7), userId = userId))
         val service = newService(repository)
 
         // when
@@ -112,7 +113,7 @@ class InstanceQueryServiceTest {
         val repository = TestInstanceRepository()
         val userId = UUID.randomUUID()
         repository.save(
-            newRunningInstance(teamId = 7L, userId = userId).apply { status = InstanceStatus.CLEANUP_PENDING },
+            newRunningInstance(teamId = testUuid(7), userId = userId).apply { status = InstanceStatus.CLEANUP_PENDING },
         )
         val service = newService(repository)
 
@@ -130,11 +131,11 @@ class InstanceQueryServiceTest {
             transitionService = InstanceStateTransitionService(),
         )
 
-    private fun newRunningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
+    private fun newRunningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
             userId = userId,
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             provider = "SELF_HOSTED",

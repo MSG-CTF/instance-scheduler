@@ -16,6 +16,7 @@ import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.AfterEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -53,7 +54,7 @@ class InstanceCleanupIntegrationTest {
     @Test
     fun `routes expired running and operation worker finishes cleaning`() {
         // given
-        val saved = instanceRepository.saveAndFlush(expiredRunning(teamId = 801L))
+        val saved = instanceRepository.saveAndFlush(expiredRunning(teamId = testUuid(801)))
 
         // when: cleanup 워커가 정리 대기로 바꾼다
         newCleanupWorker().cleanupExpiredInstances()
@@ -88,12 +89,12 @@ class InstanceCleanupIntegrationTest {
             clock = Clock.systemUTC(),
         )
 
-    private fun expiredRunning(teamId: Long): Instance {
+    private fun expiredRunning(teamId: UUID): Instance {
         val now = Instant.now()
         return Instance(
             teamId = teamId,
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,

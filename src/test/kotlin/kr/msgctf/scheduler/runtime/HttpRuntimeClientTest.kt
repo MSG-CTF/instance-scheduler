@@ -7,6 +7,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.testUuid
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -132,7 +133,7 @@ class HttpRuntimeClientTest {
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
-            teamId = 7L,
+            teamId = testUuid(7),
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             workload = RuntimeWorkload(
                 image = "ghcr.io/example/web:latest",
@@ -145,7 +146,7 @@ class HttpRuntimeClientTest {
         RuntimeDeleteRequest(
             requestId = "runtime-delete-$instanceId",
             instanceId = instanceId,
-            teamId = 7L,
+            teamId = testUuid(7),
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             runtimeWorkloadId = "workload-$instanceId",
             reason = RuntimeDeleteReason.USER_REQUESTED,

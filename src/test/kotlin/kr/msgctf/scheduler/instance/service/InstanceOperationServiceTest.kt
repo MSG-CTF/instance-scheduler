@@ -26,6 +26,7 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
+import kr.msgctf.scheduler.testUuid
 import org.springframework.transaction.support.TransactionOperations
 
 class InstanceOperationServiceTest {
@@ -144,7 +145,7 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.RUNNING, instance.status)
         assertEquals("workload-${instance.instanceId}", instance.runtimeWorkloadId)
-        assertEquals("https://team-7.local", instance.serviceUrl)
+        assertEquals("https://team-${testUuid(7)}.local", instance.serviceUrl)
         assertNull(instance.runtimeOperationId)
         assertNull(instance.nextPollAt)
         assertNull(instance.action)
@@ -481,9 +482,9 @@ class InstanceOperationServiceTest {
     private fun newRequested(): Instance {
         val now = clock.instant()
         return Instance(
-            teamId = 7L,
+            teamId = testUuid(7),
             userId = UUID.randomUUID(),
-            challengeId = 100L,
+            challengeId = testUuid(100),
             status = InstanceStatus.REQUESTED,
             action = InstanceAction.CREATE,
             containerImage = "ghcr.io/example/web:latest",
