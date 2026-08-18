@@ -11,8 +11,8 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 // 운영자가 실행 위치와 수명을 함께 확인할 수 있도록 runtime 정보까지 담는다
 data class InstanceDetailResult(
     val instanceId: UUID,
-    val teamId: Long,
-    val challengeId: Long,
+    val teamId: UUID,
+    val challengeId: UUID,
     val status: InstanceStatus,
     val action: InstanceAction?,
     val provider: String?,

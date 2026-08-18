@@ -15,6 +15,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -62,12 +63,12 @@ class InstanceCommandIntegrationTest {
         // when
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 100L, challengeId = 10L)
+            content = createRequestBody(teamId = testUuid(100), challengeId = testUuid(10))
         }.andExpect {
             status { isAccepted() }
             jsonPath("$.code") { value("SUCCESS") }
-            jsonPath("$.data.team_id") { value(100) }
-            jsonPath("$.data.challenge_id") { value(10) }
+            jsonPath("$.data.team_id") { value(testUuid(100).toString()) }
+            jsonPath("$.data.challenge_id") { value(testUuid(10).toString()) }
             jsonPath("$.data.status") { value("REQUESTED") }
             jsonPath("$.data.service_url") { doesNotExist() }
             jsonPath("$.data.hard_expires_at") { exists() }
@@ -91,12 +92,12 @@ class InstanceCommandIntegrationTest {
     fun `create api replaces own running instance`() {
         // given
         val userId = UUID.randomUUID()
-        val previous = instanceRepository.saveAndFlush(runningInstance(teamId = 200L, userId = userId))
+        val previous = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(200), userId = userId))
 
         // when
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 200L, challengeId = 20L, userId = userId)
+            content = createRequestBody(teamId = testUuid(200), challengeId = testUuid(20), userId = userId)
         }.andExpect {
             status { isAccepted() }
             jsonPath("$.data.status") { value("REQUESTED") }
@@ -116,12 +117,12 @@ class InstanceCommandIntegrationTest {
         // when & then: createRequestBody의 기본 userId가 호출마다 랜덤이라 서로 다른 user다
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 210L, challengeId = 10L)
+            content = createRequestBody(teamId = testUuid(210), challengeId = testUuid(10))
         }.andExpect { status { isAccepted() } }
 
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 210L, challengeId = 20L)
+            content = createRequestBody(teamId = testUuid(210), challengeId = testUuid(20))
         }.andExpect { status { isAccepted() } }
 
         // then: 교체 없이 두 인스턴스가 모두 접수된다
@@ -132,20 +133,20 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `create api rejects third instance of a full team`() {
         // given
-        instanceRepository.saveAndFlush(runningInstance(teamId = 220L))
-        instanceRepository.saveAndFlush(runningInstance(teamId = 220L))
+        instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(220)))
+        instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(220)))
 
         // when & then
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 220L, challengeId = 30L)
+            content = createRequestBody(teamId = testUuid(220), challengeId = testUuid(30))
         }.andExpect {
             status { isConflict() }
             jsonPath("$.code") { value("TEAM_INSTANCE_LIMIT_EXCEEDED") }
         }
 
         // then: 거절된 요청이 행을 남기면 안 된다
-        assertEquals(2, instanceRepository.findAll().count { it.teamId == 220L })
+        assertEquals(2, instanceRepository.findAll().count { it.teamId == testUuid(220) })
     }
 
     // 꽉 찬 팀이라도 자기 인스턴스 교체는 개수가 늘지 않아 접수된다
@@ -153,13 +154,13 @@ class InstanceCommandIntegrationTest {
     fun `create api replaces own instance in a full team`() {
         // given
         val userId = UUID.randomUUID()
-        val own = instanceRepository.saveAndFlush(runningInstance(teamId = 230L, userId = userId))
-        instanceRepository.saveAndFlush(runningInstance(teamId = 230L))
+        val own = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(230), userId = userId))
+        instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(230)))
 
         // when & then
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 230L, challengeId = 30L, userId = userId)
+            content = createRequestBody(teamId = testUuid(230), challengeId = testUuid(30), userId = userId)
         }.andExpect {
             status { isAccepted() }
             jsonPath("$.data.replaced_instance_id") { value(own.instanceId.toString()) }
@@ -173,11 +174,13 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `create api rejects invalid request body`() {
         // 잘못된 요청값은 service로 넘기지 않고 거절
+        // id는 전부 유효하게 채워 나머지 필드 검증이 400을 만드는지 확인한다
         // given
         val requestBody = """
             {
-              "team_id": 0,
-              "challenge_id": -1,
+              "team_id": "${testUuid(1)}",
+              "user_id": "${UUID.randomUUID()}",
+              "challenge_id": "${testUuid(1)}",
               "container_image": "",
               "container_port": 0,
               "architecture": "AMD64",
@@ -190,6 +193,23 @@ class InstanceCommandIntegrationTest {
               "hard_timeout_minutes": 0
             }
         """.trimIndent()
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // @Positive 검증을 걷어낸 자리라 UUID 해석 실패가 400으로 떨어지는 것을 고정한다
+    @Test
+    fun `create api rejects non uuid team id`() {
+        // given
+        val requestBody = createRequestBody(teamId = testUuid(1), challengeId = testUuid(10))
+            .replace("\"${testUuid(1)}\"", "\"not-a-uuid\"")
 
         // when & then
         mockMvc.post("/api/instances") {
@@ -219,7 +239,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `create api ignores unknown request fields`() {
         // given
-        val requestBody = createRequestBody(teamId = 900L, challengeId = 10L)
+        val requestBody = createRequestBody(teamId = testUuid(900), challengeId = testUuid(10))
             .trimEnd()
             .removeSuffix("}") + """, "bogus_field": 1 }"""
 
@@ -229,7 +249,7 @@ class InstanceCommandIntegrationTest {
             content = requestBody
         }.andExpect {
             status { isAccepted() }
-            jsonPath("$.data.team_id") { value(900) }
+            jsonPath("$.data.team_id") { value(testUuid(900).toString()) }
         }
     }
 
@@ -248,7 +268,7 @@ class InstanceCommandIntegrationTest {
     fun `delete api stores stopping instance in postgres`() {
         // delete 접수가 실제 DB 상태를 STOPPING으로 바꾸는지 확인
         // given: create가 접수만 하므로 RUNNING 행을 직접 심는다
-        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 300L)).instanceId
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(300))).instanceId
 
         // when
         mockMvc.delete("/api/instances/$instanceId") {
@@ -274,7 +294,7 @@ class InstanceCommandIntegrationTest {
     fun `delete api works without request body`() {
         // body 없이 delete 가능 확인
         // given
-        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 400L)).instanceId
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(400))).instanceId
 
         // when & then
         mockMvc.delete("/api/instances/$instanceId")
@@ -288,7 +308,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `delete api rejects delete reason other than user requested`() {
         // given
-        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 500L)).instanceId
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(500))).instanceId
 
         // when & then
         mockMvc.delete("/api/instances/$instanceId") {
@@ -320,7 +340,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `delete api rejects instance already being deleted`() {
         // given
-        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 600L)).instanceId
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(600))).instanceId
 
         mockMvc.delete("/api/instances/$instanceId")
             .andExpect { status { isAccepted() } }
@@ -362,7 +382,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `create api rejects hard timeout beyond the allowed maximum`() {
         // given
-        val requestBody = createRequestBody(teamId = 700L, challengeId = 10L)
+        val requestBody = createRequestBody(teamId = testUuid(700), challengeId = testUuid(10))
             .replace("\"hard_timeout_minutes\": 180", "\"hard_timeout_minutes\": 100000")
 
         // when & then
@@ -398,7 +418,7 @@ class InstanceCommandIntegrationTest {
         mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             accept = MediaType.TEXT_PLAIN
-            content = createRequestBody(teamId = 750L, challengeId = 10L)
+            content = createRequestBody(teamId = testUuid(750), challengeId = testUuid(10))
         }.andExpect {
             status { isNotAcceptable() }
         }
@@ -413,7 +433,7 @@ class InstanceCommandIntegrationTest {
         // when
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 800L, challengeId = 10L)
+            content = createRequestBody(teamId = testUuid(800), challengeId = testUuid(10))
         }.andExpect {
             status { isAccepted() }
         }.andReturn().response.contentAsString
@@ -439,7 +459,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `extend api extends expiry`() {
         // given: create는 202 접수라 RUNNING을 직접 시딩한다
-        val instance = instanceRepository.saveAndFlush(runningInstance(teamId = 1000L))
+        val instance = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(1000)))
         val instanceId = instance.instanceId
         val originalExpiresAt = instance.expiresAt
 
@@ -470,7 +490,7 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `extend api rejects extend beyond hard timeout`() {
         // given: 만료까지 120분, hard까지 180분이라 남은 여유는 60분이다
-        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = 1100L)).instanceId
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(1100))).instanceId
 
         // when & then
         mockMvc.post("/api/instances/$instanceId/extend") {
@@ -488,7 +508,7 @@ class InstanceCommandIntegrationTest {
         // given
         val createResponse = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = 1200L, challengeId = 10L)
+            content = createRequestBody(teamId = testUuid(1200), challengeId = testUuid(10))
         }.andReturn().response.contentAsString
 
         val instanceId = readInstanceId(createResponse)
@@ -505,11 +525,11 @@ class InstanceCommandIntegrationTest {
 
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
 
-    private fun runningInstance(teamId: Long, userId: UUID = UUID.randomUUID()): Instance =
+    private fun runningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =
         Instance(
             teamId = teamId,
             userId = userId,
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,
@@ -521,15 +541,15 @@ class InstanceCommandIntegrationTest {
         )
 
     private fun createRequestBody(
-        teamId: Long,
-        challengeId: Long,
+        teamId: UUID,
+        challengeId: UUID,
         userId: UUID = UUID.randomUUID(),
     ): String =
         """
             {
-              "team_id": $teamId,
+              "team_id": "$teamId",
               "user_id": "$userId",
-              "challenge_id": $challengeId,
+              "challenge_id": "$challengeId",
               "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
               "container_port": 8080,
               "architecture": "AMD64",

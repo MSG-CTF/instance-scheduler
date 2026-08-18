@@ -22,13 +22,11 @@ private const val MAX_PORT = 65_535L
 
 // create API 요청 body
 data class CreateInstanceRequest(
-    @field:Positive
-    val teamId: Long,
+    val teamId: UUID,
 
     val userId: UUID,
 
-    @field:Positive
-    val challengeId: Long,
+    val challengeId: UUID,
 
     @field:NotBlank
     val containerImage: String,
@@ -123,8 +121,8 @@ data class ExtendInstanceRequest(
 // create / delete 이후 상태와 active 조회에 공통으로 쓰는 응답 body
 data class InstanceResponse(
     val instanceId: UUID,
-    val teamId: Long,
-    val challengeId: Long,
+    val teamId: UUID,
+    val challengeId: UUID,
     val status: InstanceStatus,
     val serviceUrl: String?,
     val expiresAt: Instant,
@@ -151,8 +149,8 @@ data class InstanceResponse(
 // 단건 조회 API 응답 body
 data class InstanceDetailResponse(
     val instanceId: UUID,
-    val teamId: Long,
-    val challengeId: Long,
+    val teamId: UUID,
+    val challengeId: UUID,
     val status: InstanceStatus,
     val action: InstanceAction?,
     val provider: String?,
@@ -199,8 +197,8 @@ data class InstanceDetailResponse(
 // delete API 응답 body
 data class DeleteInstanceResponse(
     val instanceId: UUID,
-    val teamId: Long,
-    val challengeId: Long,
+    val teamId: UUID,
+    val challengeId: UUID,
     val status: InstanceStatus,
 ) {
 

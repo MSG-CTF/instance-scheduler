@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
+import kr.msgctf.scheduler.testUuid
 
 class InstanceCleanupWorkerTest {
 
@@ -68,25 +69,25 @@ class InstanceCleanupWorkerTest {
 
     private fun running(expiresAt: Instant, hardExpiresAt: Instant): Instance =
         Instance(
-            teamId = 701L, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.RUNNING,
+            teamId = testUuid(701), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.RUNNING,
             runtimeWorkloadId = "workload-1", expiresAt = expiresAt, hardExpiresAt = hardExpiresAt,
         )
 
     private fun provisioning(hardExpiresAt: Instant): Instance =
         Instance(
-            teamId = 702L, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.PROVISIONING,
+            teamId = testUuid(702), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.PROVISIONING,
             expiresAt = hardExpiresAt.plusSeconds(3600), hardExpiresAt = hardExpiresAt,
         )
 
     private fun expired(): Instance =
         Instance(
-            teamId = 703L, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.EXPIRED,
+            teamId = testUuid(703), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.EXPIRED,
             runtimeWorkloadId = "workload-703", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
         )
 
     private fun cleanupPending(): Instance =
         Instance(
-            teamId = 704L, userId = UUID.randomUUID(), challengeId = 10L, status = InstanceStatus.CLEANUP_PENDING,
+            teamId = testUuid(704), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.CLEANUP_PENDING,
             runtimeWorkloadId = "workload-704", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
         )
 

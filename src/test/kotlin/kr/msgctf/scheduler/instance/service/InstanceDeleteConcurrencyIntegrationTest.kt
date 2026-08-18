@@ -23,6 +23,7 @@ import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -66,7 +67,7 @@ class InstanceDeleteConcurrencyIntegrationTest {
     @Test
     fun `calls runtime delete once when two delete requests run together`() {
         // given
-        val created = instanceRepository.saveAndFlush(runningInstance(teamId = 1L))
+        val created = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(1)))
         val command = DeleteInstanceCommand(instanceId = created.instanceId)
 
         // when: 두 스레드가 같은 인스턴스를 동시에 삭제 시도
@@ -104,11 +105,11 @@ class InstanceDeleteConcurrencyIntegrationTest {
     }
 
     // create가 접수만 하므로 삭제 대상 RUNNING 인스턴스를 저장소에 직접 넣는다
-    private fun runningInstance(teamId: Long): Instance =
+    private fun runningInstance(teamId: UUID): Instance =
         Instance(
             teamId = teamId,
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,

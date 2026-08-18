@@ -21,6 +21,7 @@ import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testUuid
 
 // controller는 서비스 결과를 성공 응답으로 감싸는지만 확인
 // HTTP 직렬화와 검증은 integration test에서 확인
@@ -37,8 +38,8 @@ class InstanceCommandControllerTest {
 
         // then
         assertEquals("SUCCESS", response.code)
-        assertEquals(1L, response.data.teamId)
-        assertEquals(10L, response.data.challengeId)
+        assertEquals(testUuid(1), response.data.teamId)
+        assertEquals(testUuid(10), response.data.challengeId)
         assertEquals(InstanceStatus.REQUESTED, response.data.status)
         assertNull(response.data.serviceUrl)
     }
@@ -111,9 +112,9 @@ class InstanceCommandControllerTest {
 
     private fun newCreateRequest(): CreateInstanceRequest =
         CreateInstanceRequest(
-            teamId = 1L,
+            teamId = testUuid(1),
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
             architecture = Architecture.AMD64,
@@ -128,9 +129,9 @@ class InstanceCommandControllerTest {
 
     private fun newRunningInstance(): Instance =
         Instance(
-            teamId = 1L,
+            teamId = testUuid(1),
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,

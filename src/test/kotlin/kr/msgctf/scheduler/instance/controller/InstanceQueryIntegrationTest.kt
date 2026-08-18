@@ -14,6 +14,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -54,7 +55,7 @@ class InstanceQueryIntegrationTest {
     @Test
     fun `get api returns instance detail in snake case`() {
         // given
-        val instanceId = createInstance(teamId = 100L)
+        val instanceId = createInstance(teamId = testUuid(100))
 
         // when & then
         mockMvc.get("/api/instances/$instanceId")
@@ -63,8 +64,8 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.code") { value("SUCCESS") }
                 jsonPath("$.message") { value("인스턴스 조회 성공") }
                 jsonPath("$.data.instance_id") { value(instanceId.toString()) }
-                jsonPath("$.data.team_id") { value(100) }
-                jsonPath("$.data.challenge_id") { value(10) }
+                jsonPath("$.data.team_id") { value(testUuid(100).toString()) }
+                jsonPath("$.data.challenge_id") { value(testUuid(10).toString()) }
                 jsonPath("$.data.status") { value("RUNNING") }
                 jsonPath("$.data.action") { value("CREATE") }
                 jsonPath("$.data.provider") { value("SELF_HOSTED") }
@@ -73,7 +74,7 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.data.runtime_type") { value("KUBERNETES") }
                 jsonPath("$.data.runtime_target_id") { value("cluster-main") }
                 jsonPath("$.data.runtime_workload_id") { value("workload-$instanceId") }
-                jsonPath("$.data.service_url") { value("https://team-100.local") }
+                jsonPath("$.data.service_url") { value("https://team-${testUuid(100)}.local") }
                 jsonPath("$.data.created_at") { exists() }
                 jsonPath("$.data.updated_at") { exists() }
                 jsonPath("$.data.expires_at") { exists() }
@@ -85,7 +86,7 @@ class InstanceQueryIntegrationTest {
     @Test
     fun `get api returns null for idle fields`() {
         // given
-        val instanceId = createInstance(teamId = 110L)
+        val instanceId = createInstance(teamId = testUuid(110))
 
         // when & then
         mockMvc.get("/api/instances/$instanceId")
@@ -103,9 +104,9 @@ class InstanceQueryIntegrationTest {
         // given
         val instance = instanceRepository.save(
             Instance(
-                teamId = 400L,
+                teamId = testUuid(400),
                 userId = UUID.randomUUID(),
-                challengeId = 10L,
+                challengeId = testUuid(10),
                 status = InstanceStatus.FAILED,
                 expiresAt = Instant.parse("2026-07-04T14:00:00Z"),
                 hardExpiresAt = Instant.parse("2026-07-04T15:00:00Z"),
@@ -157,7 +158,7 @@ class InstanceQueryIntegrationTest {
     fun `get active api binds snake case user id`() {
         // given
         val userId = UUID.randomUUID()
-        val instanceId = createInstance(teamId = 200L, userId = userId)
+        val instanceId = createInstance(teamId = testUuid(200), userId = userId)
 
         // when & then
         mockMvc.get("/api/instances/active?user_id=$userId")
@@ -166,9 +167,9 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.code") { value("SUCCESS") }
                 jsonPath("$.message") { value("active instance 조회 성공") }
                 jsonPath("$.data.instance_id") { value(instanceId.toString()) }
-                jsonPath("$.data.team_id") { value(200) }
+                jsonPath("$.data.team_id") { value(testUuid(200).toString()) }
                 jsonPath("$.data.status") { value("RUNNING") }
-                jsonPath("$.data.service_url") { value("https://team-200.local") }
+                jsonPath("$.data.service_url") { value("https://team-${testUuid(200)}.local") }
             }
     }
 
@@ -177,7 +178,7 @@ class InstanceQueryIntegrationTest {
     fun `get active api does not expose runtime detail`() {
         // given
         val userId = UUID.randomUUID()
-        createInstance(teamId = 210L, userId = userId)
+        createInstance(teamId = testUuid(210), userId = userId)
 
         // when & then
         mockMvc.get("/api/instances/active?user_id=$userId")
@@ -225,7 +226,7 @@ class InstanceQueryIntegrationTest {
     fun `get api returns times as iso 8601 with offset`() {
         // given
         val isoWithOffset = Regex("""\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}""")
-        val instanceId = createInstance(teamId = 300L)
+        val instanceId = createInstance(teamId = testUuid(300))
 
         // when
         val response = mockMvc.get("/api/instances/$instanceId")
@@ -248,7 +249,7 @@ class InstanceQueryIntegrationTest {
     @Test
     fun `get api returns times that match stored values`() {
         // given
-        val instanceId = createInstance(teamId = 310L)
+        val instanceId = createInstance(teamId = testUuid(310))
 
         // when
         val response = mockMvc.get("/api/instances/$instanceId")
@@ -269,12 +270,12 @@ class InstanceQueryIntegrationTest {
 
     // create가 접수만 하므로 조회 대상 RUNNING 인스턴스를 저장소에 직접 넣는다
     // 만료 시각은 응답 직렬화 정밀도(밀리초)에 맞춘다
-    private fun createInstance(teamId: Long, userId: UUID = UUID.randomUUID()): UUID {
+    private fun createInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): UUID {
         val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         val instance = Instance(
             teamId = teamId,
             userId = userId,
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             provider = "SELF_HOSTED",

@@ -7,6 +7,7 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 
 class InstancePolicyServiceTest {
@@ -97,7 +98,7 @@ class InstancePolicyServiceTest {
     fun `allows create when team active count is below max`() {
         // when & then (예외가 발생하지 않아야 한다)
         instancePolicyService.validateTeamActiveCount(
-            teamId = 1L,
+            teamId = testUuid(1),
             activeCount = policyProperties.maxTeamActiveInstances - 1,
         )
     }
@@ -108,7 +109,7 @@ class InstancePolicyServiceTest {
         // when
         val exception = assertFailsWith<SchedulerException> {
             instancePolicyService.validateTeamActiveCount(
-                teamId = 1L,
+                teamId = testUuid(1),
                 activeCount = policyProperties.maxTeamActiveInstances,
             )
         }
@@ -126,11 +127,11 @@ class InstancePolicyServiceTest {
         )
 
         // when & then (상한 3에서 2개는 허용해야 한다)
-        raisedLimitService.validateTeamActiveCount(teamId = 1L, activeCount = 2)
+        raisedLimitService.validateTeamActiveCount(teamId = testUuid(1), activeCount = 2)
 
         // 상한 3에서 3개는 거절해야 한다
         val exception = assertFailsWith<SchedulerException> {
-            raisedLimitService.validateTeamActiveCount(teamId = 1L, activeCount = 3)
+            raisedLimitService.validateTeamActiveCount(teamId = testUuid(1), activeCount = 3)
         }
         assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, exception.errorCode)
     }

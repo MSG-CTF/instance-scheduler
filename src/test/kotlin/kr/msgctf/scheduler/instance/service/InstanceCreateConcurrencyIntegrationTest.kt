@@ -19,6 +19,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -52,7 +53,7 @@ class InstanceCreateConcurrencyIntegrationTest {
     @Test
     fun `admits only one create when two requests race for the last team slot`() {
         // given: 상한 2 중 한 자리를 미리 채운다
-        instanceRepository.saveAndFlush(runningInstance(teamId = 700L))
+        instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(700)))
 
         // when: 서로 다른 user 둘이 같은 팀 create를 동시에 시도
         val executor = Executors.newFixedThreadPool(2)
@@ -63,7 +64,7 @@ class InstanceCreateConcurrencyIntegrationTest {
                 executor.submit<Throwable?> {
                     startSignal.await()
                     runCatching {
-                        instanceSchedulerService.createInstance(newCommand(teamId = 700L))
+                        instanceSchedulerService.createInstance(newCommand(teamId = testUuid(700)))
                     }.exceptionOrNull()
                 }
             }
@@ -84,14 +85,14 @@ class InstanceCreateConcurrencyIntegrationTest {
         assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, rejected.errorCode)
 
         // 거절된 요청은 행을 남기지 않아 팀 행이 상한과 같아야 한다
-        assertEquals(2, instanceRepository.findAll().count { it.teamId == 700L })
+        assertEquals(2, instanceRepository.findAll().count { it.teamId == testUuid(700) })
     }
 
-    private fun newCommand(teamId: Long): CreateInstanceCommand =
+    private fun newCommand(teamId: UUID): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
             containerPort = 8080,
             architecture = Architecture.AMD64,
@@ -105,11 +106,11 @@ class InstanceCreateConcurrencyIntegrationTest {
         )
 
     // create가 접수만 하므로 자리를 채울 RUNNING 인스턴스를 저장소에 직접 넣는다
-    private fun runningInstance(teamId: Long): Instance =
+    private fun runningInstance(teamId: UUID): Instance =
         Instance(
             teamId = teamId,
             userId = UUID.randomUUID(),
-            challengeId = 10L,
+            challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,

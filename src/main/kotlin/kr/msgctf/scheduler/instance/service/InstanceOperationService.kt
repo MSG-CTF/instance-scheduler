@@ -359,8 +359,8 @@ class InstanceOperationService(
 }
 
 private data class WorkloadSpec(
-    val teamId: Long,
-    val challengeId: Long,
+    val teamId: UUID,
+    val challengeId: UUID,
     val containerImage: String,
     val containerPort: Int,
     val architecture: Architecture,
