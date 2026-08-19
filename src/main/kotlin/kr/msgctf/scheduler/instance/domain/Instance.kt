@@ -92,6 +92,7 @@ class Instance(
     @Column(name = "runtime_operation_id")
     var runtimeOperationId: String? = null,
 
+    // operation 폴링 예정 시각, 접수 전 단계에서는 다음 재시도 시각으로 쓴다
     @Column(name = "next_poll_at")
     var nextPollAt: Instant? = null,
 
@@ -132,4 +133,9 @@ class Instance(
     // runtime 삭제(cleanup) 재시도 횟수, 한도 도달 시 FAILED로 전이한다
     @Column(name = "cleanup_retry_count", nullable = false)
     var cleanupRetryCount: Int = 0,
+
+    // 단계 안에서 실패한 횟수, 재시도 간격 계산에 쓰고 단계가 바뀌면 0으로 되돌린다
+    // broker 후보 조회 단계와 operation 폴링 단계에서 각각 센다
+    @Column(name = "attempt_count", nullable = false)
+    var attemptCount: Int = 0,
 )

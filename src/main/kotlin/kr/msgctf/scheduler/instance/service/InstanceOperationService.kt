@@ -1,6 +1,8 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.time.Clock
+import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
@@ -8,6 +10,7 @@ import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
@@ -52,8 +55,12 @@ class InstanceOperationService(
     fun progressRequested(instanceId: UUID) {
         val spec = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
-            if (instance.status != InstanceStatus.REQUESTED) return@execute null
-            move(instance, InstanceStatus.SCHEDULING)
+            when (instance.status) {
+                InstanceStatus.REQUESTED -> move(instance, InstanceStatus.SCHEDULING)
+                // 이미 SCHEDULING인 행은 재시도이거나 진행 도중 끊긴 것이라 상태 이동 없이 이어간다
+                InstanceStatus.SCHEDULING -> Unit
+                else -> return@execute null
+            }
             val spec = instance.toWorkloadSpec()
             if (spec == null) {
                 move(instance, InstanceStatus.FAILED)
@@ -76,11 +83,7 @@ class InstanceOperationService(
             )
             resourceCandidateSelector.select(response, spec.architecture)
         } catch (exception: Exception) {
-            tx.executeWithoutResult {
-                val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
-                move(instance, InstanceStatus.FAILED)
-                recordError(instance, SchedulerErrorCode.BROKER_CALL_FAILED, exception.message)
-            }
+            handleBrokerFailure(instanceId, exception)
             return
         }
 
@@ -92,6 +95,9 @@ class InstanceOperationService(
             instance.runtimeType = candidate.runtime.type
             instance.runtimeTargetId = candidate.runtime.targetId
             move(instance, InstanceStatus.PROVISIONING)
+            // broker 단계가 끝났으므로 재시도 횟수와 다음 시도 시각을 지운다
+            instance.attemptCount = 0
+            instance.nextPollAt = null
             RuntimeTarget(runtimeType = candidate.runtime.type, targetId = candidate.runtime.targetId)
         } ?: return
 
@@ -178,6 +184,9 @@ class InstanceOperationService(
                 instance.cleanupRetryCount += 1
                 if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
                     parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=${exception.message}")
+                } else {
+                    // 실패 횟수에 따라 다음 접수 시도를 늦춘다
+                    instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
                 }
             }
             return
@@ -214,7 +223,7 @@ class InstanceOperationService(
                 operationId,
                 exception.message,
             )
-            reschedulePoll(instanceId, operationId, retryAfterSeconds = null)
+            reschedulePoll(instanceId, operationId, retryAfterSeconds = null, lookupFailed = true)
             return
         }
 
@@ -222,17 +231,31 @@ class InstanceOperationService(
             RuntimeOperationState.QUEUED,
             RuntimeOperationState.RUNNING,
             RuntimeOperationState.RETRYING,
-            -> reschedulePoll(instanceId, operationId, snapshot.retryAfterSeconds)
+            -> reschedulePoll(instanceId, operationId, snapshot.retryAfterSeconds, lookupFailed = false)
             RuntimeOperationState.SUCCEEDED -> applySucceeded(instanceId, snapshot)
             RuntimeOperationState.FAILED -> applyFailed(instanceId, snapshot)
         }
     }
 
-    private fun reschedulePoll(instanceId: UUID, operationId: String, retryAfterSeconds: Long?) {
+    // 다음 조회 시각은 runtime이 준 재시도 간격이 우선이고, 조회 오류가 이어질 때만 간격을 늘린다
+    // 진행 중 응답이 오면 runtime이 살아 있는 것이므로 오류 횟수를 0으로 되돌린다
+    private fun reschedulePoll(
+        instanceId: UUID,
+        operationId: String,
+        retryAfterSeconds: Long?,
+        lookupFailed: Boolean,
+    ) {
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             if (instance.runtimeOperationId != operationId) return@executeWithoutResult
-            instance.nextPollAt = clock.instant().plusSeconds(retryAfterSeconds ?: 0)
+            instance.attemptCount = if (lookupFailed) instance.attemptCount + 1 else 0
+            val delay = when {
+                retryAfterSeconds != null -> Duration.ofSeconds(retryAfterSeconds)
+                lookupFailed -> backoffDelay(instance.attemptCount)
+                // 진행 중 응답은 다음 워커 주기에 바로 다시 조회한다
+                else -> Duration.ZERO
+            }
+            instance.nextPollAt = clampToDeadline(clock.instant().plus(delay), instance.pollDeadlineAt)
         }
     }
 
@@ -325,15 +348,60 @@ class InstanceOperationService(
     private fun storeAcceptedOperation(instance: Instance, accepted: RuntimeSubmitResult.Accepted) {
         val now = clock.instant()
         instance.runtimeOperationId = accepted.operationId
-        instance.nextPollAt = now.plusSeconds(accepted.retryAfterSeconds ?: 0)
         instance.pollDeadlineAt = now.plus(operationProperties.pollTimeout)
+        instance.nextPollAt = clampToDeadline(now.plusSeconds(accepted.retryAfterSeconds ?: 0), instance.pollDeadlineAt)
+        // 폴링 단계가 새로 시작되므로 오류 횟수를 0에서 다시 센다
+        instance.attemptCount = 0
     }
 
     private fun clearOperation(instance: Instance) {
         instance.runtimeOperationId = null
         instance.nextPollAt = null
         instance.pollDeadlineAt = null
+        instance.attemptCount = 0
     }
+
+    // broker 실패는 간격을 늘려 다시 시도하고 한도에 닿으면 FAILED로 확정한다
+    // 후보가 없어서 실패하면 RESOURCE_UNAVAILABLE, 호출 자체가 안 되면 BROKER_CALL_FAILED로 기록한다
+    private fun handleBrokerFailure(instanceId: UUID, exception: Exception) {
+        val errorCode = (exception as? SchedulerException)?.errorCode ?: SchedulerErrorCode.BROKER_CALL_FAILED
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            // broker를 부르는 사이 다른 워커가 상태를 바꿨으면 재시도하지 않는다
+            if (instance.status != InstanceStatus.SCHEDULING) return@executeWithoutResult
+            instance.attemptCount += 1
+            if (instance.attemptCount >= operationProperties.brokerRetryLimit) {
+                move(instance, InstanceStatus.FAILED)
+                instance.nextPollAt = null
+                recordError(instance, errorCode, "attempts=${instance.attemptCount}, reason=${exception.message}")
+                return@executeWithoutResult
+            }
+            instance.nextPollAt = clock.instant().plus(backoffDelay(instance.attemptCount))
+            log.warn(
+                "broker candidate lookup failed: instanceId={}, attempt={}, code={}, reason={}",
+                instanceId,
+                instance.attemptCount,
+                errorCode.name,
+                exception.message,
+            )
+        }
+    }
+
+    // 실패가 거듭될수록 간격을 두 배씩 늘리고 상한에서 멈춘다
+    private fun backoffDelay(failures: Int): Duration {
+        val max = operationProperties.backoffMax
+        var delay = operationProperties.backoffBase
+        repeat(failures - 1) {
+            delay = delay.multipliedBy(2)
+            if (delay >= max) return max
+        }
+        return if (delay > max) max else delay
+    }
+
+    // pollDeadlineAt을 지나면 폴링을 멈추고 실패로 처리한다
+    // 다음 조회 시각을 그보다 뒤로 잡으면 실패 처리도 그만큼 늦어지므로 넘지 않게 당긴다
+    private fun clampToDeadline(next: Instant, deadline: Instant?): Instant =
+        if (deadline != null && next.isAfter(deadline)) deadline else next
 
     private fun recordError(instance: Instance, errorCode: SchedulerErrorCode, detail: String?) {
         instanceEventRepository.save(

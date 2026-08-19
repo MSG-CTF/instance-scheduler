@@ -48,14 +48,18 @@ class InstanceCleanupService(
     private fun routeHardTimeout(instance: Instance) {
         if (instance.status == InstanceStatus.REQUESTED || instance.status == InstanceStatus.SCHEDULING) {
             move(instance, InstanceStatus.FAILED)
+            // broker 재시도에 쓰던 값이라 더 진행하지 않는 행에는 지운다
+            instance.nextPollAt = null
+            instance.attemptCount = 0
             return
         }
         // 생성 operation이 남아 있으면 삭제가 시작되지 않으므로 지운다
-        // STOPPING은 이미 삭제 operation이 도는 중이라 그대로 둔다
+        // STOPPING은 삭제 operation이 돌고 있거나 접수 재시도를 기다리는 중이라 그대로 둔다
         if (instance.status != InstanceStatus.STOPPING) {
             instance.runtimeOperationId = null
             instance.nextPollAt = null
             instance.pollDeadlineAt = null
+            instance.attemptCount = 0
         }
         instance.action = InstanceAction.CLEANUP
         if (instance.deleteReason == null) {
