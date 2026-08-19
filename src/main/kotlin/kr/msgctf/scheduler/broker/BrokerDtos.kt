@@ -1,9 +1,21 @@
 package kr.msgctf.scheduler.broker
 
+import com.fasterxml.jackson.annotation.JsonCreator
 import com.fasterxml.jackson.annotation.JsonProperty
+import java.math.BigDecimal
 import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.common.model.RuntimeType
+import org.slf4j.LoggerFactory
+
+private val log = LoggerFactory.getLogger("kr.msgctf.scheduler.broker.BrokerDtos")
+
+// 모르는 값 하나 때문에 응답 전체를 못 읽게 되지 않도록 UNKNOWN으로 받는다
+// 원래 값은 UNKNOWN으로 바뀌면서 사라지므로 로그로 남긴다
+private fun <T> unknownEnumValue(type: String, value: String?, fallback: T): T {
+    log.warn("unknown broker enum value: type={}, value={}", type, value)
+    return fallback
+}
 
 // 문제 인스턴스 한 개를 실행하는 데 필요한 리소스 양
 data class ResourceProfile(
@@ -50,6 +62,11 @@ data class BrokerCandidateResponse(
     val generatedAt: Instant,
 
     val status: BrokerCandidateStatus,
+
+    // 후보가 없을 때 그 이유가 담긴다
+    @JsonProperty("reason_codes")
+    val reasonCodes: List<BrokerReasonCode> = emptyList(),
+
     val candidates: List<ResourceCandidate>,
 )
 
@@ -57,6 +74,18 @@ enum class BrokerCandidateStatus {
     OK,
     FAILED,
     NO_CANDIDATES,
+
+    // Broker가 보낸 값이 이 목록에 없을 때 쓰는 자리
+    UNKNOWN,
+    ;
+
+    companion object {
+        @JvmStatic
+        @JsonCreator
+        fun from(value: String?): BrokerCandidateStatus =
+            entries.firstOrNull { it.name == value }
+                ?: unknownEnumValue("BrokerCandidateStatus", value, UNKNOWN)
+    }
 }
 
 // Broker가 추천한 실행 위치 후보
@@ -73,6 +102,11 @@ data class ResourceCandidate(
     val runtime: CandidateRuntime,
     val architecture: Architecture,
     val capacity: CandidateCapacity,
+
+    // Broker가 비용 계산을 못 한 후보는 이 값 없이 온다
+    @JsonProperty("cost_estimate")
+    val costEstimate: CandidateCostEstimate? = null,
+
     val risk: ResourceRisk,
 
     @JsonProperty("reason_codes")
@@ -113,11 +147,54 @@ data class CandidateCapacity(
     val fitCount: Int,
 )
 
+// 후보 비용 상태, Broker가 비용 관점에서 후보를 써도 되는지 알려준다
+data class CandidateCostEstimate(
+    val status: CostEstimateStatus,
+
+    @JsonProperty("estimated_request_cost")
+    val estimatedRequestCost: BigDecimal? = null,
+
+    val currency: String? = null,
+
+    @JsonProperty("observed_at")
+    val observedAt: Instant? = null,
+)
+
+enum class CostEstimateStatus {
+    SAFE,
+    WARNING,
+    BLOCKED,
+
+    // Broker가 비용 정보를 못 얻었거나 이 목록에 없는 값을 보낸 경우
+    UNKNOWN,
+    ;
+
+    companion object {
+        @JvmStatic
+        @JsonCreator
+        fun from(value: String?): CostEstimateStatus =
+            entries.firstOrNull { it.name == value }
+                ?: unknownEnumValue("CostEstimateStatus", value, UNKNOWN)
+    }
+}
+
 // Scheduler가 후보를 사용할지 판단할 때 보는 위험도
 enum class ResourceRisk {
     LOW,
     MEDIUM,
     HIGH,
+
+    // Broker가 보낸 값이 이 목록에 없을 때 쓰는 자리
+    UNKNOWN,
+    ;
+
+    companion object {
+        @JvmStatic
+        @JsonCreator
+        fun from(value: String?): ResourceRisk =
+            entries.firstOrNull { it.name == value }
+                ?: unknownEnumValue("ResourceRisk", value, UNKNOWN)
+    }
 }
 
 // Broker가 후보 제외나 위험 판단 이유를 코드로 알려주는 값
@@ -137,4 +214,16 @@ enum class BrokerReasonCode {
     REGION_UNAVAILABLE,
     RUNTIME_TARGET_UNHEALTHY,
     OBSERVATION_STALE,
+
+    // Broker가 보낸 값이 이 목록에 없을 때 쓰는 자리
+    UNKNOWN,
+    ;
+
+    companion object {
+        @JvmStatic
+        @JsonCreator
+        fun from(value: String?): BrokerReasonCode =
+            entries.firstOrNull { it.name == value }
+                ?: unknownEnumValue("BrokerReasonCode", value, UNKNOWN)
+    }
 }

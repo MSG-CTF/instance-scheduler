@@ -99,7 +99,108 @@ class ResourceCandidateSelectorTest {
 
         // then
         assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, exception.errorCode)
-        assertEquals("requestId=req-01, candidateCount=1, filteredHighRiskCount=1", exception.adminDetail)
+        assertEquals(
+            "requestId=req-01, candidateCount=1, highRiskCount=1, unknownRiskCount=0, blockedCostCount=0",
+            exception.adminDetail,
+        )
+    }
+
+    // 위험도를 모르는 후보만 있으면 거절하는지 확인
+    @Test
+    fun `rejects when only unknown risk candidates exist`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(candidateId = "unknown", risk = ResourceRisk.UNKNOWN),
+            ),
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            selector.select(response, Architecture.AMD64)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, exception.errorCode)
+        assertEquals(
+            "requestId=req-01, candidateCount=1, highRiskCount=0, unknownRiskCount=1, blockedCostCount=0",
+            exception.adminDetail,
+        )
+    }
+
+    // 비용이 막힌 후보만 있으면 거절하는지 확인
+    @Test
+    fun `rejects when only cost blocked candidates exist`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(
+                    candidateId = "blocked",
+                    costEstimate = CandidateCostEstimate(status = CostEstimateStatus.BLOCKED),
+                ),
+            ),
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            selector.select(response, Architecture.AMD64)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, exception.errorCode)
+        assertEquals(
+            "requestId=req-01, candidateCount=1, highRiskCount=0, unknownRiskCount=0, blockedCostCount=1",
+            exception.adminDetail,
+        )
+    }
+
+    // 비용이 막힌 후보를 건너뛰고 다음 후보를 고르는지 확인
+    @Test
+    fun `skips cost blocked candidate and selects next`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(
+                    candidateId = "blocked-low",
+                    accountId = "blocked-account",
+                    risk = ResourceRisk.LOW,
+                    costEstimate = CandidateCostEstimate(status = CostEstimateStatus.BLOCKED),
+                ),
+                newCandidate(
+                    candidateId = "safe-medium",
+                    accountId = "open-account",
+                    risk = ResourceRisk.MEDIUM,
+                    costEstimate = CandidateCostEstimate(status = CostEstimateStatus.SAFE),
+                ),
+            ),
+        )
+
+        // when
+        val selected = selector.select(response, Architecture.AMD64)
+
+        // then
+        assertEquals("open-account", selected.accountId)
+    }
+
+    // 비용 정보를 모르는 후보(UNKNOWN)는 선택 대상에 남는지 확인
+    @Test
+    fun `selects candidate with unknown cost status`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(
+                    candidateId = "unknown-cost",
+                    accountId = "unknown-cost-account",
+                    costEstimate = CandidateCostEstimate(status = CostEstimateStatus.UNKNOWN),
+                ),
+            ),
+        )
+
+        // when
+        val selected = selector.select(response, Architecture.AMD64)
+
+        // then
+        assertEquals("unknown-cost-account", selected.accountId)
     }
 
     // Broker 상태가 OK가 아니면 거절하는지 확인
@@ -177,6 +278,7 @@ class ResourceCandidateSelectorTest {
         fitCount: Int = 1,
         validUntil: Instant = now.plusSeconds(30),
         architecture: Architecture = Architecture.AMD64,
+        costEstimate: CandidateCostEstimate? = null,
     ): ResourceCandidate =
         ResourceCandidate(
             candidateId = candidateId,
@@ -194,6 +296,7 @@ class ResourceCandidateSelectorTest {
                 availableEphemeralStorageMib = 10240,
                 fitCount = fitCount,
             ),
+            costEstimate = costEstimate,
             risk = risk,
             reasonCodes = emptyList(),
             observedAt = now.minusSeconds(10),

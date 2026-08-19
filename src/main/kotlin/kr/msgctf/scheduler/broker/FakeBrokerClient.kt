@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.broker
 
+import java.math.BigDecimal
 import kr.msgctf.scheduler.common.model.RuntimeType
 
 // Broker가 없을 때 Scheduler 흐름을 확인하는 임시 client
@@ -59,6 +60,12 @@ class FakeBrokerClient(
                 availableMemoryMib = 8192,
                 availableEphemeralStorageMib = 10240,
                 fitCount = 8,
+            ),
+            costEstimate = CandidateCostEstimate(
+                status = CostEstimateStatus.SAFE,
+                estimatedRequestCost = BigDecimal("0.013"),
+                currency = "USD",
+                observedAt = request.requestedAt.minusSeconds(10),
             ),
             risk = risk,
             reasonCodes = emptyList(),

@@ -25,6 +25,7 @@ class FakeBrokerClientTest {
         assertEquals(BrokerCandidateStatus.OK, response.status)
         assertEquals(1, response.candidates.size)
         assertEquals(ResourceRisk.LOW, response.candidates[0].risk)
+        assertEquals(CostEstimateStatus.SAFE, response.candidates[0].costEstimate?.status)
         assertEquals(Architecture.AMD64, response.candidates[0].architecture)
         assertEquals(RuntimeType.KUBERNETES, response.candidates[0].runtime.type)
         assertEquals("cluster-main", response.candidates[0].runtime.targetId)
