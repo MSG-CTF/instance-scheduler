@@ -1,0 +1,18 @@
+# 개발 서버 실연동 프로파일, fake 없이 실제 Broker와 Runtime 서버를 부른다
+scheduler:
+  broker:
+    base-url: https://broker.mjsec.kr/api
+    token: ${SCHEDULER_BROKER_TOKEN}
+  runtime:
+    # 이 줄을 지우면 기본값 127.0.0.1:8080으로 붙는다
+    base-url: ${SCHEDULER_RUNTIME_BASE_URL}
+  cleanup:
+    enabled: true
+    fixed-delay: 30s
+    retry-limit: 5
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
