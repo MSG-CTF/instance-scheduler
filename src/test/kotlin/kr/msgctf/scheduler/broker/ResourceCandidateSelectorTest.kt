@@ -23,6 +23,7 @@ class ResourceCandidateSelectorTest {
         // given
         val response = newResponse(
             candidates = listOf(
+                newCandidate(candidateId = "no-risk", accountId = "no-risk-account", risk = null),
                 newCandidate(candidateId = "medium", accountId = "medium-account", risk = ResourceRisk.MEDIUM),
                 newCandidate(candidateId = "low", accountId = "safe-account", risk = ResourceRisk.LOW),
             ),
@@ -103,6 +104,23 @@ class ResourceCandidateSelectorTest {
             "requestId=req-01, candidateCount=1, highRiskCount=1, unknownRiskCount=0, blockedCostCount=0",
             exception.adminDetail,
         )
+    }
+
+    // 위험도 없이 온 후보는 거르지 않는지 확인
+    @Test
+    fun `selects candidate without risk value`() {
+        // given
+        val response = newResponse(
+            candidates = listOf(
+                newCandidate(candidateId = "no-risk", accountId = "no-risk-account", risk = null),
+            ),
+        )
+
+        // when
+        val selected = selector.select(response, Architecture.AMD64)
+
+        // then
+        assertEquals("no-risk-account", selected.accountId)
     }
 
     // 위험도를 모르는 후보만 있으면 거절하는지 확인
@@ -274,7 +292,7 @@ class ResourceCandidateSelectorTest {
     private fun newCandidate(
         candidateId: String,
         accountId: String = "account-1",
-        risk: ResourceRisk = ResourceRisk.LOW,
+        risk: ResourceRisk? = ResourceRisk.LOW,
         fitCount: Int = 1,
         validUntil: Instant = now.plusSeconds(30),
         architecture: Architecture = Architecture.AMD64,
@@ -290,16 +308,16 @@ class ResourceCandidateSelectorTest {
                 targetId = "cluster-main",
             ),
             architecture = architecture,
-            capacity = CandidateCapacity(
-                availableCpuMillicores = 4000,
-                availableMemoryMib = 8192,
-                availableEphemeralStorageMib = 10240,
+            remainingCapacity = CandidateCapacity(
+                cpuMillicores = 4000,
+                memoryMib = 8192,
+                ephemeralStorageMib = 10240,
                 fitCount = fitCount,
             ),
             costEstimate = costEstimate,
             risk = risk,
             reasonCodes = emptyList(),
-            observedAt = now.minusSeconds(10),
+            runtimeObservedAt = now.minusSeconds(10),
             validUntil = validUntil,
         )
 }

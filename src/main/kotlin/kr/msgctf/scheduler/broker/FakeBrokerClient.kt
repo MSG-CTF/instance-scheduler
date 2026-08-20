@@ -54,11 +54,11 @@ class FakeBrokerClient(
                 type = RuntimeType.KUBERNETES,
                 targetId = "cluster-main",
             ),
-            architecture = request.architecture,
-            capacity = CandidateCapacity(
-                availableCpuMillicores = 4000,
-                availableMemoryMib = 8192,
-                availableEphemeralStorageMib = 10240,
+            architecture = request.resourceProfile.architecture,
+            remainingCapacity = CandidateCapacity(
+                cpuMillicores = 4000,
+                memoryMib = 8192,
+                ephemeralStorageMib = 10240,
                 fitCount = 8,
             ),
             costEstimate = CandidateCostEstimate(
@@ -69,7 +69,7 @@ class FakeBrokerClient(
             ),
             risk = risk,
             reasonCodes = emptyList(),
-            observedAt = request.requestedAt.minusSeconds(10),
+            runtimeObservedAt = request.requestedAt.minusSeconds(10),
             validUntil = request.requestedAt.plusSeconds(30),
         )
 }

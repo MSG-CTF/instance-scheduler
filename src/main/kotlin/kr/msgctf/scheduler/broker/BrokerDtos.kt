@@ -29,6 +29,31 @@ data class ResourceProfile(
     val ephemeralStorageMib: Int,
 )
 
+// Broker 후보 요청에 담는 실행 리소스 양과 아키텍처
+data class BrokerResourceProfile(
+    @JsonProperty("cpu_millicores")
+    val cpuMillicores: Int,
+
+    @JsonProperty("memory_mib")
+    val memoryMib: Int,
+
+    @JsonProperty("ephemeral_storage_mib")
+    val ephemeralStorageMib: Int,
+
+    // 문제 이미지가 실행되어야 하는 CPU 아키텍처
+    val architecture: Architecture,
+) {
+    companion object {
+        fun from(profile: ResourceProfile, architecture: Architecture): BrokerResourceProfile =
+            BrokerResourceProfile(
+                cpuMillicores = profile.cpuMillicores,
+                memoryMib = profile.memoryMib,
+                ephemeralStorageMib = profile.ephemeralStorageMib,
+                architecture = architecture,
+            )
+    }
+}
+
 // Scheduler가 Broker에게 사용 가능한 후보 리소스를 요청할 때 보내는 값
 data class BrokerCandidateRequest(
     @JsonProperty("request_id")
@@ -46,11 +71,8 @@ data class BrokerCandidateRequest(
     @JsonProperty("instance_id")
     val instanceId: UUID,
 
-    // 문제 이미지가 실행되어야 하는 CPU 아키텍처
-    val architecture: Architecture,
-
     @JsonProperty("resource_profile")
-    val resourceProfile: ResourceProfile,
+    val resourceProfile: BrokerResourceProfile,
 )
 
 // Broker가 후보 조회를 처리한 결과
@@ -101,19 +123,20 @@ data class ResourceCandidate(
     val region: String,
     val runtime: CandidateRuntime,
     val architecture: Architecture,
-    val capacity: CandidateCapacity,
 
-    // Broker가 비용 계산을 못 한 후보는 이 값 없이 온다
+    @JsonProperty("remaining_capacity")
+    val remainingCapacity: CandidateCapacity,
+
     @JsonProperty("cost_estimate")
     val costEstimate: CandidateCostEstimate? = null,
 
-    val risk: ResourceRisk,
+    val risk: ResourceRisk? = null,
 
     @JsonProperty("reason_codes")
-    val reasonCodes: List<BrokerReasonCode>,
+    val reasonCodes: List<BrokerReasonCode> = emptyList(),
 
-    @JsonProperty("observed_at")
-    val observedAt: Instant,
+    @JsonProperty("runtime_observed_at")
+    val runtimeObservedAt: Instant,
 
     @JsonProperty("valid_until")
     val validUntil: Instant,
@@ -134,14 +157,14 @@ enum class Architecture {
 
 // 후보 위치에 남아 있는 리소스 양
 data class CandidateCapacity(
-    @JsonProperty("available_cpu_millicores")
-    val availableCpuMillicores: Int,
+    @JsonProperty("cpu_millicores")
+    val cpuMillicores: Int,
 
-    @JsonProperty("available_memory_mib")
-    val availableMemoryMib: Int,
+    @JsonProperty("memory_mib")
+    val memoryMib: Int,
 
-    @JsonProperty("available_ephemeral_storage_mib")
-    val availableEphemeralStorageMib: Int,
+    @JsonProperty("ephemeral_storage_mib")
+    val ephemeralStorageMib: Int,
 
     @JsonProperty("fit_count")
     val fitCount: Int,

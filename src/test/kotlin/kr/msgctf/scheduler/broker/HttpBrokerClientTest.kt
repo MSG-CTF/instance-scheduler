@@ -1,6 +1,5 @@
 package kr.msgctf.scheduler.broker
 
-import java.math.BigDecimal
 import java.time.Instant
 import java.util.UUID
 import kotlin.test.Test
@@ -11,10 +10,12 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.web.client.MockRestServiceServer
+import org.springframework.test.web.client.match.MockRestRequestMatchers.header
 import org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath
 import org.springframework.test.web.client.match.MockRestRequestMatchers.method
 import org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo
@@ -25,18 +26,20 @@ class HttpBrokerClientTest {
 
     private val builder = RestClient.builder().baseUrl("http://broker.test")
     private val server = MockRestServiceServer.bindTo(builder).build()
-    private val client = HttpBrokerClient(builder.build())
+    private val client = HttpBrokerClient(builder.build(), "test-token")
 
-    // 계약 문서의 응답 예시가 그대로 읽히는지 확인
+    // 실서버가 실제로 보낸 응답(2026-08-20 실측)이 그대로 읽히는지 확인
     @Test
-    fun `parses candidate response from contract example`() {
+    fun `parses candidate response captured from live broker`() {
         val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://broker.test/v1/candidates/query"))
             .andExpect(method(HttpMethod.POST))
+            .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
             .andExpect(jsonPath("$.request_id").value("broker-$instanceId"))
             .andExpect(jsonPath("$.team_id").value(testUuid(7).toString()))
             .andExpect(jsonPath("$.instance_id").value(instanceId.toString()))
-            .andExpect(jsonPath("$.architecture").value("AMD64"))
+            .andExpect(jsonPath("$.architecture").doesNotExist())
+            .andExpect(jsonPath("$.resource_profile.architecture").value("AMD64"))
             .andExpect(jsonPath("$.resource_profile.cpu_millicores").value(500))
             .andRespond(
                 withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
@@ -44,33 +47,25 @@ class HttpBrokerClientTest {
                         """
                         {
                           "request_id": "broker-$instanceId",
-                          "generated_at": "2026-07-06T13:30:00+09:00",
+                          "generated_at": "2026-08-20T16:35:45.010934Z",
                           "status": "OK",
-                          "reason_codes": [],
                           "candidates": [
                             {
-                              "candidate_id": "candidate-001",
-                              "provider": "SELF_HOSTED",
-                              "account_id": "account-01",
-                              "region": "seoul",
-                              "runtime": { "type": "KUBERNETES", "target_id": "cluster-main" },
+                              "candidate_id": "b17ed63e-3681-42db-acce-14b9f132f3ba",
+                              "provider": "AWS",
+                              "account_id": "aadae4b2-1f8d-42ba-957b-953a42e1f5d3",
+                              "region": "us-east-1",
+                              "zone": "us-east-1a",
+                              "runtime": { "type": "KUBERNETES", "target_id": "cd33055d-9467-4498-8f17-4c4fee6344df" },
                               "architecture": "AMD64",
-                              "capacity": {
-                                "available_cpu_millicores": 6000,
-                                "available_memory_mib": 12288,
-                                "available_ephemeral_storage_mib": 20480,
-                                "fit_count": 6
+                              "remaining_capacity": {
+                                "cpu_millicores": 1750,
+                                "memory_mib": 1024,
+                                "ephemeral_storage_mib": 6398,
+                                "fit_count": 2
                               },
-                              "cost_estimate": {
-                                "status": "SAFE",
-                                "estimated_request_cost": 0.013,
-                                "currency": "USD",
-                                "observed_at": "2026-07-14T13:00:00+09:00"
-                              },
-                              "risk": "LOW",
-                              "reason_codes": [],
-                              "observed_at": "2026-07-06T13:29:50+09:00",
-                              "valid_until": "2026-07-06T13:30:20+09:00"
+                              "runtime_observed_at": "2026-08-20T16:31:42.254250Z",
+                              "valid_until": "2026-08-20T16:36:15.010934Z"
                             }
                           ]
                         }
@@ -82,19 +77,19 @@ class HttpBrokerClientTest {
 
         assertEquals("broker-$instanceId", response.requestId)
         assertEquals(BrokerCandidateStatus.OK, response.status)
-        assertEquals(1, response.candidates.size)
         val candidate = response.candidates.single()
-        assertEquals("candidate-001", candidate.candidateId)
-        assertEquals("account-01", candidate.accountId)
+        assertEquals("b17ed63e-3681-42db-acce-14b9f132f3ba", candidate.candidateId)
+        assertEquals("AWS", candidate.provider)
         assertEquals(RuntimeType.KUBERNETES, candidate.runtime.type)
-        assertEquals("cluster-main", candidate.runtime.targetId)
+        assertEquals("cd33055d-9467-4498-8f17-4c4fee6344df", candidate.runtime.targetId)
         assertEquals(Architecture.AMD64, candidate.architecture)
-        assertEquals(6, candidate.capacity.fitCount)
-        assertEquals(CostEstimateStatus.SAFE, candidate.costEstimate?.status)
-        assertEquals(BigDecimal("0.013"), candidate.costEstimate?.estimatedRequestCost)
-        assertEquals("USD", candidate.costEstimate?.currency)
-        assertEquals(ResourceRisk.LOW, candidate.risk)
-        assertEquals(Instant.parse("2026-07-06T04:30:20Z"), candidate.validUntil)
+        assertEquals(1750, candidate.remainingCapacity.cpuMillicores)
+        assertEquals(2, candidate.remainingCapacity.fitCount)
+        assertNull(candidate.risk)
+        assertNull(candidate.costEstimate)
+        assertEquals(emptyList(), candidate.reasonCodes)
+        assertEquals(Instant.parse("2026-08-20T16:31:42.254250Z"), candidate.runtimeObservedAt)
+        assertEquals(Instant.parse("2026-08-20T16:36:15.010934Z"), candidate.validUntil)
     }
 
     // 후보가 없을 때 상태와 이유가 읽히는지 확인
@@ -144,16 +139,16 @@ class HttpBrokerClientTest {
                               "region": "seoul",
                               "runtime": { "type": "KUBERNETES", "target_id": "cluster-main" },
                               "architecture": "AMD64",
-                              "capacity": {
-                                "available_cpu_millicores": 6000,
-                                "available_memory_mib": 12288,
-                                "available_ephemeral_storage_mib": 20480,
+                              "remaining_capacity": {
+                                "cpu_millicores": 6000,
+                                "memory_mib": 12288,
+                                "ephemeral_storage_mib": 20480,
                                 "fit_count": 6
                               },
                               "cost_estimate": { "status": "OVER_BUDGET" },
                               "risk": "CRITICAL",
                               "reason_codes": ["ANOTHER_NEW_CODE"],
-                              "observed_at": "2026-07-06T13:29:50+09:00",
+                              "runtime_observed_at": "2026-07-06T13:29:50+09:00",
                               "valid_until": "2026-07-06T13:30:20+09:00"
                             }
                           ]
@@ -172,49 +167,6 @@ class HttpBrokerClientTest {
         assertEquals(listOf(BrokerReasonCode.UNKNOWN), candidate.reasonCodes)
     }
 
-    // cost_estimate 없이 온 후보는 비용 정보 없음으로 읽히는지 확인
-    @Test
-    fun `parses candidate without cost estimate`() {
-        server.expect(requestTo("http://broker.test/v1/candidates/query"))
-            .andRespond(
-                withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
-                    .body(
-                        """
-                        {
-                          "request_id": "req-01",
-                          "generated_at": "2026-07-06T13:30:00+09:00",
-                          "status": "OK",
-                          "candidates": [
-                            {
-                              "candidate_id": "candidate-001",
-                              "provider": "SELF_HOSTED",
-                              "account_id": "account-01",
-                              "region": "seoul",
-                              "runtime": { "type": "KUBERNETES", "target_id": "cluster-main" },
-                              "architecture": "AMD64",
-                              "capacity": {
-                                "available_cpu_millicores": 6000,
-                                "available_memory_mib": 12288,
-                                "available_ephemeral_storage_mib": 20480,
-                                "fit_count": 6
-                              },
-                              "risk": "LOW",
-                              "reason_codes": [],
-                              "observed_at": "2026-07-06T13:29:50+09:00",
-                              "valid_until": "2026-07-06T13:30:20+09:00"
-                            }
-                          ]
-                        }
-                        """.trimIndent(),
-                    ),
-            )
-
-        val response = client.getCandidates(candidateRequest(UUID.randomUUID()))
-
-        assertNull(response.candidates.single().costEstimate)
-        assertEquals(emptyList(), response.reasonCodes)
-    }
-
     // 호출이 실패하면 스케줄러 예외로 바뀌는지 확인
     @Test
     fun `maps query error to scheduler exception`() {
@@ -230,6 +182,7 @@ class HttpBrokerClientTest {
 
         assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, exception.errorCode)
         assertEquals(true, exception.adminDetail?.contains("status=422"))
+        assertEquals(true, exception.adminDetail?.contains("validation error"))
     }
 
     private fun candidateRequest(instanceId: UUID): BrokerCandidateRequest =
@@ -239,11 +192,11 @@ class HttpBrokerClientTest {
             teamId = testUuid(7),
             challengeId = testUuid(100),
             instanceId = instanceId,
-            architecture = Architecture.AMD64,
-            resourceProfile = ResourceProfile(
+            resourceProfile = BrokerResourceProfile(
                 cpuMillicores = 500,
                 memoryMib = 512,
                 ephemeralStorageMib = 1024,
+                architecture = Architecture.AMD64,
             ),
         )
 }

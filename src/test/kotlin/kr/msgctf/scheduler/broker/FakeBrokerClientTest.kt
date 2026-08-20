@@ -67,11 +67,11 @@ class FakeBrokerClientTest {
             teamId = testUuid(1),
             challengeId = testUuid(10),
             instanceId = UUID.fromString("018f3f1e-21b8-7a1e-a30b-63b3400fd001"),
-            architecture = Architecture.AMD64,
-            resourceProfile = ResourceProfile(
+            resourceProfile = BrokerResourceProfile(
                 cpuMillicores = 500,
                 memoryMib = 512,
                 ephemeralStorageMib = 1024,
+                architecture = Architecture.AMD64,
             ),
         )
 }

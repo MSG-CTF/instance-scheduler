@@ -26,6 +26,6 @@ class BrokerClientConfig {
             .baseUrl(properties.baseUrl)
             .requestFactory(ClientHttpRequestFactoryBuilder.detect().build(settings))
             .build()
-        return HttpBrokerClient(restClient)
+        return HttpBrokerClient(restClient, properties.token)
     }
 }

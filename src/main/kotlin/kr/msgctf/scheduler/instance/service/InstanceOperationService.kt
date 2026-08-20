@@ -5,6 +5,7 @@ import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerClient
+import kr.msgctf.scheduler.broker.BrokerResourceProfile
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
@@ -70,8 +71,7 @@ class InstanceOperationService(
                     teamId = spec.teamId,
                     challengeId = spec.challengeId,
                     instanceId = instanceId,
-                    architecture = spec.architecture,
-                    resourceProfile = spec.resourceProfile,
+                    resourceProfile = BrokerResourceProfile.from(spec.resourceProfile, spec.architecture),
                 ),
             )
             resourceCandidateSelector.select(response, spec.architecture)

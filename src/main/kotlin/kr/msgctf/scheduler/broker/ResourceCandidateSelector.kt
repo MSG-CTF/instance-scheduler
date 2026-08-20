@@ -26,9 +26,11 @@ class ResourceCandidateSelector(
         val selected = response.candidates
             .filter { candidate -> candidate.architecture == requestedArchitecture }
             .filter { candidate -> candidate.validUntil.isAfter(now) }
-            .filter { candidate -> candidate.capacity.fitCount > 0 }
-            // 위험도를 모르는 후보는 높은 위험과 같게 보고 거른다
-            .filter { candidate -> candidate.risk == ResourceRisk.LOW || candidate.risk == ResourceRisk.MEDIUM }
+            .filter { candidate -> candidate.remainingCapacity.fitCount > 0 }
+            // 모르는 위험도 값은 높은 위험과 같게 보고 거른다
+            .filter { candidate ->
+                candidate.risk == null || candidate.risk == ResourceRisk.LOW || candidate.risk == ResourceRisk.MEDIUM
+            }
             // 비용이 막힌 후보는 거르고, 비용 정보가 없는 후보는 위험도 판단에 맡기고 통과시킨다
             .filter { candidate -> candidate.costEstimate?.status != CostEstimateStatus.BLOCKED }
             .sortedWith(compareBy<ResourceCandidate> { riskOrder(it.risk) }.thenBy { it.validUntil })
@@ -63,11 +65,12 @@ class ResourceCandidateSelector(
     private fun countBlockedCost(candidates: List<ResourceCandidate>): Int =
         candidates.count { candidate -> candidate.costEstimate?.status == CostEstimateStatus.BLOCKED }
 
-    private fun riskOrder(risk: ResourceRisk): Int =
+    private fun riskOrder(risk: ResourceRisk?): Int =
         when (risk) {
             ResourceRisk.LOW -> 0
             ResourceRisk.MEDIUM -> 1
-            ResourceRisk.HIGH -> 2
-            ResourceRisk.UNKNOWN -> 3
+            null -> 2
+            ResourceRisk.HIGH -> 3
+            ResourceRisk.UNKNOWN -> 4
         }
 }
