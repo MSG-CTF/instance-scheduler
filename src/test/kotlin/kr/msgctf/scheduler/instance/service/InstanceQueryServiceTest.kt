@@ -11,6 +11,8 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEvent
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.testUuid
 
@@ -125,9 +127,81 @@ class InstanceQueryServiceTest {
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
 
-    private fun newService(repository: TestInstanceRepository): InstanceQueryService =
+    // 이벤트는 발생 시각 순서로 나온다
+    @Test
+    fun `finds events by instance id in time order`() {
+        // given
+        val repository = TestInstanceRepository()
+        val eventRepository = TestInstanceEventRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        eventRepository.repository.save(
+            InstanceEvent(
+                instanceId = instance.instanceId,
+                eventType = InstanceEventType.ERROR_RECORDED,
+                toStatus = InstanceStatus.FAILED,
+                errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
+                adminDetail = "requestId=req-01, status=422",
+            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt.plusSeconds(10) },
+        )
+        eventRepository.repository.save(
+            InstanceEvent(
+                instanceId = instance.instanceId,
+                eventType = InstanceEventType.STATE_CHANGED,
+                fromStatus = InstanceStatus.REQUESTED,
+                toStatus = InstanceStatus.SCHEDULING,
+            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt },
+        )
+        val service = newService(repository, eventRepository)
+
+        // when
+        val results = service.getEvents(instance.instanceId)
+
+        // then
+        assertEquals(2, results.size)
+        assertEquals(InstanceEventType.STATE_CHANGED, results[0].eventType)
+        assertEquals(InstanceStatus.REQUESTED, results[0].fromStatus)
+        assertEquals(InstanceStatus.SCHEDULING, results[0].toStatus)
+        assertEquals(InstanceEventType.ERROR_RECORDED, results[1].eventType)
+        assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, results[1].errorCode)
+        assertEquals("requestId=req-01, status=422", results[1].adminDetail)
+        assertEquals(createdAt.plusSeconds(10), results[1].createdAt)
+    }
+
+    // 인스턴스는 있는데 이벤트가 없으면 빈 목록으로 나온다
+    @Test
+    fun `returns empty events for instance without events`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        val service = newService(repository)
+
+        // when
+        val results = service.getEvents(instance.instanceId)
+
+        // then
+        assertEquals(emptyList(), results)
+    }
+
+    @Test
+    fun `rejects events for unknown instance id`() {
+        // given
+        val service = newService(TestInstanceRepository())
+
+        // when & then
+        val exception = assertFailsWith<SchedulerException> {
+            service.getEvents(UUID.randomUUID())
+        }
+
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
+    }
+
+    private fun newService(
+        repository: TestInstanceRepository,
+        eventRepository: TestInstanceEventRepository = TestInstanceEventRepository(),
+    ): InstanceQueryService =
         InstanceQueryService(
             instanceRepository = repository.repository,
+            instanceEventRepository = eventRepository.repository,
             transitionService = InstanceStateTransitionService(),
         )
 

@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>인스턴스 생성 흐름 데모</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    background: #f4f6f9; color: #1f2937;
+    padding: 24px; max-width: 1080px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+    padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 14px; color: #374151; margin-bottom: 12px; }
+  form .grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 14px;
+  }
+  label { font-size: 12px; color: #6b7280; display: block; margin-bottom: 3px; }
+  input, select {
+    width: 100%; padding: 7px 9px; font-size: 13px;
+    border: 1px solid #d1d5db; border-radius: 6px; background: #fff;
+  }
+  .uuid-row { display: flex; gap: 6px; }
+  .uuid-row input { flex: 1; font-family: Consolas, monospace; font-size: 12px; }
+  button {
+    padding: 8px 16px; font-size: 13px; border: 1px solid #d1d5db;
+    border-radius: 6px; background: #fff; cursor: pointer;
+  }
+  button:hover { background: #f3f4f6; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #1d4ed8; }
+  button.danger { color: #b91c1c; border-color: #fca5a5; }
+  button.small { padding: 6px 10px; font-size: 12px; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+  .status-badge {
+    margin-left: auto; font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: #e5e7eb; color: #374151; font-family: Consolas, monospace;
+  }
+
+  .steps { display: flex; gap: 0; }
+  .step { flex: 1; position: relative; padding: 0 8px; text-align: center; }
+  .step:not(:last-child)::after {
+    content: ""; position: absolute; top: 15px; left: calc(50% + 22px);
+    width: calc(100% - 44px); height: 2px; background: #d1d5db;
+  }
+  .step.done:not(:last-child)::after { background: #16a34a; }
+  .dot {
+    width: 32px; height: 32px; border-radius: 50%; margin: 0 auto 8px;
+    display: flex; align-items: center; justify-content: center;
+    background: #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;
+    border: 2px solid transparent;
+  }
+  .step.active .dot { background: #dbeafe; color: #1d4ed8; border-color: #2563eb; animation: pulse 1.2s infinite; }
+  .step.done .dot { background: #16a34a; color: #fff; }
+  .step.fail .dot { background: #dc2626; color: #fff; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.15); } }
+  .step .name { font-size: 13px; font-weight: 600; }
+  .step .code { font-size: 11px; color: #9ca3af; font-family: Consolas, monospace; }
+  .step .facts {
+    margin-top: 8px; font-size: 11px; color: #4b5563; text-align: left;
+    font-family: Consolas, monospace; word-break: break-all;
+  }
+  .step .facts div { padding: 1px 0; }
+  .step .facts b { color: #9ca3af; font-weight: 400; }
+
+  .error-banner {
+    display: none; margin-top: 14px; padding: 10px 12px; border-radius: 8px;
+    background: #fef2f2; border: 1px solid #fca5a5; font-size: 13px; color: #991b1b;
+  }
+  .error-banner code {
+    display: block; margin-top: 4px; font-size: 12px; color: #7f1d1d;
+    font-family: Consolas, monospace; word-break: break-all; white-space: pre-wrap;
+  }
+
+  .log {
+    background: #111827; color: #d1d5db; border-radius: 8px; padding: 12px;
+    font-family: Consolas, monospace; font-size: 12px; line-height: 1.7;
+    height: 300px; overflow-y: auto;
+  }
+  .log .t { color: #6b7280; }
+  .log .tag { display: inline-block; min-width: 68px; }
+  .log .tag.client { color: #93c5fd; }
+  .log .tag.state { color: #6ee7b7; }
+  .log .tag.event { color: #fcd34d; }
+  .log .tag.error { color: #f87171; }
+  .log pre {
+    color: #9ca3af; margin: 2px 0 2px 76px; white-space: pre-wrap; word-break: break-all;
+  }
+  .log details summary { cursor: pointer; color: #9ca3af; margin-left: 76px; }
+</style>
+</head>
+<body>
+  <h1>인스턴스 생성 흐름 데모</h1>
+  <div class="sub">생성 요청이 브로커 후보 조회, 런타임 생성을 거쳐 실행되는 과정을 단계와 로그로 보여준다</div>
+
+  <div class="card">
+    <h2>생성 요청</h2>
+    <form id="create-form" onsubmit="return false">
+      <div class="grid">
+        <div>
+          <label for="user_id">user_id</label>
+          <div class="uuid-row">
+            <input id="user_id" required>
+            <button type="button" class="small" data-regen="user_id">재생성</button>
+          </div>
+        </div>
+        <div>
+          <label for="team_id">team_id</label>
+          <div class="uuid-row">
+            <input id="team_id" required>
+            <button type="button" class="small" data-regen="team_id">재생성</button>
+          </div>
+        </div>
+        <div>
+          <label for="challenge_id">challenge_id</label>
+          <div class="uuid-row">
+            <input id="challenge_id" required>
+            <button type="button" class="small" data-regen="challenge_id">재생성</button>
+          </div>
+        </div>
+        <div>
+          <label for="container_image">container_image</label>
+          <input id="container_image" value="ghcr.io/example/web:latest" required>
+        </div>
+        <div>
+          <label for="container_port">container_port</label>
+          <input id="container_port" type="number" value="8080" min="1" max="65535" required>
+        </div>
+        <div>
+          <label for="architecture">architecture</label>
+          <select id="architecture">
+            <option>AMD64</option>
+            <option>ARM64</option>
+          </select>
+        </div>
+        <div>
+          <label for="cpu_millicores">cpu_millicores</label>
+          <input id="cpu_millicores" type="number" value="500" min="1" required>
+        </div>
+        <div>
+          <label for="memory_mib">memory_mib</label>
+          <input id="memory_mib" type="number" value="512" min="1" required>
+        </div>
+        <div>
+          <label for="ephemeral_storage_mib">ephemeral_storage_mib</label>
+          <input id="ephemeral_storage_mib" type="number" value="1024" min="1" required>
+        </div>
+        <div>
+          <label for="ttl_minutes">ttl_minutes</label>
+          <input id="ttl_minutes" type="number" value="60" min="1" required>
+        </div>
+        <div>
+          <label for="hard_timeout_minutes">hard_timeout_minutes</label>
+          <input id="hard_timeout_minutes" type="number" value="120" min="1" required>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" id="btn-create" class="primary">인스턴스 생성</button>
+        <button type="button" id="btn-delete" class="danger" disabled>삭제</button>
+        <button type="button" id="btn-reset" disabled>새 요청 준비</button>
+        <span class="status-badge" id="status-badge">대기</span>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>진행 단계</h2>
+    <div class="steps" id="steps"></div>
+    <div class="error-banner" id="error-banner"></div>
+  </div>
+
+  <div class="card">
+    <h2>로그</h2>
+    <div class="log" id="log"></div>
+  </div>
+
+<script>
+"use strict";
+
+const STEPS = [
+  { name: "요청 접수", code: "REQUESTED" },
+  { name: "브로커 후보 조회", code: "SCHEDULING" },
+  { name: "런타임 생성", code: "PROVISIONING" },
+  { name: "실행 중", code: "RUNNING" },
+];
+const STATUS_RANK = { REQUESTED: 0, SCHEDULING: 1, PROVISIONING: 2, RUNNING: 3 };
+// 생성 실패도 정리 상태를 거치므로 실행을 실제로 관측한 경우에만 레일을 완주로 본다
+const AFTER_RUN_STATUSES = ["RESTARTING", "RESETTING", "STOPPING", "STOPPED", "CLEANUP_PENDING", "CLEANED", "EXPIRED"];
+const TERMINAL_STATUSES = ["FAILED", "STOPPED", "CLEANED", "EXPIRED"];
+const POLL_INTERVAL_MS = 1000;
+const POLL_LIMIT = 300;
+
+const state = {
+  instanceId: null,
+  lastStatus: null,
+  maxRank: -1,
+  failStep: null,
+  reachedRunning: false,
+  seenEventIds: new Set(),
+  timer: null,
+  polls: 0,
+};
+
+const el = (id) => document.getElementById(id);
+
+// randomUUID는 https와 localhost에서만 있어 http 접속용으로 직접 만든다
+function newUuid() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" + hex.slice(12, 16)
+    + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+}
+
+function initForm() {
+  ["user_id", "team_id", "challenge_id"].forEach((id) => { el(id).value = newUuid(); });
+  document.querySelectorAll("[data-regen]").forEach((btn) => {
+    btn.addEventListener("click", () => { el(btn.dataset.regen).value = newUuid(); });
+  });
+}
+
+function renderSteps() {
+  el("steps").innerHTML = STEPS.map((step, i) => {
+    let cls = "step";
+    if (state.failStep === i) cls += " fail";
+    else if ((state.failStep !== null && i < state.failStep)
+      || state.maxRank > i
+      || (state.maxRank === i && i === STEPS.length - 1)) cls += " done";
+    else if (state.maxRank === i && state.failStep === null) cls += " active";
+    return '<div class="' + cls + '">'
+      + '<div class="dot">' + (i + 1) + '</div>'
+      + '<div class="name">' + step.name + '</div>'
+      + '<div class="code">' + step.code + '</div>'
+      + '<div class="facts" id="facts-' + i + '"></div>'
+      + '</div>';
+  }).join("");
+  refillFacts();
+}
+
+let lastFacts = [null, null, null, null];
+
+function refillFacts() {
+  lastFacts.forEach((html, i) => { if (html) el("facts-" + i).innerHTML = html; });
+}
+
+function setFacts(stepIndex, pairs) {
+  const rows = pairs.filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => "<div><b>" + k + "</b> " + v + "</div>").join("");
+  if (rows && rows !== lastFacts[stepIndex]) {
+    lastFacts[stepIndex] = rows;
+    el("facts-" + stepIndex).innerHTML = rows;
+  }
+}
+
+function nowTime() {
+  return new Date().toLocaleTimeString("en-GB");
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => "&#" + ch.charCodeAt(0) + ";");
+}
+
+function esc(value) {
+  return value === null || value === undefined ? null : escapeHtml(value);
+}
+
+function log(kind, text, detailText) {
+  const tagNames = { client: "클라이언트", state: "상태", event: "이벤트", error: "오류" };
+  const line = document.createElement("div");
+  line.innerHTML = '<span class="t">' + nowTime() + '</span> '
+    + '<span class="tag ' + kind + '">[' + tagNames[kind] + ']</span> ' + escapeHtml(text);
+  el("log").appendChild(line);
+  if (detailText) {
+    const pre = document.createElement("pre");
+    pre.textContent = detailText;
+    el("log").appendChild(pre);
+  }
+  el("log").scrollTop = el("log").scrollHeight;
+}
+
+function setBadge(text) {
+  el("status-badge").textContent = text;
+}
+
+function showError(title, detail) {
+  const banner = el("error-banner");
+  banner.style.display = "block";
+  banner.innerHTML = "";
+  banner.appendChild(document.createTextNode(title));
+  if (detail) {
+    const code = document.createElement("code");
+    code.textContent = detail;
+    banner.appendChild(code);
+  }
+}
+
+function buildRequestBody() {
+  return {
+    user_id: el("user_id").value.trim(),
+    team_id: el("team_id").value.trim(),
+    challenge_id: el("challenge_id").value.trim(),
+    container_image: el("container_image").value.trim(),
+    container_port: Number(el("container_port").value),
+    architecture: el("architecture").value,
+    resource_profile: {
+      cpu_millicores: Number(el("cpu_millicores").value),
+      memory_mib: Number(el("memory_mib").value),
+      ephemeral_storage_mib: Number(el("ephemeral_storage_mib").value),
+    },
+    ttl_minutes: Number(el("ttl_minutes").value),
+    hard_timeout_minutes: Number(el("hard_timeout_minutes").value),
+  };
+}
+
+async function createInstance() {
+  if (!el("create-form").reportValidity()) return;
+  el("btn-create").disabled = true;
+  const body = buildRequestBody();
+  log("client", "POST /api/instances 생성 요청 전송", JSON.stringify(body, null, 2));
+
+  let response, envelope;
+  try {
+    response = await fetch("/api/instances", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    envelope = await response.json();
+  } catch (e) {
+    log("error", "요청 실패: " + e.message);
+    el("btn-create").disabled = false;
+    return;
+  }
+
+  if (!response.ok) {
+    log("error", "생성 거절 HTTP " + response.status + " code=" + envelope.code + " message=" + envelope.message);
+    showError("생성 요청이 거절되었다: " + envelope.code, envelope.message);
+    el("btn-create").disabled = false;
+    return;
+  }
+
+  state.instanceId = envelope.data.instance_id;
+  state.maxRank = 0;
+  log("client", "202 접수 instance_id=" + state.instanceId);
+  if (envelope.data.replaced_instance_id) {
+    log("client", "기존 인스턴스 교체 replaced_instance_id=" + envelope.data.replaced_instance_id);
+  }
+  setBadge(envelope.data.status);
+  state.lastStatus = envelope.data.status;
+  el("btn-reset").disabled = false;
+  renderSteps();
+  startPolling();
+}
+
+function startPolling() {
+  stopPolling();
+  state.polls = 0;
+  state.timer = setInterval(poll, POLL_INTERVAL_MS);
+  poll();
+}
+
+function stopPolling() {
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+}
+
+async function poll() {
+  if (!state.instanceId) return;
+  if (++state.polls > POLL_LIMIT) {
+    stopPolling();
+    log("client", "폴링 한도에 도달해 감시를 멈춘다");
+    return;
+  }
+
+  let detailRes, detail, events;
+  try {
+    const [res, eventsRes] = await Promise.all([
+      fetch("/api/instances/" + state.instanceId),
+      fetch("/api/instances/" + state.instanceId + "/events"),
+    ]);
+    detailRes = res;
+    detail = (await detailRes.json()).data;
+    events = (await eventsRes.json()).data;
+  } catch (e) {
+    log("error", "폴링 실패: " + e.message);
+    return;
+  }
+  if (!detail) {
+    log("error", "폴링 응답에 data가 없다 HTTP " + detailRes.status);
+    return;
+  }
+
+  applyStatus(detail);
+  applyEvents(events || []);
+
+  if (TERMINAL_STATUSES.includes(detail.status) && state.timer) {
+    stopPolling();
+    await fetchFinalEvents();
+    log("client", "종료 상태 " + detail.status + " 도달, 감시를 멈춘다");
+  }
+}
+
+// 종료 상태를 본 폴링이 그 원인 이벤트보다 먼저 읽었을 수 있어 한 번 더 조회한다
+async function fetchFinalEvents() {
+  try {
+    const res = await fetch("/api/instances/" + state.instanceId + "/events");
+    applyEvents((await res.json()).data || []);
+  } catch (e) {
+    log("error", "마지막 이벤트 조회 실패: " + e.message);
+  }
+}
+
+function applyStatus(detail) {
+  const status = detail.status;
+  if (status !== state.lastStatus) {
+    log("state", (state.lastStatus || "-") + " → " + status);
+    state.lastStatus = status;
+    setBadge(status);
+  }
+
+  if (status === "RUNNING") state.reachedRunning = true;
+  if (status in STATUS_RANK) {
+    state.maxRank = Math.max(state.maxRank, STATUS_RANK[status]);
+  } else if (AFTER_RUN_STATUSES.includes(status) && state.reachedRunning) {
+    state.maxRank = STEPS.length - 1;
+  }
+
+  renderSteps();
+  setFacts(1, [
+    ["provider", esc(detail.provider)],
+    ["account", esc(detail.account_id)],
+    ["region", esc(detail.region)],
+    ["target", esc(detail.runtime_target_id)],
+  ]);
+  setFacts(2, [["workload", esc(detail.runtime_workload_id)]]);
+  setFacts(3, [
+    ["url", detail.service_url
+      ? '<a href="' + escapeHtml(detail.service_url) + '" target="_blank">' + escapeHtml(detail.service_url) + "</a>"
+      : null],
+    ["만료", detail.expires_at ? new Date(detail.expires_at).toLocaleTimeString("en-GB") : null],
+  ]);
+
+  el("btn-delete").disabled = !(status in STATUS_RANK);
+}
+
+// 실패 지점은 이벤트의 에러 코드 이름으로 짚는다
+// 실행 도달 이후의 실패는 생성 레일 밖이라 단계에 표시하지 않는다
+function failStepOf(errorCode) {
+  if (errorCode) {
+    if (errorCode.startsWith("BROKER") || errorCode === "RESOURCE_UNAVAILABLE") return 1;
+    if (errorCode.startsWith("RUNTIME_CREATE")) return 2;
+  }
+  if (state.reachedRunning) return null;
+  return Math.max(state.maxRank, 0);
+}
+
+function applyEvents(events) {
+  for (const event of events) {
+    if (state.seenEventIds.has(event.event_id)) continue;
+    state.seenEventIds.add(event.event_id);
+
+    const at = event.created_at
+      ? new Date(event.created_at).toLocaleTimeString("en-GB")
+      : "-";
+    if (event.event_type === "ERROR_RECORDED") {
+      log("error", at + " ERROR_RECORDED code=" + (event.error_code || "-"), event.admin_detail || undefined);
+      const failStep = failStepOf(event.error_code);
+      if (failStep !== null) {
+        state.failStep = failStep;
+        renderSteps();
+      }
+      showError("실패: " + (event.error_code || "알 수 없음"), event.admin_detail || "");
+    } else {
+      const move = (event.from_status || "-") + " → " + (event.to_status || "-");
+      log("event", at + " " + event.event_type + " " + move, event.admin_detail || undefined);
+    }
+  }
+}
+
+async function deleteInstance() {
+  if (!state.instanceId) return;
+  el("btn-delete").disabled = true;
+  log("client", "DELETE /api/instances/" + state.instanceId + " 삭제 요청 전송");
+
+  let response, envelope;
+  try {
+    response = await fetch("/api/instances/" + state.instanceId, { method: "DELETE" });
+    envelope = await response.json();
+  } catch (e) {
+    log("error", "삭제 요청 실패: " + e.message);
+    return;
+  }
+
+  if (!response.ok) {
+    log("error", "삭제 거절 HTTP " + response.status + " code=" + envelope.code + " message=" + envelope.message);
+    return;
+  }
+  log("client", "202 접수 status=" + envelope.data.status);
+  startPolling();
+}
+
+function resetRun() {
+  stopPolling();
+  state.instanceId = null;
+  state.lastStatus = null;
+  state.maxRank = -1;
+  state.failStep = null;
+  state.reachedRunning = false;
+  state.seenEventIds.clear();
+  lastFacts = [null, null, null, null];
+  el("log").innerHTML = "";
+  el("error-banner").style.display = "none";
+  el("user_id").value = newUuid();
+  setBadge("대기");
+  el("btn-create").disabled = false;
+  el("btn-delete").disabled = true;
+  el("btn-reset").disabled = true;
+  renderSteps();
+}
+
+el("btn-create").addEventListener("click", createInstance);
+el("btn-delete").addEventListener("click", deleteInstance);
+el("btn-reset").addEventListener("click", resetRun);
+initForm();
+renderSteps();
+</script>
+</body>
+</html>
