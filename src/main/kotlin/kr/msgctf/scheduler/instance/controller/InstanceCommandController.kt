@@ -9,6 +9,7 @@ import kr.msgctf.scheduler.instance.dto.DeleteInstanceResponse
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceRequest
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceResponse
 import kr.msgctf.scheduler.instance.dto.InstanceResponse
+import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.DeleteMapping
@@ -50,6 +51,19 @@ class InstanceCommandController(
                 instanceSchedulerService.deleteInstance(
                     (request ?: DeleteInstanceRequest()).toCommand(instanceId),
                 ),
+            ),
+        )
+
+    // 초기화도 생성처럼 접수만 하므로 202로 응답한다
+    @PostMapping("/{instanceId}/reset")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    fun resetInstance(
+        @PathVariable instanceId: UUID,
+    ): ApiResponse<InstanceResponse> =
+        ApiResponse.success(
+            message = "인스턴스 초기화 요청 성공",
+            data = InstanceResponse.from(
+                instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instanceId)),
             ),
         )
 

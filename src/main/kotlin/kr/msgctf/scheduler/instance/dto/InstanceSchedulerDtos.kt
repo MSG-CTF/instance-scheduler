@@ -33,7 +33,12 @@ data class ExtendInstanceCommand(
     val extendMinutes: Long,
 )
 
-// create/delete/active 조회가 공통으로 돌려주는 결과 값
+// reset 서비스에 넘기는 요청 값
+data class ResetInstanceCommand(
+    val instanceId: UUID,
+)
+
+// create/delete/reset/active 조회가 공통으로 돌려주는 결과 값
 data class InstanceResult(
     val instanceId: UUID,
     val teamId: UUID,

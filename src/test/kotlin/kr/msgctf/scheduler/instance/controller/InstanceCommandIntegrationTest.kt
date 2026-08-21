@@ -5,9 +5,11 @@ import java.time.OffsetDateTime
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
@@ -169,6 +171,64 @@ class InstanceCommandIntegrationTest {
         // then: 이전 자기 인스턴스는 정리 대기로 빠진다
         val replaced = instanceRepository.findById(own.instanceId).orElseThrow()
         assertEquals(InstanceStatus.CLEANUP_PENDING, replaced.status)
+    }
+
+    // 초기화는 저장된 스펙으로 만든 새 인스턴스 교체로 접수된다
+    @Test
+    fun `reset api replaces running instance with a fresh one`() {
+        // given
+        val previous = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(240)))
+
+        // when
+        val response = mockMvc.post("/api/instances/${previous.instanceId}/reset")
+            .andExpect {
+                status { isAccepted() }
+                jsonPath("$.code") { value("SUCCESS") }
+                jsonPath("$.data.status") { value("REQUESTED") }
+                jsonPath("$.data.replaced_instance_id") { value(previous.instanceId.toString()) }
+                jsonPath("$.data.service_url") { doesNotExist() }
+            }.andReturn().response.contentAsString
+
+        // then: 옛 행은 정리 대기로 빠지고, 새 행은 스펙과 만료 시각을 물려받는다
+        val freshId = readInstanceId(response)
+        assertNotEquals(previous.instanceId, freshId)
+
+        val old = instanceRepository.findById(previous.instanceId).orElseThrow()
+        val fresh = instanceRepository.findById(freshId).orElseThrow()
+
+        assertEquals(InstanceStatus.CLEANUP_PENDING, old.status)
+        assertEquals(InstanceStatus.REQUESTED, fresh.status)
+        assertEquals(old.userId, fresh.userId)
+        assertEquals(old.containerImage, fresh.containerImage)
+        assertEquals(old.expiresAt, fresh.expiresAt)
+        assertEquals(old.hardExpiresAt, fresh.hardExpiresAt)
+    }
+
+    // 실행 중이 아닌 인스턴스의 초기화는 거절된다
+    @Test
+    fun `reset api rejects instance that is not running`() {
+        // given
+        val previous = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(241)).apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
+
+        // when & then
+        mockMvc.post("/api/instances/${previous.instanceId}/reset")
+            .andExpect {
+                status { isBadRequest() }
+                jsonPath("$.code") { value("INVALID_STATE_TRANSITION") }
+            }
+    }
+
+    // 없는 인스턴스의 초기화는 not found로 거절된다
+    @Test
+    fun `reset api returns not found for unknown instance`() {
+        // when & then
+        mockMvc.post("/api/instances/${UUID.randomUUID()}/reset")
+            .andExpect {
+                status { isNotFound() }
+                jsonPath("$.code") { value("INSTANCE_NOT_FOUND") }
+            }
     }
 
     @Test
@@ -532,6 +592,12 @@ class InstanceCommandIntegrationTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
+            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
+            containerPort = 8080,
+            architecture = Architecture.AMD64,
+            cpuMillicores = 500,
+            memoryMib = 512,
+            ephemeralStorageMib = 1024,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
             runtimeWorkloadId = "workload-$teamId",

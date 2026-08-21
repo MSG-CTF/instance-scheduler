@@ -98,6 +98,24 @@ class InstanceCommandControllerTest {
         assertEquals(RuntimeDeleteReason.USER_REQUESTED, instance.deleteReason)
     }
 
+    // reset API 응답 확인
+    @Test
+    fun `wraps reset result in success envelope`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRunningInstance())
+        val controller = InstanceCommandController(newService(repository))
+
+        // when
+        val response = controller.resetInstance(instanceId = instance.instanceId)
+
+        // then
+        assertEquals("SUCCESS", response.code)
+        assertEquals(InstanceStatus.REQUESTED, response.data.status)
+        assertEquals(instance.instanceId, response.data.replacedInstanceId)
+        assertNull(response.data.serviceUrl)
+    }
+
     private fun newService(
         repository: TestInstanceRepository = TestInstanceRepository(),
     ): InstanceSchedulerService =
@@ -134,6 +152,12 @@ class InstanceCommandControllerTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
+            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
+            containerPort = 8080,
+            architecture = Architecture.AMD64,
+            cpuMillicores = 500,
+            memoryMib = 512,
+            ephemeralStorageMib = 1024,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
             runtimeWorkloadId = "workload-1",
