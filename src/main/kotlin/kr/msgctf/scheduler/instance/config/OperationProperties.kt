@@ -12,4 +12,10 @@ data class OperationProperties(
     val fixedDelay: Duration = Duration.ofSeconds(2),
     // 접수한 operation의 결과를 기다리는 상한
     val pollTimeout: Duration = Duration.ofMinutes(10),
+    // 재시도 간격의 시작값, 실패가 거듭될수록 두 배씩 늘린다
+    val backoffBase: Duration = Duration.ofSeconds(2),
+    // 재시도 간격이 이 값을 넘지 않는다
+    val backoffMax: Duration = Duration.ofSeconds(30),
+    // broker 후보 조회를 이 횟수만큼 실패하면 FAILED로 확정한다
+    val brokerRetryLimit: Int = 3,
 )

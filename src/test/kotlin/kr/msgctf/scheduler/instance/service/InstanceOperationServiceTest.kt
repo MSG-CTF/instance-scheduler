@@ -10,9 +10,13 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.broker.BrokerCandidateRequest
+import kr.msgctf.scheduler.broker.BrokerCandidateResponse
+import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
+import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
@@ -25,6 +29,7 @@ import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
+import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.testUuid
 import org.springframework.transaction.support.TransactionOperations
@@ -68,9 +73,9 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.size)
     }
 
-    // broker가 후보를 못 주면 FAILED로 보내는지 확인
+    // broker가 후보를 못 주면 간격을 두고 다시 시도하는지 확인
     @Test
-    fun `fails requested instance when broker rejects`() {
+    fun `schedules retry when broker gives no candidate`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
@@ -81,8 +86,80 @@ class InstanceOperationServiceTest {
         service.progressRequested(instance.instanceId)
 
         // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(clock.instant().plusSeconds(2), instance.nextPollAt)
+        assertEquals(0, events.saved.size)
+    }
+
+    // broker 실패가 한도에 닿으면 FAILED로 확정하고 선택 실패는 자기 코드로 남기는지 확인
+    @Test
+    fun `fails instance with selector code when broker retry limit reached`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = FakeBrokerClient(FakeBrokerMode.EMPTY), events = events)
+
+        // when
+        repeat(3) { service.progressRequested(instance.instanceId) }
+
+        // then
         assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(3, instance.attemptCount)
+        assertNull(instance.nextPollAt)
         assertEquals(1, events.saved.size)
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, events.saved.single().errorCode)
+    }
+
+    // 호출 자체가 안 되는 실패는 BROKER_CALL_FAILED로 남기는지 확인
+    @Test
+    fun `fails instance with broker call failed code when broker keeps throwing`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val throwingBroker = object : BrokerClient {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse =
+                throw IllegalStateException("connection refused")
+        }
+        val service = newService(repository, brokerClient = throwingBroker, events = events)
+
+        // when
+        repeat(3) { service.progressRequested(instance.instanceId) }
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, events.saved.single().errorCode)
+    }
+
+    // 재시도 대기 중이던 SCHEDULING이 성공하면 흔적을 지우고 PROVISIONING으로 가는지 확인
+    @Test
+    fun `resumes scheduling instance and clears retry marks on success`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var fail = true
+        val broker = object : BrokerClient {
+            private val delegate = FakeBrokerClient()
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                if (fail) throw IllegalStateException("temporary outage")
+                return delegate.getCandidates(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        fail = false
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(0, instance.attemptCount)
+        assertNotNull(instance.runtimeOperationId)
+        assertEquals(clock.instant(), instance.nextPollAt)
     }
 
     // 접수가 실패하면 잔여 정리를 위해 CLEANUP_PENDING으로 파킹하는지 확인
@@ -173,7 +250,7 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.size)
     }
 
-    // 조회 오류는 상태를 바꾸지 않고 다음 조회만 예약하는지 확인
+    // 조회 오류는 상태를 바꾸지 않고 간격을 늘려 다음 조회를 예약하는지 확인
     @Test
     fun `keeps state when operation lookup fails`() {
         // given
@@ -191,7 +268,132 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.PROVISIONING, instance.status)
         assertEquals("op-unknown", instance.runtimeOperationId)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(clock.instant().plusSeconds(2), instance.nextPollAt)
+    }
+
+    // 조회 오류가 이어지면 간격이 두 배씩 늘고 상한에서 멈추는지 확인
+    @Test
+    fun `grows poll interval on repeated lookup failures up to max`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository)
+        service.progressRequested(instance.instanceId)
+        instance.runtimeOperationId = "op-unknown"
+
+        // when, then
+        service.pollOperation(instance.instanceId)
+        assertEquals(clock.instant().plusSeconds(2), instance.nextPollAt)
+
+        service.pollOperation(instance.instanceId)
+        assertEquals(clock.instant().plusSeconds(4), instance.nextPollAt)
+
+        instance.attemptCount = 10
+        service.pollOperation(instance.instanceId)
+        assertEquals(clock.instant().plusSeconds(30), instance.nextPollAt)
+    }
+
+    // 진행 중 응답은 오류 횟수를 지우고 runtime이 준 간격을 따르는지 확인
+    @Test
+    fun `pending poll resets failure count and honors retry after`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot =
+                RuntimeOperationSnapshot(
+                    operationId = operationId,
+                    status = RuntimeOperationState.QUEUED,
+                    retryAfterSeconds = 7,
+                    result = null,
+                    lastErrorCode = null,
+                )
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+        instance.attemptCount = 3
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(0, instance.attemptCount)
+        assertEquals(clock.instant().plusSeconds(7), instance.nextPollAt)
+    }
+
+    // runtime이 재시도 간격을 안 주면 다음 워커 주기에 바로 다시 조회하는지 확인
+    @Test
+    fun `pending poll without retry after keeps next tick cadence`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot =
+                RuntimeOperationSnapshot(
+                    operationId = operationId,
+                    status = RuntimeOperationState.QUEUED,
+                    retryAfterSeconds = null,
+                    result = null,
+                    lastErrorCode = null,
+                )
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
         assertEquals(clock.instant(), instance.nextPollAt)
+    }
+
+    // 조회 오류 backoff도 폴링 시한을 넘지 않는지 확인
+    @Test
+    fun `clamps lookup failure backoff to poll deadline`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository)
+        service.progressRequested(instance.instanceId)
+        instance.runtimeOperationId = "op-unknown"
+        instance.pollDeadlineAt = clock.instant().plusSeconds(1)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(1), instance.nextPollAt)
+    }
+
+    // 다음 조회 시각이 폴링 시한을 넘지 않는지 확인
+    @Test
+    fun `clamps next poll at to poll deadline`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot =
+                RuntimeOperationSnapshot(
+                    operationId = operationId,
+                    status = RuntimeOperationState.QUEUED,
+                    retryAfterSeconds = 3600,
+                    result = null,
+                    lastErrorCode = null,
+                )
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant().plusSeconds(60)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(60), instance.nextPollAt)
     }
 
     // 삭제를 접수하고 SUCCEEDED 폴링으로 CLEANED까지 가는지 확인
@@ -268,6 +470,23 @@ class InstanceOperationServiceTest {
 
         // then
         assertEquals(InstanceStatus.CLEANED, instance.status)
+    }
+
+    // 접수 실패가 한도 전이면 다음 시도 시각을 늦추는지 확인
+    @Test
+    fun `delays next submit attempt after submit failure`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newCleanupPending())
+        val service = newService(repository, runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL))
+
+        // when
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, instance.cleanupRetryCount)
+        assertEquals(clock.instant().plusSeconds(2), instance.nextPollAt)
     }
 
     // 접수 실패는 재시도 횟수를 세고 한도 도달 시 FAILED로 남기는지 확인
@@ -443,7 +662,7 @@ class InstanceOperationServiceTest {
 
     private fun newService(
         repository: TestInstanceRepository,
-        brokerClient: FakeBrokerClient = FakeBrokerClient(),
+        brokerClient: BrokerClient = FakeBrokerClient(),
         runtimeClient: RuntimeClient = FakeRuntimeClient(),
         events: TestInstanceEventRepository = TestInstanceEventRepository(),
         cleanupProperties: CleanupProperties = CleanupProperties(),

@@ -23,14 +23,16 @@ class InstanceOperationWorker(
 
     @Scheduled(fixedDelayString = "\${scheduler.operation.fixed-delay:2s}")
     fun progressOperations() {
-        for (instanceId in instanceRepository.findByStatus(InstanceStatus.REQUESTED).map { it.instanceId }) {
+        val now = clock.instant()
+        val progressTargets = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(PROGRESS_STATES, now)
+        for (instanceId in progressTargets.map { it.instanceId }) {
             runIsolated(instanceId) { operationService.progressRequested(it) }
         }
-        val submitTargets = instanceRepository.findByStatusInAndRuntimeOperationIdIsNull(DELETE_SUBMIT_STATES)
+        val submitTargets = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(DELETE_SUBMIT_STATES, now)
         for (instanceId in submitTargets.map { it.instanceId }) {
             runIsolated(instanceId) { operationService.submitDelete(it) }
         }
-        val pollTargets = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(clock.instant())
+        val pollTargets = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(now)
         for (instanceId in pollTargets.map { it.instanceId }) {
             runIsolated(instanceId) { operationService.pollOperation(it) }
         }
@@ -46,6 +48,8 @@ class InstanceOperationWorker(
     }
 
     companion object {
+        // SCHEDULING은 broker 재시도를 기다리거나 진행 도중 끊긴 행이라 다시 처리 대상에 넣는다
+        private val PROGRESS_STATES = listOf(InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING)
         private val DELETE_SUBMIT_STATES = listOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
     }
 }

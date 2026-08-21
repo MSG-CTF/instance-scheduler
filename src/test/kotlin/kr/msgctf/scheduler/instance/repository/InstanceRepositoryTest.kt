@@ -220,24 +220,58 @@ class InstanceRepositoryTest {
         assertEquals(setOf(retryable.instanceId, overLimit.instanceId), found.map { it.instanceId }.toSet())
     }
 
-    // 접수 전 삭제 대상만 잡는지 확인
+    // 접수 전 삭제 대상만 잡고, 재시도 대기 중인 행은 건너뛰는지 확인
     @Test
     fun `finds delete submit targets without operation id`() {
+        val now = Instant.now()
         val pending = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.CLEANUP_PENDING))
         val stopping = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.STOPPING))
+        val retryDue = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.CLEANUP_PENDING).apply { nextPollAt = now.minusSeconds(1) },
+        )
         val alreadySubmitted = instanceRepository.saveAndFlush(
             newInstance(status = InstanceStatus.CLEANUP_PENDING).apply { runtimeOperationId = "op-1" },
         )
+        val waitingRetry = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.CLEANUP_PENDING).apply { nextPollAt = now.plusSeconds(60) },
+        )
 
-        val found = instanceRepository.findByStatusInAndRuntimeOperationIdIsNull(
+        val found = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(
             listOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
+            now,
         )
 
         assertEquals(
-            setOf(pending.instanceId, stopping.instanceId),
+            setOf(pending.instanceId, stopping.instanceId, retryDue.instanceId),
             found.map { it.instanceId }.toSet(),
         )
         assertEquals(false, found.any { it.instanceId == alreadySubmitted.instanceId })
+        assertEquals(false, found.any { it.instanceId == waitingRetry.instanceId })
+    }
+
+    // 진행 대상은 REQUESTED와 함께 재시도 시각이 됐거나 중단된 SCHEDULING도 잡는지 확인
+    @Test
+    fun `finds progress targets including scheduling rows`() {
+        val now = Instant.now()
+        val requested = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.REQUESTED))
+        val schedulingDue = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.SCHEDULING).apply { nextPollAt = now.minusSeconds(1) },
+        )
+        val schedulingInterrupted = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.SCHEDULING))
+        instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.SCHEDULING).apply { nextPollAt = now.plusSeconds(60) },
+        )
+        instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.PROVISIONING))
+
+        val found = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(
+            listOf(InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
+            now,
+        )
+
+        assertEquals(
+            setOf(requested.instanceId, schedulingDue.instanceId, schedulingInterrupted.instanceId),
+            found.map { it.instanceId }.toSet(),
+        )
     }
 
     // next_poll_at이 지난 폴링 대상만 잡는지 확인
