@@ -13,6 +13,7 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
@@ -230,6 +231,32 @@ data class ExtendInstanceResponse(
                 status = result.status,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
+            )
+    }
+}
+
+// 이벤트 조회 API 응답 body
+data class InstanceEventResponse(
+    val eventId: UUID,
+    val eventType: InstanceEventType,
+    val fromStatus: InstanceStatus?,
+    val toStatus: InstanceStatus?,
+    val errorCode: SchedulerErrorCode?,
+    val adminDetail: String?,
+    val createdAt: Instant?,
+) {
+
+    companion object {
+
+        fun from(result: InstanceEventResult): InstanceEventResponse =
+            InstanceEventResponse(
+                eventId = result.eventId,
+                eventType = result.eventType,
+                fromStatus = result.fromStatus,
+                toStatus = result.toStatus,
+                errorCode = result.errorCode,
+                adminDetail = result.adminDetail,
+                createdAt = result.createdAt,
             )
     }
 }

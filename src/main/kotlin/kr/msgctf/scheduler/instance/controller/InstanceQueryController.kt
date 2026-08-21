@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.controller
 import java.util.UUID
 import kr.msgctf.scheduler.common.response.ApiResponse
 import kr.msgctf.scheduler.instance.dto.InstanceDetailResponse
+import kr.msgctf.scheduler.instance.dto.InstanceEventResponse
 import kr.msgctf.scheduler.instance.dto.InstanceResponse
 import kr.msgctf.scheduler.instance.service.InstanceQueryService
 import org.springframework.web.bind.annotation.GetMapping
@@ -25,6 +26,15 @@ class InstanceQueryController(
         ApiResponse.success(
             message = "인스턴스 조회 성공",
             data = InstanceDetailResponse.from(instanceQueryService.getInstance(instanceId)),
+        )
+
+    @GetMapping("/{instanceId}/events")
+    fun getInstanceEvents(
+        @PathVariable instanceId: UUID,
+    ): ApiResponse<List<InstanceEventResponse>> =
+        ApiResponse.success(
+            message = "인스턴스 이벤트 조회 성공",
+            data = instanceQueryService.getEvents(instanceId).map(InstanceEventResponse::from),
         )
 
     // 쿼리 파라미터 이름은 직접 지정해야 한다

@@ -4,7 +4,9 @@ import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.dto.InstanceDetailResult
+import kr.msgctf.scheduler.instance.dto.InstanceEventResult
 import kr.msgctf.scheduler.instance.dto.InstanceResult
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.springframework.data.repository.findByIdOrNull
 import org.springframework.stereotype.Service
@@ -15,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional
 @Service
 class InstanceQueryService(
     private val instanceRepository: InstanceRepository,
+    private val instanceEventRepository: InstanceEventRepository,
     private val transitionService: InstanceStateTransitionService,
 ) {
 
@@ -27,6 +30,19 @@ class InstanceQueryService(
             )
 
         return InstanceDetailResult.from(instance)
+    }
+
+    // 없는 인스턴스와 이벤트가 아직 없는 인스턴스(빈 목록)를 구분한다
+    @Transactional(readOnly = true)
+    fun getEvents(instanceId: UUID): List<InstanceEventResult> {
+        instanceRepository.findByIdOrNull(instanceId)
+            ?: throw SchedulerException(
+                errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
+                adminDetail = "instanceId=$instanceId",
+            )
+
+        return instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(instanceId)
+            .map(InstanceEventResult::from)
     }
 
     // active 판정 기준은 상태 머신이 정한 수렴 중 상태를 그대로 따른다

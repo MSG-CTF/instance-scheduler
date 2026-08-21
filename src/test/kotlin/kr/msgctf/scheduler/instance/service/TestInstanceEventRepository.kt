@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.lang.reflect.Proxy
+import java.util.UUID
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 
@@ -19,6 +20,10 @@ class TestInstanceEventRepository {
                     val event = args?.first() as InstanceEvent
                     saved += event
                     event
+                }
+                "findAllByInstanceIdOrderByCreatedAtAsc" -> {
+                    val instanceId = args?.first() as UUID
+                    saved.filter { it.instanceId == instanceId }.sortedBy { it.createdAt }
                 }
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }

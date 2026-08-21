@@ -8,9 +8,12 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEvent
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
@@ -218,6 +221,78 @@ class InstanceQueryIntegrationTest {
             .andExpect {
                 status { isBadRequest() }
                 jsonPath("$.code") { value("INVALID_REQUEST") }
+            }
+    }
+
+    // 저장 순서대로 두 이벤트가 시간 오름차순 snake_case로 나와야 한다
+    @Test
+    fun `get events api returns events in snake case ordered by time`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(500))
+        instanceEventRepository.saveAndFlush(
+            InstanceEvent(
+                instanceId = instanceId,
+                eventType = InstanceEventType.STATE_CHANGED,
+                fromStatus = InstanceStatus.REQUESTED,
+                toStatus = InstanceStatus.SCHEDULING,
+            ),
+        )
+        // created_at은 밀리초로 절단돼 같은 값이 되면 정렬 순서를 보장할 수 없어 간격을 둔다
+        Thread.sleep(2)
+        instanceEventRepository.saveAndFlush(
+            InstanceEvent(
+                instanceId = instanceId,
+                eventType = InstanceEventType.ERROR_RECORDED,
+                toStatus = InstanceStatus.FAILED,
+                errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
+                adminDetail = "requestId=req-01, status=422",
+            ),
+        )
+
+        // when & then
+        mockMvc.get("/api/instances/$instanceId/events")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.code") { value("SUCCESS") }
+                jsonPath("$.message") { value("인스턴스 이벤트 조회 성공") }
+                jsonPath("$.data.length()") { value(2) }
+                jsonPath("$.data[0].event_id") { exists() }
+                jsonPath("$.data[0].event_type") { value("STATE_CHANGED") }
+                jsonPath("$.data[0].from_status") { value("REQUESTED") }
+                jsonPath("$.data[0].to_status") { value("SCHEDULING") }
+                jsonPath("$.data[0].error_code") { value(null as Any?) }
+                jsonPath("$.data[0].admin_detail") { value(null as Any?) }
+                jsonPath("$.data[0].created_at") { exists() }
+                jsonPath("$.data[1].event_type") { value("ERROR_RECORDED") }
+                jsonPath("$.data[1].from_status") { value(null as Any?) }
+                jsonPath("$.data[1].to_status") { value("FAILED") }
+                jsonPath("$.data[1].error_code") { value("BROKER_CALL_FAILED") }
+                jsonPath("$.data[1].admin_detail") { value("requestId=req-01, status=422") }
+            }
+    }
+
+    // 이벤트가 없어도 같은 형식의 빈 목록으로 나와야 한다
+    @Test
+    fun `get events api returns empty list for instance without events`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(510))
+
+        // when & then
+        mockMvc.get("/api/instances/$instanceId/events")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.code") { value("SUCCESS") }
+                jsonPath("$.data.length()") { value(0) }
+            }
+    }
+
+    @Test
+    fun `get events api returns not found for unknown instance id`() {
+        // when & then
+        mockMvc.get("/api/instances/${UUID.randomUUID()}/events")
+            .andExpect {
+                status { isNotFound() }
+                jsonPath("$.code") { value("INSTANCE_NOT_FOUND") }
             }
     }
 
