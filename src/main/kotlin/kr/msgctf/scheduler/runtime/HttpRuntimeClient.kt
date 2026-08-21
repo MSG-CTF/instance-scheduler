@@ -27,7 +27,8 @@ class HttpRuntimeClient(
         } catch (exception: RestClientResponseException) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
-                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}",
+                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
+                    ", body=${exception.responseBodyAsString.take(200)}",
                 cause = exception,
             )
         }
@@ -46,7 +47,8 @@ class HttpRuntimeClient(
         } catch (exception: RestClientResponseException) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
-                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}",
+                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
+                    ", body=${exception.responseBodyAsString.take(200)}",
                 cause = exception,
             )
         }

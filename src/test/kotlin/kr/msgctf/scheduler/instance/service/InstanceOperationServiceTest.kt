@@ -17,6 +17,7 @@ import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
@@ -131,6 +132,56 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.FAILED, instance.status)
         assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, events.saved.single().errorCode)
+    }
+
+    // 실패 기록에 사용자 문구가 아니라 예외의 원인 상세가 남는지 확인
+    @Test
+    fun `records admin detail from broker exception when retry limit reached`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val throwingBroker = object : BrokerClient {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse =
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
+                    adminDetail = "requestId=req-01, status=422, body=int_type",
+                )
+        }
+        val service = newService(repository, brokerClient = throwingBroker, events = events)
+
+        // when
+        repeat(3) { service.progressRequested(instance.instanceId) }
+
+        // then
+        assertEquals(
+            "attempts=3, reason=requestId=req-01, status=422, body=int_type",
+            events.saved.single().adminDetail,
+        )
+    }
+
+    // 런타임 접수 실패 기록에도 예외의 원인 상세가 남는지 확인
+    @Test
+    fun `records admin detail from runtime exception on create submit failure`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val throwingRuntime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult =
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                    adminDetail = "requestId=req-01, status=503, body=unavailable",
+                )
+        }
+        val service = newService(repository, runtimeClient = throwingRuntime, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, events.saved.single().errorCode)
+        assertEquals("requestId=req-01, status=503, body=unavailable", events.saved.single().adminDetail)
     }
 
     // 재시도 대기 중이던 SCHEDULING이 성공하면 흔적을 지우고 PROVISIONING으로 가는지 확인
