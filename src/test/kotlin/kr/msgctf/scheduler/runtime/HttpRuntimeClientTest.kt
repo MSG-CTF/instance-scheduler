@@ -47,7 +47,7 @@ class HttpRuntimeClientTest {
         assertEquals(2L, accepted.retryAfterSeconds)
     }
 
-    // 접수 자체가 실패하면 스케줄러 예외로 바뀌는지 확인
+    // 접수 자체가 실패하면 상태와 응답 body를 담은 스케줄러 예외로 바뀌는지 확인
     @Test
     fun `maps create submission error to scheduler exception`() {
         server.expect(requestTo("http://runtime.test/internal/v1/instances"))
@@ -56,7 +56,12 @@ class HttpRuntimeClientTest {
                     .body("""{"error":{"code":"CREATE_QUEUE_FAILED","message":"queue store failed"}}"""),
             )
 
-        assertFailsWith<SchedulerException> { client.submitCreate(createRequest(UUID.randomUUID())) }
+        val exception = assertFailsWith<SchedulerException> {
+            client.submitCreate(createRequest(UUID.randomUUID()))
+        }
+
+        assertEquals(true, exception.adminDetail?.contains("status=502"))
+        assertEquals(true, exception.adminDetail?.contains("CREATE_QUEUE_FAILED"))
     }
 
     // 삭제 404는 지울 대상 없음으로 구분되는지 확인
@@ -73,6 +78,25 @@ class HttpRuntimeClientTest {
         val submitted = client.submitDelete(deleteRequest(instanceId))
 
         assertIs<RuntimeSubmitResult.TargetMissing>(submitted)
+    }
+
+    // 삭제 접수 실패도 상태와 응답 body를 담은 스케줄러 예외로 바뀌는지 확인
+    @Test
+    fun `maps delete submission error to scheduler exception`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId"))
+            .andExpect(method(HttpMethod.DELETE))
+            .andRespond(
+                withStatus(HttpStatus.SERVICE_UNAVAILABLE).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"DELETE_QUEUE_FAILED","message":"queue store failed"}}"""),
+            )
+
+        val exception = assertFailsWith<SchedulerException> {
+            client.submitDelete(deleteRequest(instanceId))
+        }
+
+        assertEquals(true, exception.adminDetail?.contains("status=503"))
+        assertEquals(true, exception.adminDetail?.contains("DELETE_QUEUE_FAILED"))
     }
 
     // SUCCEEDED 응답의 result가 스냅샷으로 옮겨지는지 확인

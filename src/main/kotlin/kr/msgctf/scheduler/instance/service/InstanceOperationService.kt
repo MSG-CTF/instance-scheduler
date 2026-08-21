@@ -123,7 +123,7 @@ class InstanceOperationService(
             tx.executeWithoutResult {
                 val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
                 parkForCreateCleanup(instance)
-                recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, exception.message)
+                recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, failureDetail(exception))
             }
             return
         }
@@ -177,13 +177,13 @@ class InstanceOperationService(
                 "runtime delete submit failed: instanceId={}, requestId={}, reason={}",
                 instanceId,
                 request.requestId,
-                exception.message,
+                failureDetail(exception),
             )
             tx.executeWithoutResult {
                 val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
                 instance.cleanupRetryCount += 1
                 if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
-                    parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=${exception.message}")
+                    parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=${failureDetail(exception)}")
                 } else {
                     // 실패 횟수에 따라 다음 접수 시도를 늦춘다
                     instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
@@ -221,7 +221,7 @@ class InstanceOperationService(
                 "operation lookup failed: instanceId={}, operationId={}, reason={}",
                 instanceId,
                 operationId,
-                exception.message,
+                failureDetail(exception),
             )
             reschedulePoll(instanceId, operationId, retryAfterSeconds = null, lookupFailed = true)
             return
@@ -373,7 +373,7 @@ class InstanceOperationService(
             if (instance.attemptCount >= operationProperties.brokerRetryLimit) {
                 move(instance, InstanceStatus.FAILED)
                 instance.nextPollAt = null
-                recordError(instance, errorCode, "attempts=${instance.attemptCount}, reason=${exception.message}")
+                recordError(instance, errorCode, "attempts=${instance.attemptCount}, reason=${failureDetail(exception)}")
                 return@executeWithoutResult
             }
             instance.nextPollAt = clock.instant().plus(backoffDelay(instance.attemptCount))
@@ -382,10 +382,14 @@ class InstanceOperationService(
                 instanceId,
                 instance.attemptCount,
                 errorCode.name,
-                exception.message,
+                failureDetail(exception),
             )
         }
     }
+
+    // 기록에는 사용자 안내 문구보다 예외가 담아 온 원인 상세를 우선한다
+    private fun failureDetail(exception: Exception): String? =
+        (exception as? SchedulerException)?.adminDetail ?: exception.message
 
     // 실패가 거듭될수록 간격을 두 배씩 늘리고 상한에서 멈춘다
     private fun backoffDelay(failures: Int): Duration {
