@@ -16,6 +16,10 @@ data class RuntimeCreateRequest(
     @JsonProperty("team_id")
     val teamId: UUID,
 
+    // Runtime이 문제 유형에 맞는 격리 정책을 고르는 값
+    @JsonProperty("isolation_profile")
+    val isolationProfile: String,
+
     val target: RuntimeTarget,
     val workload: RuntimeWorkload,
 )
@@ -29,15 +33,37 @@ data class RuntimeTarget(
     val targetId: String,
 )
 
-// Runtime이 띄울 문제 컨테이너 정보
+// Runtime이 띄울 문제 컨테이너 묶음
 data class RuntimeWorkload(
-    val image: String,
-
-    @JsonProperty("container_port")
-    val containerPort: Int,
+    val containers: List<RuntimeContainer>,
 
     @JsonProperty("resource_limits")
     val resourceLimits: RuntimeResourceLimits,
+)
+
+// 컨테이너 하나의 실행과 격리 선언
+data class RuntimeContainer(
+    val name: String,
+    val image: String,
+    val ports: List<Int>,
+
+    // 참가자에게 외부 공개할 포트인지, 컨테이너 중 하나는 반드시 공개해야 한다
+    val expose: Boolean,
+
+    // 컨테이너 프로세스의 Linux UID, root(0)는 거부된다
+    @JsonProperty("run_as_user")
+    val runAsUser: Long,
+
+    // 읽기 전용 root filesystem에서 쓰기를 허용할 경로
+    @JsonProperty("writable_paths")
+    val writablePaths: List<RuntimeWritablePath>? = null,
+)
+
+data class RuntimeWritablePath(
+    val path: String,
+
+    @JsonProperty("size_mib")
+    val sizeMib: Int,
 )
 
 // 문제 인스턴스 한 개에 적용할 리소스 제한

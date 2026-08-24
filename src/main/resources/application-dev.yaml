@@ -6,6 +6,7 @@ scheduler:
   runtime:
     # 이 줄을 지우면 기본값 127.0.0.1:8080으로 붙는다
     base-url: ${SCHEDULER_RUNTIME_BASE_URL}
+    token: ${SCHEDULER_RUNTIME_TOKEN}
   cleanup:
     enabled: true
     fixed-delay: 30s

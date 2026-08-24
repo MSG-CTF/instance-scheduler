@@ -92,6 +92,10 @@ class Instance(
     @Column(name = "runtime_operation_id")
     var runtimeOperationId: String? = null,
 
+    // broker에 선점한 용량 예약, 확정이나 반납 후에는 비운다
+    @Column(name = "reservation_id")
+    var reservationId: String? = null,
+
     // operation 폴링 예정 시각, 접수 전 단계에서는 다음 재시도 시각으로 쓴다
     @Column(name = "next_poll_at")
     var nextPollAt: Instant? = null,

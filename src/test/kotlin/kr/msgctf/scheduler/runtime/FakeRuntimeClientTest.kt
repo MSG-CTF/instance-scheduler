@@ -69,10 +69,18 @@ class FakeRuntimeClientTest {
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
             teamId = testUuid(7),
+            isolationProfile = "WEB",
             target = RuntimeTarget(RuntimeType.KUBERNETES, "cluster-main"),
             workload = RuntimeWorkload(
-                image = "registry.msgctf.local/challenges/web-01:2026.07.01",
-                containerPort = 8080,
+                containers = listOf(
+                    RuntimeContainer(
+                        name = "challenge",
+                        image = "registry.msgctf.local/challenges/web-01:2026.07.01",
+                        ports = listOf(8080),
+                        expose = true,
+                        runAsUser = 10001,
+                    ),
+                ),
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
         )

@@ -8,10 +8,12 @@ import kotlin.test.assertIs
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.test.web.client.MockRestServiceServer
+import org.springframework.test.web.client.match.MockRestRequestMatchers.header
 import org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath
 import org.springframework.test.web.client.match.MockRestRequestMatchers.method
 import org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo
@@ -22,7 +24,7 @@ class HttpRuntimeClientTest {
 
     private val builder = RestClient.builder().baseUrl("http://runtime.test")
     private val server = MockRestServiceServer.bindTo(builder).build()
-    private val client = HttpRuntimeClient(builder.build())
+    private val client = HttpRuntimeClient(builder.build(), "test-token")
 
     // 202 응답의 operation_id와 Retry-After가 접수 결과로 옮겨지는지 확인
     @Test
@@ -30,8 +32,15 @@ class HttpRuntimeClientTest {
         val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://runtime.test/internal/v1/instances"))
             .andExpect(method(HttpMethod.POST))
+            .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
             .andExpect(jsonPath("$.request_id").value("runtime-create-$instanceId"))
-            .andExpect(jsonPath("$.workload.container_port").value(8080))
+            .andExpect(jsonPath("$.isolation_profile").value("WEB"))
+            .andExpect(jsonPath("$.workload.containers[0].name").value("challenge"))
+            .andExpect(jsonPath("$.workload.containers[0].ports[0]").value(8080))
+            .andExpect(jsonPath("$.workload.containers[0].expose").value(true))
+            .andExpect(jsonPath("$.workload.containers[0].run_as_user").value(10001))
+            .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].path").value("/tmp"))
+            .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].size_mib").value(64))
             .andRespond(
                 withStatus(HttpStatus.ACCEPTED)
                     .header("Location", "/internal/v1/operations/op-create-123")
@@ -158,10 +167,19 @@ class HttpRuntimeClientTest {
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
             teamId = testUuid(7),
+            isolationProfile = "WEB",
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             workload = RuntimeWorkload(
-                image = "ghcr.io/example/web:latest",
-                containerPort = 8080,
+                containers = listOf(
+                    RuntimeContainer(
+                        name = "challenge",
+                        image = "ghcr.io/example/web:latest",
+                        ports = listOf(8080),
+                        expose = true,
+                        runAsUser = 10001,
+                        writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
+                    ),
+                ),
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
         )

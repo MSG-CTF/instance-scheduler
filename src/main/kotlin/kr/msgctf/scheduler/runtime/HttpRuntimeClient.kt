@@ -13,12 +13,14 @@ import org.springframework.web.client.RestClientResponseException
 // Runtime 서버를 HTTP로 호출하는 client
 class HttpRuntimeClient(
     private val restClient: RestClient,
+    private val token: String,
 ) : RuntimeClient {
 
     override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult =
         try {
             val response = restClient.post()
                 .uri("/internal/v1/instances")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(request)
                 .retrieve()
@@ -37,6 +39,7 @@ class HttpRuntimeClient(
         try {
             val response = restClient.method(HttpMethod.DELETE)
                 .uri("/internal/v1/instances/{instanceId}", request.instanceId)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(request)
                 .retrieve()
@@ -56,6 +59,7 @@ class HttpRuntimeClient(
     override fun getOperation(operationId: String): RuntimeOperationSnapshot {
         val response = restClient.get()
             .uri("/internal/v1/operations/{operationId}", operationId)
+            .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
             .retrieve()
             .toEntity(RuntimeOperationStatusResponse::class.java)
         val body = checkNotNull(response.body) { "operation response body missing: $operationId" }

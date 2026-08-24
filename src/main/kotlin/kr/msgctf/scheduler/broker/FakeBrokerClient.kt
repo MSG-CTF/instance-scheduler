@@ -8,6 +8,37 @@ class FakeBrokerClient(
     private val mode: FakeBrokerMode = FakeBrokerMode.SUCCESS,
 ) : BrokerClient {
 
+    val committedReservations = mutableListOf<String>()
+    val releasedReservations = mutableListOf<String>()
+
+    override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+        BrokerReservationResponse(
+            reservationId = "reservation-${request.instanceId}",
+            requestId = request.requestId,
+            status = BrokerReservationStatus.HELD,
+            expiresAt = null,
+        )
+
+    override fun commitReservation(reservationId: String): BrokerReservationResponse {
+        committedReservations += reservationId
+        return BrokerReservationResponse(
+            reservationId = reservationId,
+            requestId = reservationId,
+            status = BrokerReservationStatus.COMMITTED,
+            expiresAt = null,
+        )
+    }
+
+    override fun releaseReservation(reservationId: String): BrokerReservationResponse {
+        releasedReservations += reservationId
+        return BrokerReservationResponse(
+            reservationId = reservationId,
+            requestId = reservationId,
+            status = BrokerReservationStatus.RELEASED,
+            expiresAt = null,
+        )
+    }
+
     override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse =
         when (mode) {
             FakeBrokerMode.SUCCESS -> response(
