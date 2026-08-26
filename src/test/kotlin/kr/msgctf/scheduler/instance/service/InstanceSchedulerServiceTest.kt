@@ -363,6 +363,28 @@ class InstanceSchedulerServiceTest {
         assertEquals(1, instanceRepository.savedInstances.size)
     }
 
+    // 만료 시각이 정확히 현재 시각인 경계도 이미 만료로 보고 거절하는지 확인
+    @Test
+    fun `rejects reset when expiry equals now`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply {
+                expiresAt = Instant.parse("2026-07-04T12:00:00Z")
+            },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+    }
+
     // 실행 스펙이 저장되기 전에 만들어진 행은 복사할 값이 없어 초기화를 거절하는지 확인
     @Test
     fun `rejects reset when workload spec is missing`() {

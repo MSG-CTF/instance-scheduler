@@ -2,6 +2,7 @@ package kr.msgctf.scheduler.instance.worker
 
 import java.time.Clock
 import java.util.UUID
+import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
@@ -43,7 +44,12 @@ class InstanceOperationWorker(
         try {
             action(instanceId)
         } catch (exception: Exception) {
-            log.warn("instance operation step failed: instanceId={}", instanceId, exception)
+            log.warn(
+                "instance operation step failed: instanceId={}, detail={}",
+                instanceId,
+                (exception as? SchedulerException)?.adminDetail,
+                exception,
+            )
         }
     }
 

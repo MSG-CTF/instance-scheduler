@@ -12,7 +12,7 @@ private val log = LoggerFactory.getLogger("kr.msgctf.scheduler.broker.BrokerDtos
 
 // 모르는 값 하나 때문에 응답 전체를 못 읽게 되지 않도록 UNKNOWN으로 받는다
 // 원래 값은 UNKNOWN으로 바뀌면서 사라지므로 로그로 남긴다
-private fun <T> unknownEnumValue(type: String, value: String?, fallback: T): T {
+internal fun <T> unknownEnumValue(type: String, value: String?, fallback: T): T {
     log.warn("unknown broker enum value: type={}, value={}", type, value)
     return fallback
 }

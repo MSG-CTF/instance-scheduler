@@ -2,6 +2,7 @@ package kr.msgctf.scheduler.instance.worker
 
 import java.time.Clock
 import java.util.UUID
+import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
@@ -29,7 +30,12 @@ class InstanceCleanupWorker(
                 cleanupService.cleanup(instanceId)
             } catch (exception: Exception) {
                 // 한 건이 실패해도 나머지 대상 처리를 계속하도록 여기서 막는다
-                log.warn("instance cleanup failed: instanceId={}", instanceId, exception)
+                log.warn(
+                    "instance cleanup failed: instanceId={}, detail={}",
+                    instanceId,
+                    (exception as? SchedulerException)?.adminDetail,
+                    exception,
+                )
             }
         }
     }

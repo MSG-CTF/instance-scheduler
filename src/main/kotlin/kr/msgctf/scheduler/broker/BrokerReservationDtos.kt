@@ -5,9 +5,6 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.time.Instant
 import java.util.UUID
-import org.slf4j.LoggerFactory
-
-private val log = LoggerFactory.getLogger("kr.msgctf.scheduler.broker.BrokerReservationDtos")
 
 // Broker에 후보 용량 선점을 요청할 때 보내는 값
 // 같은 키로 다시 보내면 기존 예약이 돌아오므로 워커 재시도에 안전하다
@@ -64,6 +61,6 @@ enum class BrokerReservationStatus {
         @JsonCreator
         fun from(value: String?): BrokerReservationStatus =
             entries.firstOrNull { it.name == value }
-                ?: UNKNOWN.also { log.warn("unknown broker enum value: type=BrokerReservationStatus, value={}", value) }
+                ?: unknownEnumValue("BrokerReservationStatus", value, UNKNOWN)
     }
 }
