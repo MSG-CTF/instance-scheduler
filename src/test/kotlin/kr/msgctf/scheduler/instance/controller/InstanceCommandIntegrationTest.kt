@@ -8,8 +8,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
@@ -82,8 +84,7 @@ class InstanceCommandIntegrationTest {
 
         assertNotNull(saved)
         assertEquals(InstanceStatus.REQUESTED, saved.status)
-        assertEquals("registry.msgctf.local/challenges/web-01:2026.07.01", saved.containerImage)
-        assertEquals(8080, saved.containerPort)
+        assertEquals(testContainersJson(), saved.containers)
         assertEquals(500, saved.cpuMillicores)
         assertEquals(null, saved.provider)
         assertEquals(null, saved.runtimeWorkloadId)
@@ -199,7 +200,7 @@ class InstanceCommandIntegrationTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, old.status)
         assertEquals(InstanceStatus.REQUESTED, fresh.status)
         assertEquals(old.userId, fresh.userId)
-        assertEquals(old.containerImage, fresh.containerImage)
+        assertEquals(old.containers, fresh.containers)
         assertEquals(old.expiresAt, fresh.expiresAt)
         assertEquals(old.hardExpiresAt, fresh.hardExpiresAt)
     }
@@ -241,8 +242,7 @@ class InstanceCommandIntegrationTest {
               "team_id": "${testUuid(1)}",
               "user_id": "${UUID.randomUUID()}",
               "challenge_id": "${testUuid(1)}",
-              "container_image": "",
-              "container_port": 0,
+              "containers": [ { "name": "", "image": "", "ports": [], "expose": true } ],
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": -500,
@@ -251,6 +251,37 @@ class InstanceCommandIntegrationTest {
               },
               "ttl_minutes": 0,
               "hard_timeout_minutes": 0
+            }
+        """.trimIndent()
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // 배열 원소 검증이 빠지면 이름 없는 컨테이너가 워커까지 흘러가므로 여기서 고정한다
+    @Test
+    fun `create api rejects blank container name`() {
+        // given: containers의 name만 잘못되고 나머지는 전부 유효한 body
+        val requestBody = """
+            {
+              "team_id": "${testUuid(1)}",
+              "user_id": "${UUID.randomUUID()}",
+              "challenge_id": "${testUuid(1)}",
+              "containers": [ { "name": " ", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
+              "architecture": "AMD64",
+              "resource_profile": {
+                "cpu_millicores": 500,
+                "memory_mib": 512,
+                "ephemeral_storage_mib": 1024
+              },
+              "ttl_minutes": 120,
+              "hard_timeout_minutes": 180
             }
         """.trimIndent()
 
@@ -592,8 +623,7 @@ class InstanceCommandIntegrationTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainersJson(),
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,
@@ -616,8 +646,7 @@ class InstanceCommandIntegrationTest {
               "team_id": "$teamId",
               "user_id": "$userId",
               "challenge_id": "$challengeId",
-              "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
-              "container_port": 8080,
+              "containers": [ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": 500,

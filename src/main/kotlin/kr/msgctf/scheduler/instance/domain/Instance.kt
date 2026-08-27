@@ -69,11 +69,9 @@ class Instance(
     var serviceUrl: String? = null,
 
     // create 진행이 워커로 미뤄지므로 요청의 실행 스펙을 행에 보관한다
-    @Column(name = "container_image")
-    var containerImage: String? = null,
-
-    @Column(name = "container_port")
-    var containerPort: Int? = null,
+    // ContainerSpec 배열의 JSON 문자열
+    @Column(name = "containers", columnDefinition = "text")
+    var containers: String? = null,
 
     @Enumerated(EnumType.STRING)
     @Column(name = "architecture")

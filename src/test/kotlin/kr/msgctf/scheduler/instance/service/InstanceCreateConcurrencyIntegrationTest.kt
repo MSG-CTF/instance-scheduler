@@ -19,6 +19,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -93,8 +94,7 @@ class InstanceCreateConcurrencyIntegrationTest {
             teamId = teamId,
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainers(),
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,

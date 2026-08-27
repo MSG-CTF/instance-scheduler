@@ -16,6 +16,7 @@ import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.AfterEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -82,8 +83,7 @@ class InstanceOperationFailureIntegrationTest {
             challengeId = testUuid(10),
             status = InstanceStatus.REQUESTED,
             action = InstanceAction.CREATE,
-            containerImage = "ghcr.io/example/web:latest",
-            containerPort = 8080,
+            containers = testContainersJson(),
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,

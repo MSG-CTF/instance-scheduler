@@ -28,6 +28,7 @@ class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
+    private val containerSpecCodec: ContainerSpecCodec,
     private val clock: Clock,
 ) {
 
@@ -62,8 +63,7 @@ class InstanceSchedulerService(
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
-                containerImage = command.containerImage,
-                containerPort = command.containerPort,
+                containers = containerSpecCodec.encode(command.containers),
                 architecture = command.architecture,
                 cpuMillicores = command.resourceProfile.cpuMillicores,
                 memoryMib = command.resourceProfile.memoryMib,
@@ -173,13 +173,12 @@ class InstanceSchedulerService(
         }
 
         // 실행 스펙을 저장하기 전에 만들어진 행은 새 인스턴스에 복사할 값이 없어 초기화할 수 없다
-        val containerImage = previous.containerImage
-        val containerPort = previous.containerPort
+        val containers = previous.containers
         val architecture = previous.architecture
         val cpuMillicores = previous.cpuMillicores
         val memoryMib = previous.memoryMib
         val ephemeralStorageMib = previous.ephemeralStorageMib
-        if (containerImage == null || containerPort == null || architecture == null ||
+        if (containers == null || architecture == null ||
             cpuMillicores == null || memoryMib == null || ephemeralStorageMib == null
         ) {
             throw SchedulerException(
@@ -198,8 +197,7 @@ class InstanceSchedulerService(
                 challengeId = previous.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
-                containerImage = containerImage,
-                containerPort = containerPort,
+                containers = containers,
                 architecture = architecture,
                 cpuMillicores = cpuMillicores,
                 memoryMib = memoryMib,

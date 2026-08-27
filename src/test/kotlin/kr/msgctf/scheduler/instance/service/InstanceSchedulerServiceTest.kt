@@ -24,6 +24,8 @@ import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testContainers
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
@@ -52,8 +54,7 @@ class InstanceSchedulerServiceTest {
         assertNull(result.serviceUrl)
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(InstanceAction.CREATE, saved.action)
-        assertEquals(command.containerImage, saved.containerImage)
-        assertEquals(command.containerPort, saved.containerPort)
+        assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
         assertEquals(command.architecture, saved.architecture)
         assertEquals(command.resourceProfile.cpuMillicores, saved.cpuMillicores)
         assertEquals(command.resourceProfile.memoryMib, saved.memoryMib)
@@ -292,8 +293,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.teamId, fresh.teamId)
         assertEquals(previous.userId, fresh.userId)
         assertEquals(previous.challengeId, fresh.challengeId)
-        assertEquals(previous.containerImage, fresh.containerImage)
-        assertEquals(previous.containerPort, fresh.containerPort)
+        assertEquals(previous.containers, fresh.containers)
         assertEquals(previous.architecture, fresh.architecture)
         assertEquals(previous.cpuMillicores, fresh.cpuMillicores)
         assertEquals(previous.memoryMib, fresh.memoryMib)
@@ -683,6 +683,7 @@ class InstanceSchedulerServiceTest {
             ),
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
+            containerSpecCodec = ContainerSpecCodec(),
             clock = fixedClock(),
         )
 
@@ -696,8 +697,7 @@ class InstanceSchedulerServiceTest {
             teamId = teamId,
             userId = userId,
             challengeId = testUuid(10),
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainers(),
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
@@ -734,8 +734,7 @@ class InstanceSchedulerServiceTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainersJson(),
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,
