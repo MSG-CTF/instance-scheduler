@@ -26,6 +26,6 @@ class RuntimeClientConfig {
             .baseUrl(properties.baseUrl)
             .requestFactory(ClientHttpRequestFactoryBuilder.detect().build(settings))
             .build()
-        return HttpRuntimeClient(restClient)
+        return HttpRuntimeClient(restClient, properties.token)
     }
 }

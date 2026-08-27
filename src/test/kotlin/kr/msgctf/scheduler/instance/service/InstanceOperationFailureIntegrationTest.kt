@@ -8,6 +8,7 @@ import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
@@ -65,7 +66,12 @@ class InstanceOperationFailureIntegrationTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, found.status)
         assertEquals(InstanceAction.CLEANUP, found.action)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, found.deleteReason)
-        assertEquals(1, instanceEventRepository.count())
+        // broker 통과 기록과 접수 실패 기록이 순서대로 남는다
+        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(saved.instanceId)
+        assertEquals(
+            listOf(InstanceEventType.STATE_CHANGED, InstanceEventType.ERROR_RECORDED),
+            events.map { it.eventType },
+        )
     }
 
     private fun newRequested(): Instance {

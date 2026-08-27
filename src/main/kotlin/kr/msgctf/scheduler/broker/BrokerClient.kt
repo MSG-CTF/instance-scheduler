@@ -4,4 +4,10 @@ package kr.msgctf.scheduler.broker
 interface BrokerClient {
 
     fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse
+
+    fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse
+
+    fun commitReservation(reservationId: String): BrokerReservationResponse
+
+    fun releaseReservation(reservationId: String): BrokerReservationResponse
 }

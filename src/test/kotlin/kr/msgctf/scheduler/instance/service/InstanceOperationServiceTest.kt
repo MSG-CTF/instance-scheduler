@@ -13,6 +13,9 @@ import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
 import kr.msgctf.scheduler.broker.BrokerClient
+import kr.msgctf.scheduler.broker.BrokerReservationRequest
+import kr.msgctf.scheduler.broker.BrokerReservationResponse
+import kr.msgctf.scheduler.broker.BrokerReservationStatus
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
@@ -23,12 +26,14 @@ import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
@@ -120,7 +125,7 @@ class InstanceOperationServiceTest {
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
         val instance = repository.save(newRequested())
-        val throwingBroker = object : BrokerClient {
+        val throwingBroker = object : BrokerClient by FakeBrokerClient() {
             override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse =
                 throw IllegalStateException("connection refused")
         }
@@ -141,7 +146,7 @@ class InstanceOperationServiceTest {
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
         val instance = repository.save(newRequested())
-        val throwingBroker = object : BrokerClient {
+        val throwingBroker = object : BrokerClient by FakeBrokerClient() {
             override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse =
                 throw SchedulerException(
                     errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
@@ -180,8 +185,132 @@ class InstanceOperationServiceTest {
         service.progressRequested(instance.instanceId)
 
         // then
-        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, events.saved.single().errorCode)
-        assertEquals("requestId=req-01, status=503, body=unavailable", events.saved.single().adminDetail)
+        val error = events.saved.single { it.eventType == InstanceEventType.ERROR_RECORDED }
+        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, error.errorCode)
+        assertEquals("requestId=req-01, status=503, body=unavailable", error.adminDetail)
+    }
+
+    // broker 단계를 지나면 후보 심사 근거가 전이 이벤트로 남는지 확인
+    @Test
+    fun `records candidate summary event when moving to provisioning`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        val event = events.saved.single { it.eventType == InstanceEventType.STATE_CHANGED }
+        assertEquals(InstanceStatus.SCHEDULING, event.fromStatus)
+        assertEquals(InstanceStatus.PROVISIONING, event.toStatus)
+        assertEquals(true, event.adminDetail?.contains("candidates=["))
+        assertEquals(true, event.adminDetail?.contains("selected="))
+        assertEquals(true, event.adminDetail?.contains("reservation="))
+    }
+
+    // HELD가 아닌 예약 응답은 선점 실패로 보고 재시도로 빠지는지 확인
+    @Test
+    fun `schedules retry when reservation is not held`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val expiredBroker = object : BrokerClient by FakeBrokerClient() {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+                BrokerReservationResponse(
+                    reservationId = "reservation-stale",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.EXPIRED,
+                    expiresAt = null,
+                )
+        }
+        val service = newService(repository, brokerClient = expiredBroker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertNull(instance.reservationId)
+    }
+
+    // RUNNING 도달 시 예약이 확정되고 흔적이 지워지는지 확인
+    @Test
+    fun `commits reservation when instance reaches running`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        val heldReservationId = instance.reservationId
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals("reservation-${instance.instanceId}", heldReservationId)
+        assertNull(instance.reservationId)
+        assertEquals(listOf(heldReservationId), broker.committedReservations)
+    }
+
+    // workload id가 없으면 삭제 접수 없이 바로 정리 완료로 가는지 확인
+    @Test
+    fun `completes cleanup without delete submit when workload id is missing`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val throwingRuntime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult =
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                    adminDetail = "status=400",
+                )
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
+        val service = newService(repository, runtimeClient = throwingRuntime)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+    }
+
+    // 생성 실패로 잡은 예약이 정리 완료 때 반납되는지 확인
+    @Test
+    fun `releases reservation when create failure cleanup completes`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newRequested())
+        val throwingRuntime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult =
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                    adminDetail = "status=503",
+                )
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = throwingRuntime)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        val heldReservationId = instance.reservationId
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals("reservation-${instance.instanceId}", heldReservationId)
+        assertNull(instance.reservationId)
+        assertEquals(listOf(heldReservationId), broker.releasedReservations)
+        assertEquals(emptyList(), broker.committedReservations)
     }
 
     // 재시도 대기 중이던 SCHEDULING이 성공하면 흔적을 지우고 PROVISIONING으로 가는지 확인
@@ -191,7 +320,7 @@ class InstanceOperationServiceTest {
         val repository = TestInstanceRepository()
         val instance = repository.save(newRequested())
         var fail = true
-        val broker = object : BrokerClient {
+        val broker = object : BrokerClient by FakeBrokerClient() {
             private val delegate = FakeBrokerClient()
             override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
                 if (fail) throw IllegalStateException("temporary outage")
@@ -298,7 +427,7 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
         assertNull(instance.runtimeOperationId)
-        assertEquals(1, events.saved.size)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
     // 조회 오류는 상태를 바꾸지 않고 간격을 늘려 다음 조회를 예약하는지 확인
@@ -668,7 +797,7 @@ class InstanceOperationServiceTest {
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
         assertNull(instance.runtimeOperationId)
         assertNull(instance.pollDeadlineAt)
-        assertEquals(1, events.saved.size)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
     // 정리 대기 상태의 삭제 폴링도 시한이 지나면 FAILED로 남는지 확인

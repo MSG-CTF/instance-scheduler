@@ -6,8 +6,12 @@ import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
+import kr.msgctf.scheduler.broker.BrokerCandidateResponse
 import kr.msgctf.scheduler.broker.BrokerClient
+import kr.msgctf.scheduler.broker.BrokerReservationRequest
+import kr.msgctf.scheduler.broker.BrokerReservationStatus
 import kr.msgctf.scheduler.broker.BrokerResourceProfile
+import kr.msgctf.scheduler.broker.ResourceCandidate
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
@@ -22,6 +26,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeClient
+import kr.msgctf.scheduler.runtime.RuntimeContainer
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
@@ -31,6 +36,7 @@ import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
+import kr.msgctf.scheduler.runtime.RuntimeWritablePath
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionOperations
@@ -70,7 +76,7 @@ class InstanceOperationService(
             spec
         } ?: return
 
-        val candidate = try {
+        val (candidate, candidateSummary) = try {
             val response = brokerClient.getCandidates(
                 BrokerCandidateRequest(
                     requestId = "broker-$instanceId",
@@ -81,9 +87,50 @@ class InstanceOperationService(
                     resourceProfile = BrokerResourceProfile.from(spec.resourceProfile, spec.architecture),
                 ),
             )
-            resourceCandidateSelector.select(response, spec.architecture)
+            val selected = resourceCandidateSelector.select(response, spec.architecture)
+            selected to candidateSummary(response, selected)
         } catch (exception: Exception) {
             handleBrokerFailure(instanceId, exception)
+            return
+        }
+
+        log.info(
+            "broker candidate selected: instanceId={}, candidateId={}, provider={}, region={}, target={}",
+            instanceId,
+            candidate.candidateId,
+            candidate.provider,
+            candidate.region,
+            candidate.runtime.targetId,
+        )
+
+        // 선택한 후보의 용량을 runtime 생성 전에 선점한다
+        // 재시도가 같은 후보를 고르면 같은 키로 기존 예약을 돌려받고, 다른 후보면 새 예약을 잡는다
+        val reservation = try {
+            brokerClient.createReservation(
+                BrokerReservationRequest(
+                    idempotencyKey = "reserve-$instanceId-${candidate.candidateId}",
+                    requestId = "resv-$instanceId",
+                    candidateId = candidate.candidateId,
+                    teamId = spec.teamId,
+                    challengeId = spec.challengeId,
+                    instanceId = instanceId,
+                    resourceProfile = BrokerResourceProfile.from(spec.resourceProfile, spec.architecture),
+                ),
+            )
+        } catch (exception: Exception) {
+            handleBrokerFailure(instanceId, exception)
+            return
+        }
+
+        // 만료나 반납된 예약의 재사용을 막는다, HELD가 아니면 선점된 용량이 없다
+        if (reservation.status != BrokerReservationStatus.HELD) {
+            handleBrokerFailure(
+                instanceId,
+                SchedulerException(
+                    errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
+                    adminDetail = "reservationId=${reservation.reservationId}, status=${reservation.status}",
+                ),
+            )
             return
         }
 
@@ -98,8 +145,23 @@ class InstanceOperationService(
             // broker 단계가 끝났으므로 재시도 횟수와 다음 시도 시각을 지운다
             instance.attemptCount = 0
             instance.nextPollAt = null
+            instance.reservationId = reservation.reservationId
+            instanceEventRepository.save(
+                InstanceEvent(
+                    instanceId = instance.instanceId,
+                    eventType = InstanceEventType.STATE_CHANGED,
+                    fromStatus = InstanceStatus.SCHEDULING,
+                    toStatus = InstanceStatus.PROVISIONING,
+                    adminDetail = "$candidateSummary, reservation=${reservation.reservationId}",
+                ),
+            )
             RuntimeTarget(runtimeType = candidate.runtime.type, targetId = candidate.runtime.targetId)
-        } ?: return
+        }
+        // 행이 사라져 저장하지 못한 예약은 고아가 되므로 바로 반납한다
+        if (target == null) {
+            releaseReservationQuietly(reservation.reservationId)
+            return
+        }
 
         val submitted = try {
             runtimeClient.submitCreate(
@@ -107,10 +169,21 @@ class InstanceOperationService(
                     requestId = "runtime-create-$instanceId",
                     instanceId = instanceId,
                     teamId = spec.teamId,
+                    // 문제 유형 정보가 실행 스펙에 아직 없어 웹 기본값으로 보낸다
+                    isolationProfile = "WEB",
                     target = target,
                     workload = RuntimeWorkload(
-                        image = spec.containerImage,
-                        containerPort = spec.containerPort,
+                        containers = listOf(
+                            RuntimeContainer(
+                                name = "challenge",
+                                image = spec.containerImage,
+                                ports = listOf(spec.containerPort),
+                                expose = true,
+                                // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
+                                runAsUser = DEFAULT_RUN_AS_USER,
+                                writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
+                            ),
+                        ),
                         resourceLimits = RuntimeResourceLimits(
                             cpuMillicores = spec.resourceProfile.cpuMillicores,
                             memoryMib = spec.resourceProfile.memoryMib,
@@ -141,11 +214,13 @@ class InstanceOperationService(
     }
 
     fun submitDelete(instanceId: UUID) {
+        var reservationToRelease: String? = null
         val request = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null) return@execute null
             if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
                 parkFailed(instance, "retries=${instance.cleanupRetryCount}")
+                reservationToRelease = takeReservation(instance)
                 return@execute null
             }
             val runtimeType = instance.runtimeType
@@ -153,6 +228,14 @@ class InstanceOperationService(
             // runtime 좌표가 전혀 없으면 만들어진 workload도 없으므로 바로 정리 완료로 본다
             if (runtimeType == null || runtimeTargetId == null) {
                 completeDelete(instance)
+                reservationToRelease = takeReservation(instance)
+                return@execute null
+            }
+            // 삭제 API는 workload id로만 지운다
+            // id가 없다는 건 생성 완료 응답을 받은 적이 없다는 것이라 지울 대상도 없다
+            if (instance.runtimeWorkloadId == null) {
+                completeDelete(instance)
+                reservationToRelease = takeReservation(instance)
                 return@execute null
             }
             if (instance.deleteReason == null) {
@@ -164,11 +247,12 @@ class InstanceOperationService(
                 instanceId = instanceId,
                 teamId = instance.teamId,
                 target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
-                // workloadId가 null이면 runtime이 instance_id로 삭제한다
                 runtimeWorkloadId = instance.runtimeWorkloadId,
                 reason = instance.deleteReason!!,
             )
-        } ?: return
+        }
+        releaseReservationQuietly(reservationToRelease)
+        if (request == null) return
 
         val submitted = try {
             runtimeClient.submitDelete(request)
@@ -179,39 +263,50 @@ class InstanceOperationService(
                 request.requestId,
                 failureDetail(exception),
             )
+            var failedReservation: String? = null
             tx.executeWithoutResult {
                 val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
                 instance.cleanupRetryCount += 1
                 if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
                     parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=${failureDetail(exception)}")
+                    failedReservation = takeReservation(instance)
                 } else {
                     // 실패 횟수에 따라 다음 접수 시도를 늦춘다
                     instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
                 }
             }
+            releaseReservationQuietly(failedReservation)
             return
         }
 
+        var missingReservation: String? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             when (submitted) {
                 is RuntimeSubmitResult.Accepted -> storeAcceptedOperation(instance, submitted)
-                RuntimeSubmitResult.TargetMissing -> completeDelete(instance)
+                RuntimeSubmitResult.TargetMissing -> {
+                    completeDelete(instance)
+                    missingReservation = takeReservation(instance)
+                }
             }
         }
+        releaseReservationQuietly(missingReservation)
     }
 
     fun pollOperation(instanceId: UUID) {
+        var reservationToRelease: String? = null
         val operationId = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             val operationId = instance.runtimeOperationId ?: return@execute null
             val deadline = instance.pollDeadlineAt
             if (deadline != null && !clock.instant().isBefore(deadline)) {
-                giveUpPolling(instance, operationId)
+                reservationToRelease = giveUpPolling(instance, operationId)
                 return@execute null
             }
             operationId
-        } ?: return
+        }
+        releaseReservationQuietly(reservationToRelease)
+        if (operationId == null) return
 
         val snapshot = try {
             runtimeClient.getOperation(operationId)
@@ -260,6 +355,8 @@ class InstanceOperationService(
     }
 
     private fun applySucceeded(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
+        var reservationToCommit: String? = null
+        var reservationToRelease: String? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 조회하는 사이 operation이 바뀌었거나 지워졌으면 낡은 결과라 반영하지 않는다
@@ -272,14 +369,21 @@ class InstanceOperationService(
                     move(instance, InstanceStatus.RUNNING)
                     instance.action = null
                     clearOperation(instance)
+                    reservationToCommit = takeReservation(instance)
                 }
-                InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> completeDelete(instance)
+                InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
+                    completeDelete(instance)
+                    reservationToRelease = takeReservation(instance)
+                }
                 else -> return@executeWithoutResult
             }
         }
+        commitReservationQuietly(reservationToCommit)
+        releaseReservationQuietly(reservationToRelease)
     }
 
     private fun applyFailed(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
+        var reservationToRelease: String? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             if (instance.runtimeOperationId != snapshot.operationId) return@executeWithoutResult
@@ -301,22 +405,32 @@ class InstanceOperationService(
                             "operationId=${snapshot.operationId}, lastErrorCode=${snapshot.lastErrorCode}",
                         )
                     }
+                    reservationToRelease = takeReservation(instance)
                 }
                 else -> return@executeWithoutResult
             }
         }
+        releaseReservationQuietly(reservationToRelease)
     }
 
-    private fun giveUpPolling(instance: Instance, operationId: String) {
+    // 반납할 예약 id를 돌려주고, 호출자가 잠금 밖에서 반납한다
+    private fun giveUpPolling(instance: Instance, operationId: String): String? {
         log.warn("operation poll timed out: instanceId={}, operationId={}", instance.instanceId, operationId)
         val detail = "operationId=$operationId, reason=poll timeout"
-        when (instance.status) {
+        return when (instance.status) {
             InstanceStatus.PROVISIONING -> {
                 parkForCreateCleanup(instance)
                 recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, detail)
+                null
             }
-            InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> parkFailed(instance, detail)
-            else -> clearOperation(instance)
+            InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
+                parkFailed(instance, detail)
+                takeReservation(instance)
+            }
+            else -> {
+                clearOperation(instance)
+                null
+            }
         }
     }
 
@@ -338,11 +452,39 @@ class InstanceOperationService(
         recordError(instance, SchedulerErrorCode.RUNTIME_DELETE_FAILED, detail)
     }
 
+    // 예약은 여기서 반납하지 않는다, 정리 흐름이 끝나는 completeDelete나 parkFailed에서 반납한다
     private fun parkForCreateCleanup(instance: Instance) {
         instance.action = InstanceAction.CLEANUP
         instance.deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
         move(instance, InstanceStatus.CLEANUP_PENDING)
         clearOperation(instance)
+    }
+
+    // 예약 처리는 잠금 밖에서 하도록 tx 안에서는 id 회수만 한다
+    private fun takeReservation(instance: Instance): String? {
+        val reservationId = instance.reservationId
+        instance.reservationId = null
+        return reservationId
+    }
+
+    // 확정 실패는 인스턴스 상태를 바꾸지 않고 기록만 남긴다
+    private fun commitReservationQuietly(reservationId: String?) {
+        if (reservationId == null) return
+        try {
+            brokerClient.commitReservation(reservationId)
+        } catch (exception: Exception) {
+            log.warn("reservation commit failed: reservationId={}, reason={}", reservationId, failureDetail(exception))
+        }
+    }
+
+    // 반납 실패는 만료로 회수되므로 기록만 남긴다
+    private fun releaseReservationQuietly(reservationId: String?) {
+        if (reservationId == null) return
+        try {
+            brokerClient.releaseReservation(reservationId)
+        } catch (exception: Exception) {
+            log.warn("reservation release failed: reservationId={}, reason={}", reservationId, failureDetail(exception))
+        }
     }
 
     private fun storeAcceptedOperation(instance: Instance, accepted: RuntimeSubmitResult.Accepted) {
@@ -387,6 +529,13 @@ class InstanceOperationService(
         }
     }
 
+    // 조회 화면에서 어떤 후보 중 무엇이 왜 뽑혔는지 볼 수 있게 선택 근거를 남긴다
+    private fun candidateSummary(response: BrokerCandidateResponse, selected: ResourceCandidate): String =
+        "candidates=[" + response.candidates.joinToString {
+            "${it.candidateId}(provider=${it.provider}, region=${it.region}" +
+                ", fit=${it.remainingCapacity.fitCount}, risk=${it.risk})"
+        } + "], selected=${selected.candidateId}"
+
     // 기록에는 사용자 안내 문구보다 예외가 담아 온 원인 상세를 우선한다
     private fun failureDetail(exception: Exception): String? =
         (exception as? SchedulerException)?.adminDetail ?: exception.message
@@ -427,6 +576,7 @@ class InstanceOperationService(
     companion object {
         private val DELETE_SUBMIT_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
+        private const val DEFAULT_RUN_AS_USER = 10001L
     }
 }
 
