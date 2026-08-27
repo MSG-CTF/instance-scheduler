@@ -23,6 +23,10 @@ enum class SchedulerErrorCode(
         HttpStatus.UNSUPPORTED_MEDIA_TYPE,
         "지원하지 않는 요청 형식입니다.",
     ),
+    UNAUTHORIZED(
+        HttpStatus.UNAUTHORIZED,
+        "인증이 필요합니다.",
+    ),
     ENDPOINT_NOT_FOUND(
         HttpStatus.NOT_FOUND,
         "요청한 경로를 찾을 수 없습니다.",

@@ -101,6 +101,12 @@
   <div class="sub">생성 요청이 브로커 후보 조회, 런타임 생성을 거쳐 실행되는 과정을 단계와 로그로 보여준다</div>
 
   <div class="card">
+    <h2>인증</h2>
+    <label for="api_token">API 토큰, 서버에 수신 인증이 설정된 경우에만 채운다</label>
+    <input id="api_token" type="password" autocomplete="off">
+  </div>
+
+  <div class="card">
     <h2>생성 요청</h2>
     <form id="create-form" onsubmit="return false">
       <div class="grid">
@@ -228,6 +234,21 @@ function initForm() {
   });
 }
 
+// 토큰은 이 브라우저에만 저장한다, 저장소가 막힌 브라우저는 입력값만 쓴다
+function initToken() {
+  try { el("api_token").value = localStorage.getItem("scheduler_api_token") || ""; } catch (e) { /* 무시 */ }
+  el("api_token").addEventListener("change", () => {
+    try { localStorage.setItem("scheduler_api_token", el("api_token").value.trim()); } catch (e) { /* 무시 */ }
+  });
+}
+
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra);
+  const token = el("api_token").value.trim();
+  if (token) headers["Authorization"] = "Bearer " + token;
+  return headers;
+}
+
 function renderSteps() {
   el("steps").innerHTML = STEPS.map((step, i) => {
     let cls = "step";
@@ -331,7 +352,7 @@ async function createInstance() {
   try {
     response = await fetch("/api/instances", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     });
     envelope = await response.json();
@@ -383,8 +404,8 @@ async function poll() {
   let detailRes, detail, events;
   try {
     const [res, eventsRes] = await Promise.all([
-      fetch("/api/instances/" + state.instanceId),
-      fetch("/api/instances/" + state.instanceId + "/events"),
+      fetch("/api/instances/" + state.instanceId, { headers: authHeaders() }),
+      fetch("/api/instances/" + state.instanceId + "/events", { headers: authHeaders() }),
     ]);
     detailRes = res;
     detail = (await detailRes.json()).data;
@@ -394,7 +415,8 @@ async function poll() {
     return;
   }
   if (!detail) {
-    log("error", "폴링 응답에 data가 없다 HTTP " + detailRes.status);
+    log("error", "폴링 응답에 data가 없다 HTTP " + detailRes.status
+      + (detailRes.status === 401 ? ", API 토큰을 확인한다" : ""));
     return;
   }
 
@@ -411,7 +433,7 @@ async function poll() {
 // 종료 상태를 본 폴링이 그 원인 이벤트보다 먼저 읽었을 수 있어 한 번 더 조회한다
 async function fetchFinalEvents() {
   try {
-    const res = await fetch("/api/instances/" + state.instanceId + "/events");
+    const res = await fetch("/api/instances/" + state.instanceId + "/events", { headers: authHeaders() });
     applyEvents((await res.json()).data || []);
   } catch (e) {
     log("error", "마지막 이벤트 조회 실패: " + e.message);
@@ -492,7 +514,7 @@ async function deleteInstance() {
 
   let response, envelope;
   try {
-    response = await fetch("/api/instances/" + state.instanceId, { method: "DELETE" });
+    response = await fetch("/api/instances/" + state.instanceId, { method: "DELETE", headers: authHeaders() });
     envelope = await response.json();
   } catch (e) {
     log("error", "삭제 요청 실패: " + e.message);
@@ -530,6 +552,7 @@ el("btn-create").addEventListener("click", createInstance);
 el("btn-delete").addEventListener("click", deleteInstance);
 el("btn-reset").addEventListener("click", resetRun);
 initForm();
+initToken();
 renderSteps();
 </script>
 </body>

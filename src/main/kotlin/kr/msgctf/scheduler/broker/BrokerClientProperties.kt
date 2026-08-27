@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.broker
 
 import java.time.Duration
+import kr.msgctf.scheduler.common.config.requireConfigured
 import org.springframework.boot.context.properties.ConfigurationProperties
 
 // Broker 서버 연결 설정값
@@ -11,4 +12,12 @@ data class BrokerClientProperties(
     val token: String,
     val connectTimeout: Duration = Duration.ofSeconds(2),
     val readTimeout: Duration = Duration.ofSeconds(5),
-)
+) {
+    init {
+        requireConfigured("scheduler.broker.base-url", baseUrl)
+        requireConfigured("scheduler.broker.token", token)
+    }
+
+    override fun toString(): String =
+        "BrokerClientProperties(baseUrl=$baseUrl, token=****, connectTimeout=$connectTimeout, readTimeout=$readTimeout)"
+}
