@@ -17,8 +17,8 @@ class CreateInstanceRequestTest {
     fun `accepts multi container request with one exposed`() {
         val request = newRequest(
             listOf(
-                container(name = "web", ports = listOf(8080, 9090), expose = true),
-                container(name = "db", ports = listOf(5432), expose = false),
+                container(name = "web", ports = listOf(8080), expose = true),
+                container(name = "db", ports = listOf(5432, 9090), expose = false),
             ),
         )
 
@@ -79,23 +79,65 @@ class CreateInstanceRequestTest {
     }
 
     // 한 컨테이너 안의 중복 포트가 거절되는지 확인
+    // 공개 컨테이너는 포트 1개 규칙에 먼저 걸리므로 비공개 컨테이너로 확인한다
     @Test
     fun `rejects duplicated ports in one container`() {
-        val request = newRequest(listOf(container(ports = listOf(8080, 8080))))
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = listOf(80), expose = true),
+                container(name = "db", ports = listOf(8080, 8080), expose = false),
+            ),
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // 포트 상한은 비공개 컨테이너로 확인한다, 공개 컨테이너는 포트가 1개로 묶여 있어서다
+    @Test
+    fun `accepts max ports in one container`() {
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = listOf(80), expose = true),
+                container(name = "db", ports = (8080..8087).toList(), expose = false),
+            ),
+        )
+
+        assertEquals(8, request.toCommand().containers.last().ports.size)
+    }
+
+    @Test
+    fun `rejects too many ports in one container`() {
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = listOf(80), expose = true),
+                container(name = "db", ports = (8080..8088).toList(), expose = false),
+            ),
+        )
 
         assertInvalidRequest { request.toCommand() }
     }
 
     @Test
-    fun `accepts max ports in one container`() {
-        val request = newRequest(listOf(container(ports = (8080..8087).toList())))
+    fun `rejects empty ports`() {
+        val request = newRequest(listOf(container(ports = emptyList())))
 
-        assertEquals(8, request.toCommand().containers.single().ports.size)
+        assertInvalidRequest { request.toCommand() }
     }
 
+    // 주소를 하나만 저장하는 지금 구조에서 공개 포트가 여러 개면 나머지 주소가 사라진다
     @Test
-    fun `rejects too many ports in one container`() {
-        val request = newRequest(listOf(container(ports = (8080..8088).toList())))
+    fun `rejects exposed container with multiple ports`() {
+        val request = newRequest(listOf(container(ports = listOf(8080, 9090), expose = true)))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // 문제 이미지는 전부 GHCR로 배포되므로 다른 저장소 주소는 받지 않는다
+    @Test
+    fun `rejects image from another registry`() {
+        val request = newRequest(
+            listOf(container(image = "docker.io/library/nginx@sha256:${"c".repeat(64)}")),
+        )
 
         assertInvalidRequest { request.toCommand() }
     }

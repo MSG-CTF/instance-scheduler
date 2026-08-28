@@ -19,6 +19,7 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -76,7 +77,7 @@ class InstanceOperationService(
                 // 스펙 저장 전에 만들어진 행과 저장값을 못 읽는 행을 이벤트에서 구분한다
                 val detail =
                     if (instance.containers == null) "workload spec missing"
-                    else "stored containers unreadable or incomplete"
+                    else "stored workload spec unreadable or invalid"
                 recordError(instance, SchedulerErrorCode.INTERNAL_ERROR, detail)
             }
             spec
@@ -579,7 +580,7 @@ class InstanceOperationService(
         instance.status = to
     }
 
-    // 행에 저장한 실행 스펙을 다시 읽는다, 값이 빠졌거나 JSON을 못 읽으면 null
+    // 행에 저장한 실행 스펙을 다시 읽는다, 값이 빠졌거나 JSON을 못 읽거나 규칙에 어긋나면 null
     private fun toWorkloadSpec(instance: Instance): WorkloadSpec? {
         val containersJson = instance.containers ?: return null
         val containers = try {
@@ -588,7 +589,11 @@ class InstanceOperationService(
             log.warn("stored containers unreadable: instanceId={}", instance.instanceId, exception)
             return null
         }
-        if (containers.isEmpty()) return null
+        // 규칙에 어긋난 스펙을 그대로 보내면 브로커 예약까지 쓰고 런타임에서야 거절된다
+        ContainerSpecRules.violation(containers)?.let { reason ->
+            log.warn("stored containers invalid: instanceId={}, {}", instance.instanceId, reason)
+            return null
+        }
         return WorkloadSpec(
             teamId = instance.teamId,
             challengeId = instance.challengeId,

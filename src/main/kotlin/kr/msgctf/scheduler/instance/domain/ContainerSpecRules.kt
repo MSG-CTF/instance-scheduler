@@ -21,6 +21,9 @@ object ContainerSpecRules {
     // 태그는 나중에 다른 이미지를 가리킬 수 있어 digest만 받는다
     private val DIGEST_IMAGE = Regex("[^@\\s]+@sha256:[0-9a-f]{64}")
 
+    // 문제 이미지는 전부 GHCR로 배포되므로 다른 저장소 주소는 받지 않는다
+    private const val IMAGE_REGISTRY_PREFIX = "ghcr.io/"
+
     // 위반이 없으면 null, 있으면 원인 설명을 돌려준다
     fun violation(containers: List<ContainerSpec>): String? {
         if (containers.isEmpty()) {
@@ -40,6 +43,12 @@ object ContainerSpecRules {
             if (!DIGEST_IMAGE.matches(container.image)) {
                 return "container=${container.name}, reason=image must be digest pinned"
             }
+            if (!container.image.startsWith(IMAGE_REGISTRY_PREFIX)) {
+                return "container=${container.name}, reason=image must be on $IMAGE_REGISTRY_PREFIX"
+            }
+            if (container.ports.isEmpty()) {
+                return "container=${container.name}, reason=ports is empty"
+            }
             if (container.ports.size > MAX_PORTS_PER_CONTAINER) {
                 return "container=${container.name}, ports=${container.ports.size}, max=$MAX_PORTS_PER_CONTAINER"
             }
@@ -57,6 +66,12 @@ object ContainerSpecRules {
         val exposedCount = containers.count { it.expose }
         if (exposedCount != 1) {
             return "expose=true count=$exposedCount, required=1"
+        }
+        // 공개 포트가 여러 개면 주소를 하나만 저장하는 지금 구조에서 나머지 주소가 사라진다
+        // 주소 목록 저장이 들어오기 전까지 공개 컨테이너의 포트도 하나만 받는다
+        val exposed = containers.first { it.expose }
+        if (exposed.ports.size != 1) {
+            return "container=${exposed.name}, exposed ports=${exposed.ports.size}, required=1"
         }
         return null
     }

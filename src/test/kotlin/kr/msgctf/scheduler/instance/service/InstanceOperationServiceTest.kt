@@ -98,6 +98,28 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.size)
     }
 
+    // V10으로 옮겨진 태그 이미지 같은 규칙 위반 스펙이 브로커, 런타임까지 가지 않는지 확인
+    @Test
+    fun `fails requested instance when stored containers violate rules`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(
+            newRequested().apply {
+                containers = """[{"name":"challenge","image":"ghcr.io/example/web:latest","ports":[8080],"expose":true}]"""
+            },
+        )
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+        assertNull(instance.runtimeOperationId)
+    }
+
     // broker가 후보를 못 주면 간격을 두고 다시 시도하는지 확인
     @Test
     fun `schedules retry when broker gives no candidate`() {
@@ -411,8 +433,8 @@ class InstanceOperationServiceTest {
         // given
         val repository = TestInstanceRepository()
         val multiContainers = listOf(
-            ContainerSpec(name = "web", image = "ghcr.io/example/web@sha256:${"a".repeat(64)}", ports = listOf(8080, 9090), expose = true),
-            ContainerSpec(name = "db", image = "ghcr.io/example/db@sha256:${"b".repeat(64)}", ports = listOf(5432), expose = false),
+            ContainerSpec(name = "web", image = "ghcr.io/example/web@sha256:${"a".repeat(64)}", ports = listOf(8080), expose = true),
+            ContainerSpec(name = "db", image = "ghcr.io/example/db@sha256:${"b".repeat(64)}", ports = listOf(5432, 9090), expose = false),
         )
         val instance = repository.save(
             newRequested().apply { containers = ContainerSpecCodec().encode(multiContainers) },

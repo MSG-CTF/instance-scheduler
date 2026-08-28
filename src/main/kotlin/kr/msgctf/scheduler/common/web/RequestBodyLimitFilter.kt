@@ -6,13 +6,14 @@ import jakarta.servlet.http.HttpServletResponse
 import kr.msgctf.scheduler.common.error.ErrorResponse
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import org.springframework.core.Ordered
+import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.stereotype.Component
 import org.springframework.web.filter.OncePerRequestFilter
 import tools.jackson.databind.ObjectMapper
 
 // 너무 큰 요청은 내용을 읽기 전에 Content-Length 크기만 보고 거절한다
-// Content-Length 없이 잘라 보내는(chunked) 요청은 여기서 못 거른다
+// 길이를 밝히지 않고 잘라 보내는(chunked) 요청은 크기를 알 수 없으므로 통째로 거절한다
 // 필터 응답은 GlobalExceptionHandler를 거치지 않으므로 에러 body를 직접 쓴다
 @Component
 class RequestBodyLimitFilter(
@@ -27,7 +28,8 @@ class RequestBodyLimitFilter(
         response: HttpServletResponse,
         filterChain: FilterChain,
     ) {
-        if (request.contentLengthLong <= MAX_REQUEST_BODY_BYTES) {
+        val chunked = request.getHeader(HttpHeaders.TRANSFER_ENCODING) != null
+        if (!chunked && request.contentLengthLong <= MAX_REQUEST_BODY_BYTES) {
             filterChain.doFilter(request, response)
             return
         }

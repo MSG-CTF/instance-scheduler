@@ -13,5 +13,5 @@ SET containers = json_build_array(
 )::text
 WHERE container_image IS NOT NULL AND container_port IS NOT NULL;
 
-ALTER TABLE challenge_instance DROP COLUMN container_image;
-ALTER TABLE challenge_instance DROP COLUMN container_port;
+-- 옛 컬럼은 앱을 이전 버전으로 되돌릴 수 있게 남겨둔다
+-- 삭제는 배포가 안정된 뒤 별도 마이그레이션으로 한다

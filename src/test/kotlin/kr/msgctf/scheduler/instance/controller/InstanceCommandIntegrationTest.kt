@@ -365,6 +365,20 @@ class InstanceCommandIntegrationTest {
         }
     }
 
+    // 길이를 밝히지 않는 chunked 요청은 크기를 잴 수 없어 통째로 거절된다
+    @Test
+    fun `create api rejects chunked transfer encoding`() {
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            header("Transfer-Encoding", "chunked")
+            content = createRequestBody(teamId = testUuid(935), challengeId = testUuid(10))
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
     // 너무 큰 body는 내용을 읽기 전에 걸러진다
     @Test
     fun `create api rejects oversized request body`() {

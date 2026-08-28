@@ -45,6 +45,9 @@ class ContainersBackfillMigrationTest {
         )
         assertNull(selectContainers(withoutImage))
         assertNull(selectContainers(imageOnly))
+
+        // 옛 컬럼은 앱을 이전 버전으로 되돌릴 수 있게 남아 있어야 한다
+        assertEquals("ghcr.io/example/web:latest", selectColumn(withImage, "container_image"))
     }
 
     // target이 null이면 최신까지 마이그레이션한다
@@ -86,10 +89,12 @@ class ContainersBackfillMigrationTest {
         return instanceId
     }
 
-    private fun selectContainers(instanceId: UUID): String? =
+    private fun selectContainers(instanceId: UUID): String? = selectColumn(instanceId, "containers")
+
+    private fun selectColumn(instanceId: UUID, column: String): String? =
         connection().use { connection ->
             connection.prepareStatement(
-                "SELECT containers FROM challenge_instance WHERE instance_id = ?",
+                "SELECT $column FROM challenge_instance WHERE instance_id = ?",
             ).use { statement ->
                 statement.setObject(1, instanceId)
                 statement.executeQuery().use { resultSet ->
