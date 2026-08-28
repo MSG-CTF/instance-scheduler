@@ -78,6 +78,28 @@ class CreateInstanceRequestTest {
         assertInvalidRequest { request.toCommand() }
     }
 
+    // 한 컨테이너 안의 중복 포트가 거절되는지 확인
+    @Test
+    fun `rejects duplicated ports in one container`() {
+        val request = newRequest(listOf(container(ports = listOf(8080, 8080))))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `accepts max ports in one container`() {
+        val request = newRequest(listOf(container(ports = (8080..8087).toList())))
+
+        assertEquals(8, request.toCommand().containers.single().ports.size)
+    }
+
+    @Test
+    fun `rejects too many ports in one container`() {
+        val request = newRequest(listOf(container(ports = (8080..8088).toList())))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
     @Test
     fun `rejects duplicated container names`() {
         val request = newRequest(
@@ -118,6 +140,7 @@ class CreateInstanceRequestTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             containers = containers,
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfileRequest(
                 cpuMillicores = 500,

@@ -15,6 +15,7 @@ data class CreateInstanceCommand(
     val userId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
+    val registryRevision: Long,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,
     val ttlMinutes: Long,

@@ -140,6 +140,10 @@
 ]</textarea>
         </div>
         <div>
+          <label for="registry_revision">registry_revision</label>
+          <input id="registry_revision" type="number" value="1" min="1" required>
+        </div>
+        <div>
           <label for="architecture">architecture</label>
           <select id="architecture">
             <option>AMD64</option>
@@ -330,6 +334,7 @@ function buildRequestBody() {
     team_id: el("team_id").value.trim(),
     challenge_id: el("challenge_id").value.trim(),
     containers: JSON.parse(el("containers").value),
+    registry_revision: Number(el("registry_revision").value),
     architecture: el("architecture").value,
     resource_profile: {
       cpu_millicores: Number(el("cpu_millicores").value),

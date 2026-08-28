@@ -7,6 +7,7 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -64,6 +65,7 @@ class InstanceSchedulerService(
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
                 containers = containerSpecCodec.encode(command.containers),
+                registryRevision = command.registryRevision,
                 architecture = command.architecture,
                 cpuMillicores = command.resourceProfile.cpuMillicores,
                 memoryMib = command.resourceProfile.memoryMib,
@@ -187,6 +189,24 @@ class InstanceSchedulerService(
             )
         }
 
+        // 잘못된 저장 스펙을 그대로 두면 교체 뒤 워커에서야 실패해 사용자가 인스턴스만 잃는다
+        // 교체 전에 여기서 걸러 기존 인스턴스를 지킨다
+        val storedContainers = try {
+            containerSpecCodec.decode(containers)
+        } catch (exception: Exception) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${command.instanceId}, reason=stored containers unreadable",
+                cause = exception,
+            )
+        }
+        ContainerSpecRules.violation(storedContainers)?.let { reason ->
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${command.instanceId}, reason=stored containers invalid, $reason",
+            )
+        }
+
         val replacedInstanceId = replaceOwnInstance(previous)
 
         // 만료 시각을 그대로 복사해 초기화가 시간 연장 수단이 되지 않게 한다
@@ -198,6 +218,7 @@ class InstanceSchedulerService(
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
                 containers = containers,
+                registryRevision = previous.registryRevision,
                 architecture = architecture,
                 cpuMillicores = cpuMillicores,
                 memoryMib = memoryMib,

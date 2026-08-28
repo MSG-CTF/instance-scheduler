@@ -95,6 +95,7 @@ class InstanceCreateConcurrencyIntegrationTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             containers = testContainers(),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,

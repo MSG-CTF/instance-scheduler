@@ -141,6 +141,7 @@ class InstanceCommandControllerTest {
             containers = listOf(
                 ContainerSpecRequest(name = "challenge", image = TEST_DIGEST_IMAGE, ports = listOf(8080), expose = true),
             ),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfileRequest(
                 cpuMillicores = 500,

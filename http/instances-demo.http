@@ -28,6 +28,7 @@ Content-Type: application/json
   "containers": [
     { "name": "challenge", "image": "ghcr.io/example/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ports": [8080], "expose": true }
   ],
+  "registry_revision": 1,
   "architecture": "AMD64",
   "resource_profile": {
     "cpu_millicores": 500,
@@ -83,6 +84,7 @@ Content-Type: application/json
   "containers": [
     { "name": "challenge", "image": "ghcr.io/example/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ports": [8080], "expose": true }
   ],
+  "registry_revision": 1,
   "architecture": "AMD64",
   "resource_profile": {
     "cpu_millicores": 500,

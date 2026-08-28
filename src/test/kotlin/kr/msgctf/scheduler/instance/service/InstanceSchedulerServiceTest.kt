@@ -55,6 +55,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(InstanceAction.CREATE, saved.action)
         assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
+        assertEquals(command.registryRevision, saved.registryRevision)
         assertEquals(command.architecture, saved.architecture)
         assertEquals(command.resourceProfile.cpuMillicores, saved.cpuMillicores)
         assertEquals(command.resourceProfile.memoryMib, saved.memoryMib)
@@ -294,6 +295,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.userId, fresh.userId)
         assertEquals(previous.challengeId, fresh.challengeId)
         assertEquals(previous.containers, fresh.containers)
+        assertEquals(previous.registryRevision, fresh.registryRevision)
         assertEquals(previous.architecture, fresh.architecture)
         assertEquals(previous.cpuMillicores, fresh.cpuMillicores)
         assertEquals(previous.memoryMib, fresh.memoryMib)
@@ -411,6 +413,50 @@ class InstanceSchedulerServiceTest {
         // then: 옛 인스턴스는 그대로 남아야 한다
         assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
         assertEquals(InstanceStatus.RUNNING, instance.status)
+    }
+
+    // 못 읽는 저장 스펙은 교체 전에 거절되고 기존 인스턴스가 남는지 확인
+    @Test
+    fun `rejects reset when stored containers are unreadable and keeps the instance`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { containers = "not-json" },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 상태가 바뀌지 않고 새 행도 생기면 안 된다
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 태그 이미지가 저장된 행은 초기화가 거절되고 기존 인스턴스가 남는지 확인
+    @Test
+    fun `rejects reset when stored containers violate creation rules`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply {
+                containers = """[{"name":"challenge","image":"ghcr.io/example/web:latest","ports":[8080],"expose":true}]"""
+            },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 상태가 바뀌지 않고 새 행도 생기면 안 된다
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
     }
 
     // 꽉 찬 팀에서도 자기 초기화는 개수가 늘지 않아 허용하는지 확인
@@ -698,6 +744,7 @@ class InstanceSchedulerServiceTest {
             userId = userId,
             challengeId = testUuid(10),
             containers = testContainers(),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
@@ -735,6 +782,7 @@ class InstanceSchedulerServiceTest {
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,

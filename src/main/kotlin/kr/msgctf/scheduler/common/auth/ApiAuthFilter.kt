@@ -8,6 +8,7 @@ import java.net.URISyntaxException
 import java.security.MessageDigest
 import kr.msgctf.scheduler.common.error.ErrorResponse
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import org.springframework.core.Ordered
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.web.filter.OncePerRequestFilter
@@ -18,7 +19,10 @@ import tools.jackson.databind.ObjectMapper
 class ApiAuthFilter(
     private val token: String,
     private val objectMapper: ObjectMapper,
-) : OncePerRequestFilter() {
+) : OncePerRequestFilter(), Ordered {
+
+    // 다른 필터의 400이 인증 실패(401)보다 먼저 나가지 않게 이 필터를 앞 순서로 고정한다
+    override fun getOrder(): Int = Ordered.LOWEST_PRECEDENCE - 1
 
     override fun shouldNotFilter(request: HttpServletRequest): Boolean =
         !decodedPath(request).startsWith(PROTECTED_PREFIX)
