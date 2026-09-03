@@ -24,6 +24,9 @@ import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
+import kr.msgctf.scheduler.testContainers
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
@@ -52,8 +55,8 @@ class InstanceSchedulerServiceTest {
         assertNull(result.serviceUrl)
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(InstanceAction.CREATE, saved.action)
-        assertEquals(command.containerImage, saved.containerImage)
-        assertEquals(command.containerPort, saved.containerPort)
+        assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
+        assertEquals(command.registryRevision, saved.registryRevision)
         assertEquals(command.architecture, saved.architecture)
         assertEquals(command.resourceProfile.cpuMillicores, saved.cpuMillicores)
         assertEquals(command.resourceProfile.memoryMib, saved.memoryMib)
@@ -292,8 +295,8 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.teamId, fresh.teamId)
         assertEquals(previous.userId, fresh.userId)
         assertEquals(previous.challengeId, fresh.challengeId)
-        assertEquals(previous.containerImage, fresh.containerImage)
-        assertEquals(previous.containerPort, fresh.containerPort)
+        assertEquals(previous.containers, fresh.containers)
+        assertEquals(previous.registryRevision, fresh.registryRevision)
         assertEquals(previous.architecture, fresh.architecture)
         assertEquals(previous.cpuMillicores, fresh.cpuMillicores)
         assertEquals(previous.memoryMib, fresh.memoryMib)
@@ -411,6 +414,73 @@ class InstanceSchedulerServiceTest {
         // then: 옛 인스턴스는 그대로 남아야 한다
         assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
         assertEquals(InstanceStatus.RUNNING, instance.status)
+    }
+
+    // 못 읽는 저장 스펙은 교체 전에 거절되고 기존 인스턴스가 남는지 확인
+    @Test
+    fun `rejects reset when stored containers are unreadable and keeps the instance`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { containers = "not-json" },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 상태가 바뀌지 않고 새 행도 생기면 안 된다
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 포트가 빈 저장 스펙도 초기화가 거절되고 기존 인스턴스가 남는지 확인
+    @Test
+    fun `rejects reset when stored containers have empty ports`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply {
+                containers = """[{"name":"challenge","image":"$TEST_DIGEST_IMAGE","ports":[],"expose":true}]"""
+            },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 태그 이미지가 저장된 행은 초기화가 거절되고 기존 인스턴스가 남는지 확인
+    @Test
+    fun `rejects reset when stored containers violate creation rules`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply {
+                containers = """[{"name":"challenge","image":"ghcr.io/example/web:latest","ports":[8080],"expose":true}]"""
+            },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 상태가 바뀌지 않고 새 행도 생기면 안 된다
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
     }
 
     // 꽉 찬 팀에서도 자기 초기화는 개수가 늘지 않아 허용하는지 확인
@@ -683,6 +753,7 @@ class InstanceSchedulerServiceTest {
             ),
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
+            containerSpecCodec = ContainerSpecCodec(),
             clock = fixedClock(),
         )
 
@@ -696,8 +767,8 @@ class InstanceSchedulerServiceTest {
             teamId = teamId,
             userId = userId,
             challengeId = testUuid(10),
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainers(),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
@@ -734,8 +805,8 @@ class InstanceSchedulerServiceTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainersJson(),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,

@@ -8,8 +8,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
@@ -17,6 +19,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -82,8 +85,8 @@ class InstanceCommandIntegrationTest {
 
         assertNotNull(saved)
         assertEquals(InstanceStatus.REQUESTED, saved.status)
-        assertEquals("registry.msgctf.local/challenges/web-01:2026.07.01", saved.containerImage)
-        assertEquals(8080, saved.containerPort)
+        assertEquals(testContainersJson(), saved.containers)
+        assertEquals(3L, saved.registryRevision)
         assertEquals(500, saved.cpuMillicores)
         assertEquals(null, saved.provider)
         assertEquals(null, saved.runtimeWorkloadId)
@@ -199,7 +202,8 @@ class InstanceCommandIntegrationTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, old.status)
         assertEquals(InstanceStatus.REQUESTED, fresh.status)
         assertEquals(old.userId, fresh.userId)
-        assertEquals(old.containerImage, fresh.containerImage)
+        assertEquals(old.containers, fresh.containers)
+        assertEquals(old.registryRevision, fresh.registryRevision)
         assertEquals(old.expiresAt, fresh.expiresAt)
         assertEquals(old.hardExpiresAt, fresh.hardExpiresAt)
     }
@@ -241,8 +245,8 @@ class InstanceCommandIntegrationTest {
               "team_id": "${testUuid(1)}",
               "user_id": "${UUID.randomUUID()}",
               "challenge_id": "${testUuid(1)}",
-              "container_image": "",
-              "container_port": 0,
+              "containers": [ { "name": "", "image": "", "ports": [], "expose": true } ],
+              "registry_revision": 0,
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": -500,
@@ -262,6 +266,155 @@ class InstanceCommandIntegrationTest {
             status { isBadRequest() }
             jsonPath("$.code") { value("INVALID_REQUEST") }
         }
+    }
+
+    // 배열 원소 검증이 빠지면 이름 없는 컨테이너가 워커까지 흘러가므로 여기서 고정한다
+    @Test
+    fun `create api rejects blank container name`() {
+        // given: containers의 name만 잘못되고 나머지는 전부 유효한 body
+        val requestBody = """
+            {
+              "team_id": "${testUuid(1)}",
+              "user_id": "${UUID.randomUUID()}",
+              "challenge_id": "${testUuid(1)}",
+              "containers": [ { "name": " ", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
+              "registry_revision": 3,
+              "architecture": "AMD64",
+              "resource_profile": {
+                "cpu_millicores": 500,
+                "memory_mib": 512,
+                "ephemeral_storage_mib": 1024
+              },
+              "ttl_minutes": 120,
+              "hard_timeout_minutes": 180
+            }
+        """.trimIndent()
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // 백엔드가 보내기로 한 요청 모양을 그대로 고정한다, 노션 명세의 예시 body와 같다
+    @Test
+    fun `create api accepts documented backend contract body`() {
+        // given
+        val webImage =
+            "ghcr.io/msg-ctf/challenges/web-01/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val dbImage =
+            "ghcr.io/msg-ctf/challenges/web-01/db@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        val requestBody = """
+            {
+              "team_id": "${testUuid(910)}",
+              "user_id": "${UUID.randomUUID()}",
+              "challenge_id": "${testUuid(10)}",
+              "containers": [
+                { "name": "web", "image": "$webImage", "ports": [8080], "expose": true },
+                { "name": "db", "image": "$dbImage", "ports": [5432], "expose": false }
+              ],
+              "registry_revision": 7,
+              "architecture": "AMD64",
+              "resource_profile": {
+                "cpu_millicores": 500,
+                "memory_mib": 512,
+                "ephemeral_storage_mib": 1024
+              },
+              "ttl_minutes": 120,
+              "hard_timeout_minutes": 180
+            }
+        """.trimIndent()
+
+        // when
+        val response = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isAccepted() }
+            jsonPath("$.data.status") { value("REQUESTED") }
+        }.andReturn().response.contentAsString
+
+        // then: 두 컨테이너와 revision이 그대로 저장돼야 한다
+        val saved = instanceRepository.findById(readInstanceId(response)).orElseThrow()
+        val decoded = ContainerSpecCodec().decode(saved.containers!!)
+
+        assertEquals(listOf("web", "db"), decoded.map { it.name })
+        assertEquals(listOf(webImage, dbImage), decoded.map { it.image })
+        assertEquals(listOf(true, false), decoded.map { it.expose })
+        assertEquals(7L, saved.registryRevision)
+    }
+
+    // 런타임이 거절하는 중복 포트가 우리 쪽 400으로 걸리는 것을 고정한다
+    @Test
+    fun `create api rejects duplicated container ports`() {
+        // given
+        val requestBody = createRequestBody(teamId = testUuid(920), challengeId = testUuid(10))
+            .replace(""""ports": [8080]""", """"ports": [8080, 8080]""")
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // 길이를 밝히지 않는 chunked 요청은 크기를 잴 수 없어 통째로 거절된다
+    @Test
+    fun `create api rejects chunked transfer encoding`() {
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            header("Transfer-Encoding", "chunked")
+            content = createRequestBody(teamId = testUuid(935), challengeId = testUuid(10))
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // 너무 큰 body는 내용을 읽기 전에 걸러진다
+    @Test
+    fun `create api rejects oversized request body`() {
+        // given: 정상 body 뒤에 공백을 붙여 크기 제한만 넘긴다
+        val requestBody = createRequestBody(teamId = testUuid(930), challengeId = testUuid(10)) +
+            " ".repeat(70_000)
+
+        // when & then
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // 못 읽는 저장 스펙으로 초기화하면 교체 전에 거절되고 기존 인스턴스가 남는 것을 고정한다
+    @Test
+    fun `reset api keeps running instance when stored containers are unreadable`() {
+        // given
+        val previous = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(940)).apply { containers = "not-json" },
+        )
+
+        // when & then
+        mockMvc.post("/api/instances/${previous.instanceId}/reset")
+            .andExpect {
+                status { isInternalServerError() }
+                jsonPath("$.code") { value("INTERNAL_ERROR") }
+            }
+
+        // then: 옛 인스턴스는 그대로 살아 있고 새 행도 없어야 한다
+        val kept = instanceRepository.findById(previous.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.RUNNING, kept.status)
+        assertEquals(1, instanceRepository.count())
     }
 
     // @Positive 검증을 걷어낸 자리라 UUID 해석 실패가 400으로 떨어지는 것을 고정한다
@@ -592,8 +745,8 @@ class InstanceCommandIntegrationTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainersJson(),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,
@@ -616,8 +769,8 @@ class InstanceCommandIntegrationTest {
               "team_id": "$teamId",
               "user_id": "$userId",
               "challenge_id": "$challengeId",
-              "container_image": "registry.msgctf.local/challenges/web-01:2026.07.01",
-              "container_port": 8080,
+              "containers": [ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
+              "registry_revision": 3,
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": 500,

@@ -18,6 +18,8 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
+import kr.msgctf.scheduler.instance.domain.ContainerSpec
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -51,6 +53,7 @@ class InstanceOperationService(
     private val brokerClient: BrokerClient,
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
+    private val containerSpecCodec: ContainerSpecCodec,
     private val cleanupProperties: CleanupProperties,
     private val operationProperties: OperationProperties,
     private val clock: Clock,
@@ -68,10 +71,14 @@ class InstanceOperationService(
                 InstanceStatus.SCHEDULING -> Unit
                 else -> return@execute null
             }
-            val spec = instance.toWorkloadSpec()
+            val spec = toWorkloadSpec(instance)
             if (spec == null) {
                 move(instance, InstanceStatus.FAILED)
-                recordError(instance, SchedulerErrorCode.INTERNAL_ERROR, "workload spec missing")
+                // 스펙 저장 전에 만들어진 행과 저장값을 못 읽는 행을 이벤트에서 구분한다
+                val detail =
+                    if (instance.containers == null) "workload spec missing"
+                    else "stored workload spec unreadable or invalid"
+                recordError(instance, SchedulerErrorCode.INTERNAL_ERROR, detail)
             }
             spec
         } ?: return
@@ -173,17 +180,17 @@ class InstanceOperationService(
                     isolationProfile = "WEB",
                     target = target,
                     workload = RuntimeWorkload(
-                        containers = listOf(
+                        containers = spec.containers.map { container ->
                             RuntimeContainer(
-                                name = "challenge",
-                                image = spec.containerImage,
-                                ports = listOf(spec.containerPort),
-                                expose = true,
+                                name = container.name,
+                                image = container.image,
+                                ports = container.ports,
+                                expose = container.expose,
                                 // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
                                 runAsUser = DEFAULT_RUN_AS_USER,
                                 writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
-                            ),
-                        ),
+                            )
+                        },
                         resourceLimits = RuntimeResourceLimits(
                             cpuMillicores = spec.resourceProfile.cpuMillicores,
                             memoryMib = spec.resourceProfile.memoryMib,
@@ -573,6 +580,33 @@ class InstanceOperationService(
         instance.status = to
     }
 
+    // 행에 저장한 실행 스펙을 다시 읽는다, 값이 빠졌거나 JSON을 못 읽거나 규칙에 어긋나면 null
+    private fun toWorkloadSpec(instance: Instance): WorkloadSpec? {
+        val containersJson = instance.containers ?: return null
+        val containers = try {
+            containerSpecCodec.decode(containersJson)
+        } catch (exception: Exception) {
+            log.warn("stored containers unreadable: instanceId={}", instance.instanceId, exception)
+            return null
+        }
+        // 규칙에 어긋난 스펙을 그대로 보내면 브로커 예약까지 쓰고 런타임에서야 거절된다
+        ContainerSpecRules.violation(containers)?.let { reason ->
+            log.warn("stored containers invalid: instanceId={}, {}", instance.instanceId, reason)
+            return null
+        }
+        return WorkloadSpec(
+            teamId = instance.teamId,
+            challengeId = instance.challengeId,
+            containers = containers,
+            architecture = instance.architecture ?: return null,
+            resourceProfile = ResourceProfile(
+                cpuMillicores = instance.cpuMillicores ?: return null,
+                memoryMib = instance.memoryMib ?: return null,
+                ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
+            ),
+        )
+    }
+
     companion object {
         private val DELETE_SUBMIT_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
@@ -583,23 +617,7 @@ class InstanceOperationService(
 private data class WorkloadSpec(
     val teamId: UUID,
     val challengeId: UUID,
-    val containerImage: String,
-    val containerPort: Int,
+    val containers: List<ContainerSpec>,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,
 )
-
-private fun Instance.toWorkloadSpec(): WorkloadSpec? {
-    return WorkloadSpec(
-        teamId = teamId,
-        challengeId = challengeId,
-        containerImage = containerImage ?: return null,
-        containerPort = containerPort ?: return null,
-        architecture = architecture ?: return null,
-        resourceProfile = ResourceProfile(
-            cpuMillicores = cpuMillicores ?: return null,
-            memoryMib = memoryMib ?: return null,
-            ephemeralStorageMib = ephemeralStorageMib ?: return null,
-        ),
-    )
-}

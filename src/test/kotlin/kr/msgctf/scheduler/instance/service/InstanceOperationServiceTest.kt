@@ -24,6 +24,7 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
+import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
@@ -37,6 +38,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.springframework.transaction.support.TransactionOperations
 
@@ -68,7 +70,7 @@ class InstanceOperationServiceTest {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
-        val instance = repository.save(newRequested().apply { containerImage = null })
+        val instance = repository.save(newRequested().apply { containers = null })
         val service = newService(repository, events = events)
 
         // when
@@ -77,6 +79,45 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.FAILED, instance.status)
         assertEquals(1, events.saved.size)
+    }
+
+    // 저장된 containers JSON이 깨져 있어도 진행하지 않고 FAILED로 보내는지 확인
+    @Test
+    fun `fails requested instance when stored containers are unreadable`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested().apply { containers = "not-json" })
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+    }
+
+    // V10으로 옮겨진 태그 이미지 같은 규칙 위반 스펙이 브로커, 런타임까지 가지 않는지 확인
+    @Test
+    fun `fails requested instance when stored containers violate rules`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(
+            newRequested().apply {
+                containers = """[{"name":"challenge","image":"ghcr.io/example/web:latest","ports":[8080],"expose":true}]"""
+            },
+        )
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+        assertNull(instance.runtimeOperationId)
     }
 
     // broker가 후보를 못 주면 간격을 두고 다시 시도하는지 확인
@@ -384,6 +425,40 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertNull(instance.runtimeOperationId)
         assertNull(instance.nextPollAt)
+    }
+
+    // 저장된 컨테이너 배열이 순서, 포트, 공개 여부 그대로 runtime 요청에 실리는지 확인
+    @Test
+    fun `maps stored containers to runtime create request`() {
+        // given
+        val repository = TestInstanceRepository()
+        val multiContainers = listOf(
+            ContainerSpec(name = "web", image = "ghcr.io/example/web@sha256:${"a".repeat(64)}", ports = listOf(8080), expose = true),
+            ContainerSpec(name = "db", image = "ghcr.io/example/db@sha256:${"b".repeat(64)}", ports = listOf(5432, 9090), expose = false),
+        )
+        val instance = repository.save(
+            newRequested().apply { containers = ContainerSpecCodec().encode(multiContainers) },
+        )
+        var captured: RuntimeCreateRequest? = null
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        val sent = captured!!.workload.containers
+        assertEquals(multiContainers.map { it.name }, sent.map { it.name })
+        assertEquals(multiContainers.map { it.image }, sent.map { it.image })
+        assertEquals(multiContainers.map { it.ports }, sent.map { it.ports })
+        assertEquals(multiContainers.map { it.expose }, sent.map { it.expose })
+        assertEquals(listOf(10001L, 10001L), sent.map { it.runAsUser })
     }
 
     // SUCCEEDED result를 반영해 RUNNING으로 확정하는지 확인
@@ -855,6 +930,7 @@ class InstanceOperationServiceTest {
             brokerClient = brokerClient,
             resourceCandidateSelector = ResourceCandidateSelector(clock),
             runtimeClient = runtimeClient,
+            containerSpecCodec = ContainerSpecCodec(),
             cleanupProperties = cleanupProperties,
             operationProperties = operationProperties,
             clock = clock,
@@ -886,8 +962,7 @@ class InstanceOperationServiceTest {
             challengeId = testUuid(100),
             status = InstanceStatus.REQUESTED,
             action = InstanceAction.CREATE,
-            containerImage = "ghcr.io/example/web:latest",
-            containerPort = 8080,
+            containers = testContainersJson(),
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,

@@ -1,9 +1,8 @@
 package kr.msgctf.scheduler.instance.dto
 
 import jakarta.validation.Valid
-import jakarta.validation.constraints.Max
-import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
+import jakarta.validation.constraints.NotEmpty
 import jakarta.validation.constraints.Positive
 import java.time.Instant
 import java.util.UUID
@@ -12,14 +11,12 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.domain.ContainerSpec
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
-
-// TCP 포트 범위
-private const val MIN_PORT = 1L
-private const val MAX_PORT = 65_535L
 
 // create API 요청 body
 data class CreateInstanceRequest(
@@ -29,12 +26,14 @@ data class CreateInstanceRequest(
 
     val challengeId: UUID,
 
-    @field:NotBlank
-    val containerImage: String,
+    @field:Valid
+    @field:NotEmpty
+    val containers: List<ContainerSpecRequest>,
 
-    @field:Min(MIN_PORT)
-    @field:Max(MAX_PORT)
-    val containerPort: Int,
+    // 백엔드가 Registry에서 고른 문제 배포판 번호(revision)
+    // 스케줄러는 Registry를 직접 조회하지 않고 받은 값을 저장만 한다
+    @field:Positive
+    val registryRevision: Long,
 
     val architecture: Architecture,
 
@@ -49,17 +48,50 @@ data class CreateInstanceRequest(
     val hardTimeoutMinutes: Long,
 ) {
 
-    fun toCommand(): CreateInstanceCommand =
-        CreateInstanceCommand(
+    fun toCommand(): CreateInstanceCommand {
+        val containerSpecs = containers.map { it.toContainerSpec() }
+        // 접수(202) 뒤에 걸리면 400이 아니라 FAILED 상태로만 보이므로 여기서 거른다
+        ContainerSpecRules.violation(containerSpecs)?.let { reject(it) }
+        return CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
             challengeId = challengeId,
-            containerImage = containerImage,
-            containerPort = containerPort,
+            containers = containerSpecs,
+            registryRevision = registryRevision,
             architecture = architecture,
             resourceProfile = resourceProfile.toResourceProfile(),
             ttlMinutes = ttlMinutes,
             hardTimeoutMinutes = hardTimeoutMinutes,
+        )
+    }
+
+    private fun reject(adminDetail: String): Nothing =
+        throw SchedulerException(
+            errorCode = SchedulerErrorCode.INVALID_REQUEST,
+            adminDetail = adminDetail,
+        )
+}
+
+// 컨테이너 한 개의 요청 값
+data class ContainerSpecRequest(
+    @field:NotBlank
+    val name: String,
+
+    @field:NotBlank
+    val image: String,
+
+    @field:NotEmpty
+    val ports: List<Int>,
+
+    val expose: Boolean,
+) {
+
+    fun toContainerSpec(): ContainerSpec =
+        ContainerSpec(
+            name = name,
+            image = image,
+            ports = ports,
+            expose = expose,
         )
 }
 

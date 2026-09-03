@@ -22,10 +22,12 @@
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 14px;
   }
   label { font-size: 12px; color: #6b7280; display: block; margin-bottom: 3px; }
-  input, select {
+  input, select, textarea {
     width: 100%; padding: 7px 9px; font-size: 13px;
     border: 1px solid #d1d5db; border-radius: 6px; background: #fff;
   }
+  .grid .span-all { grid-column: 1 / -1; }
+  textarea { font-family: Consolas, monospace; font-size: 12px; resize: vertical; }
   .uuid-row { display: flex; gap: 6px; }
   .uuid-row input { flex: 1; font-family: Consolas, monospace; font-size: 12px; }
   button {
@@ -131,13 +133,15 @@
             <button type="button" class="small" data-regen="challenge_id">재생성</button>
           </div>
         </div>
-        <div>
-          <label for="container_image">container_image</label>
-          <input id="container_image" value="ghcr.io/example/web:latest" required>
+        <div class="span-all">
+          <label for="containers">containers (JSON 배열, image는 digest 고정, expose true는 1개)</label>
+          <textarea id="containers" rows="4" required>[
+  { "name": "challenge", "image": "ghcr.io/example/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ports": [8080], "expose": true }
+]</textarea>
         </div>
         <div>
-          <label for="container_port">container_port</label>
-          <input id="container_port" type="number" value="8080" min="1" max="65535" required>
+          <label for="registry_revision">registry_revision</label>
+          <input id="registry_revision" type="number" value="1" min="1" required>
         </div>
         <div>
           <label for="architecture">architecture</label>
@@ -329,8 +333,8 @@ function buildRequestBody() {
     user_id: el("user_id").value.trim(),
     team_id: el("team_id").value.trim(),
     challenge_id: el("challenge_id").value.trim(),
-    container_image: el("container_image").value.trim(),
-    container_port: Number(el("container_port").value),
+    containers: JSON.parse(el("containers").value),
+    registry_revision: Number(el("registry_revision").value),
     architecture: el("architecture").value,
     resource_profile: {
       cpu_millicores: Number(el("cpu_millicores").value),
@@ -344,8 +348,14 @@ function buildRequestBody() {
 
 async function createInstance() {
   if (!el("create-form").reportValidity()) return;
+  let body;
+  try {
+    body = buildRequestBody();
+  } catch (e) {
+    log("client", "containers JSON을 읽을 수 없음", String(e));
+    return;
+  }
   el("btn-create").disabled = true;
-  const body = buildRequestBody();
   log("client", "POST /api/instances 생성 요청 전송", JSON.stringify(body, null, 2));
 
   let response, envelope;

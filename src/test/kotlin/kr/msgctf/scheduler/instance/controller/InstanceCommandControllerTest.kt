@@ -13,14 +13,18 @@ import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
+import kr.msgctf.scheduler.instance.dto.ContainerSpecRequest
 import kr.msgctf.scheduler.instance.dto.CreateInstanceRequest
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceRequest
 import kr.msgctf.scheduler.instance.dto.ResourceProfileRequest
+import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
 import kr.msgctf.scheduler.instance.service.InstancePolicyService
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 
 // controller는 서비스 결과를 성공 응답으로 감싸는지만 확인
@@ -125,6 +129,7 @@ class InstanceCommandControllerTest {
             ),
             transitionService = InstanceStateTransitionService(),
             instanceRepository = repository.repository,
+            containerSpecCodec = ContainerSpecCodec(),
             clock = Clock.fixed(Instant.parse("2026-07-04T12:00:00Z"), ZoneOffset.UTC),
         )
 
@@ -133,8 +138,10 @@ class InstanceCommandControllerTest {
             teamId = testUuid(1),
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = listOf(
+                ContainerSpecRequest(name = "challenge", image = TEST_DIGEST_IMAGE, ports = listOf(8080), expose = true),
+            ),
+            registryRevision = 3,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfileRequest(
                 cpuMillicores = 500,
@@ -152,8 +159,7 @@ class InstanceCommandControllerTest {
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
             action = InstanceAction.CREATE,
-            containerImage = "registry.msgctf.local/challenges/web-01:2026.07.01",
-            containerPort = 8080,
+            containers = testContainersJson(),
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,

@@ -7,6 +7,7 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -28,6 +29,7 @@ class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
+    private val containerSpecCodec: ContainerSpecCodec,
     private val clock: Clock,
 ) {
 
@@ -62,8 +64,8 @@ class InstanceSchedulerService(
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
-                containerImage = command.containerImage,
-                containerPort = command.containerPort,
+                containers = containerSpecCodec.encode(command.containers),
+                registryRevision = command.registryRevision,
                 architecture = command.architecture,
                 cpuMillicores = command.resourceProfile.cpuMillicores,
                 memoryMib = command.resourceProfile.memoryMib,
@@ -173,18 +175,35 @@ class InstanceSchedulerService(
         }
 
         // 실행 스펙을 저장하기 전에 만들어진 행은 새 인스턴스에 복사할 값이 없어 초기화할 수 없다
-        val containerImage = previous.containerImage
-        val containerPort = previous.containerPort
+        val containers = previous.containers
         val architecture = previous.architecture
         val cpuMillicores = previous.cpuMillicores
         val memoryMib = previous.memoryMib
         val ephemeralStorageMib = previous.ephemeralStorageMib
-        if (containerImage == null || containerPort == null || architecture == null ||
+        if (containers == null || architecture == null ||
             cpuMillicores == null || memoryMib == null || ephemeralStorageMib == null
         ) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.INTERNAL_ERROR,
                 adminDetail = "instanceId=${command.instanceId}, reason=workload spec missing",
+            )
+        }
+
+        // 잘못된 저장 스펙을 그대로 두면 교체 뒤 워커에서야 실패해 사용자가 인스턴스만 잃는다
+        // 교체 전에 여기서 걸러 기존 인스턴스를 지킨다
+        val storedContainers = try {
+            containerSpecCodec.decode(containers)
+        } catch (exception: Exception) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${command.instanceId}, reason=stored containers unreadable",
+                cause = exception,
+            )
+        }
+        ContainerSpecRules.violation(storedContainers)?.let { reason ->
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${command.instanceId}, reason=stored containers invalid, $reason",
             )
         }
 
@@ -198,8 +217,8 @@ class InstanceSchedulerService(
                 challengeId = previous.challengeId,
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
-                containerImage = containerImage,
-                containerPort = containerPort,
+                containers = containers,
+                registryRevision = previous.registryRevision,
                 architecture = architecture,
                 cpuMillicores = cpuMillicores,
                 memoryMib = memoryMib,

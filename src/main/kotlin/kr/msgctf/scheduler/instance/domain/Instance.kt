@@ -69,11 +69,14 @@ class Instance(
     var serviceUrl: String? = null,
 
     // create 진행이 워커로 미뤄지므로 요청의 실행 스펙을 행에 보관한다
-    @Column(name = "container_image")
-    var containerImage: String? = null,
+    // ContainerSpec 배열의 JSON 문자열
+    @Column(name = "containers", columnDefinition = "text")
+    var containers: String? = null,
 
-    @Column(name = "container_port")
-    var containerPort: Int? = null,
+    // 이 인스턴스를 만들 때 쓴 문제 배포판 번호, Registry가 매기는 revision 값이다
+    // 이 컬럼이 생기기 전 행은 값을 알 수 없어 null로 남는다
+    @Column(name = "registry_revision")
+    var registryRevision: Long? = null,
 
     @Enumerated(EnumType.STRING)
     @Column(name = "architecture")
