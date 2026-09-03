@@ -13,5 +13,6 @@ SET containers = json_build_array(
 )::text
 WHERE container_image IS NOT NULL AND container_port IS NOT NULL;
 
--- 옛 컬럼은 앱을 이전 버전으로 되돌릴 수 있게 남겨둔다
+-- 옛 컬럼은 남겨둔다, 이 마이그레이션 전에 만들어진 행은 앱을 되돌려도 그대로 읽힌다
+-- 새 앱이 만든 행은 옛 컬럼이 비어 있어 되돌린 앱에서는 실행 스펙을 읽지 못한다
 -- 삭제는 배포가 안정된 뒤 별도 마이그레이션으로 한다
