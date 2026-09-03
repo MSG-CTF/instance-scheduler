@@ -37,6 +37,14 @@ class InstanceQueryController(
             data = instanceQueryService.getEvents(instanceId).map(InstanceEventResponse::from),
         )
 
+    // 데모 감시 화면용 최근 인스턴스 목록 조회
+    @GetMapping("/recent")
+    fun getRecentInstances(): ApiResponse<List<InstanceDetailResponse>> =
+        ApiResponse.success(
+            message = "최근 인스턴스 조회 성공",
+            data = instanceQueryService.getRecentInstances().map(InstanceDetailResponse::from),
+        )
+
     // 쿼리 파라미터 이름은 직접 지정해야 한다
     // Jackson의 snake_case 설정은 body에만 적용되고 파라미터 바인딩에는 걸리지 않는다
     @GetMapping("/active")

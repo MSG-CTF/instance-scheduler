@@ -45,6 +45,11 @@ class InstanceQueryService(
             .map(InstanceEventResult::from)
     }
 
+    // 데모 감시 화면용 최근 인스턴스 목록 조회
+    @Transactional(readOnly = true)
+    fun getRecentInstances(): List<InstanceDetailResult> =
+        instanceRepository.findTop20ByOrderByCreatedAtDesc().map(InstanceDetailResult::from)
+
     // active 판정 기준은 상태 머신이 정한 수렴 중 상태를 그대로 따른다
     @Transactional(readOnly = true)
     fun getActiveInstanceByUser(userId: UUID): InstanceResult {
