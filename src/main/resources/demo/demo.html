@@ -72,6 +72,12 @@
   .step .facts div { padding: 1px 0; }
   .step .facts b { color: #9ca3af; font-weight: 400; }
 
+  table.watch { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+  table.watch th, table.watch td { padding: 5px 8px; text-align: left; border-top: 1px solid #e5e7eb; }
+  table.watch th { color: #6b7280; font-weight: 600; border-top: none; }
+  table.watch td { font-family: Consolas, monospace; }
+  table.watch tr.watching td { background: #eff6ff; }
+
   .error-banner {
     display: none; margin-top: 14px; padding: 10px 12px; border-radius: 8px;
     background: #fef2f2; border: 1px solid #fca5a5; font-size: 13px; color: #991b1b;
@@ -106,6 +112,23 @@
     <h2>인증</h2>
     <label for="api_token">API 토큰, 서버에 수신 인증이 설정된 경우에만 채운다</label>
     <input id="api_token" type="password" autocomplete="off">
+  </div>
+
+  <div class="card">
+    <h2>라이브 감시</h2>
+    <div class="sub" style="margin-bottom: 10px">최근 인스턴스를 주기 조회해 밖에서 들어온 생성 요청도 자동으로 진행 단계와 로그에 태운다</div>
+    <div class="actions" style="margin-top: 0">
+      <button type="button" id="btn-watch">감시 중지</button>
+      <span class="status-badge" id="watch-badge">감시 중</span>
+    </div>
+    <table class="watch">
+      <thead>
+        <tr><th>instance</th><th>status</th><th>생성 시각</th><th>service_url</th></tr>
+      </thead>
+      <tbody id="watch-rows">
+        <tr><td colspan="4">인스턴스 없음</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="card">
@@ -206,6 +229,7 @@ const AFTER_RUN_STATUSES = ["RESTARTING", "RESETTING", "STOPPING", "STOPPED", "C
 const TERMINAL_STATUSES = ["FAILED", "STOPPED", "CLEANED", "EXPIRED"];
 const POLL_INTERVAL_MS = 1000;
 const POLL_LIMIT = 300;
+const WATCH_INTERVAL_MS = 2000;
 
 const state = {
   instanceId: null,
@@ -380,6 +404,8 @@ async function createInstance() {
   }
 
   state.instanceId = envelope.data.instance_id;
+  // 직접 만든 인스턴스를 감시가 새 것으로 다시 태우지 않게 미리 기억한다
+  watch.known.add(state.instanceId);
   state.maxRank = 0;
   log("client", "202 접수 instance_id=" + state.instanceId);
   if (envelope.data.replaced_instance_id) {
@@ -539,6 +565,91 @@ async function deleteInstance() {
   startPolling();
 }
 
+const watch = { timer: null, known: new Set(), primed: false, errorLogged: false };
+
+function renderWatchTable(list) {
+  const rows = list.slice(0, 10).map((item) => {
+    const cls = item.instance_id === state.instanceId ? ' class="watching"' : "";
+    const url = item.service_url
+      ? '<a href="' + escapeHtml(item.service_url) + '" target="_blank">' + escapeHtml(item.service_url) + "</a>"
+      : "-";
+    return "<tr" + cls + "><td>" + escapeHtml(item.instance_id.slice(0, 8)) + "</td>"
+      + "<td>" + escapeHtml(item.status) + "</td>"
+      + "<td>" + (item.created_at ? new Date(item.created_at).toLocaleTimeString("en-GB") : "-") + "</td>"
+      + "<td>" + url + "</td></tr>";
+  }).join("");
+  el("watch-rows").innerHTML = rows || '<tr><td colspan="4">인스턴스 없음</td></tr>';
+}
+
+// 감시가 찾은 인스턴스를 진행 단계에 태운다, 로그는 지우지 않고 이어 쓴다
+function adoptInstance(instanceId) {
+  stopPolling();
+  state.instanceId = instanceId;
+  state.lastStatus = null;
+  state.maxRank = 0;
+  state.failStep = null;
+  state.reachedRunning = false;
+  state.seenEventIds.clear();
+  lastFacts = [null, null, null, null];
+  el("error-banner").style.display = "none";
+  el("btn-reset").disabled = false;
+  renderSteps();
+  startPolling();
+}
+
+async function watchPoll() {
+  let res, list;
+  try {
+    res = await fetch("/api/instances/recent", { headers: authHeaders() });
+    list = (await res.json()).data;
+  } catch (e) {
+    // 폴링 주기마다 같은 오류가 쌓이지 않게 복구 전까지 한 번만 남긴다
+    if (!watch.errorLogged) { log("error", "감시 조회 실패: " + e.message); watch.errorLogged = true; }
+    return;
+  }
+  if (!list) {
+    if (!watch.errorLogged) {
+      log("error", "감시 조회 응답에 data가 없다 HTTP " + res.status
+        + (res.status === 401 ? ", API 토큰을 확인한다" : ""));
+      watch.errorLogged = true;
+    }
+    return;
+  }
+  watch.errorLogged = false;
+  renderWatchTable(list);
+
+  // 첫 응답에 이미 있던 인스턴스는 기억만 하고 태우지 않는다
+  if (!watch.primed) {
+    list.forEach((item) => watch.known.add(item.instance_id));
+    watch.primed = true;
+    return;
+  }
+
+  const fresh = list.filter((item) => !watch.known.has(item.instance_id));
+  if (fresh.length === 0) return;
+  fresh.forEach((item) => watch.known.add(item.instance_id));
+  // 목록이 최신순이라 첫 항목이 가장 새 인스턴스다, 나머지는 로그로만 알린다
+  for (const item of fresh.slice(1)) {
+    log("client", "새 인스턴스 감지 instance_id=" + item.instance_id + ", 목록에서만 보인다");
+  }
+  log("client", "새 인스턴스 감지 instance_id=" + fresh[0].instance_id + ", 단계 감시를 시작한다");
+  adoptInstance(fresh[0].instance_id);
+}
+
+function startWatch() {
+  stopWatch();
+  watch.timer = setInterval(watchPoll, WATCH_INTERVAL_MS);
+  el("watch-badge").textContent = "감시 중";
+  el("btn-watch").textContent = "감시 중지";
+  watchPoll();
+}
+
+function stopWatch() {
+  if (watch.timer) { clearInterval(watch.timer); watch.timer = null; }
+  el("watch-badge").textContent = "꺼짐";
+  el("btn-watch").textContent = "감시 시작";
+}
+
 function resetRun() {
   stopPolling();
   state.instanceId = null;
@@ -561,9 +672,11 @@ function resetRun() {
 el("btn-create").addEventListener("click", createInstance);
 el("btn-delete").addEventListener("click", deleteInstance);
 el("btn-reset").addEventListener("click", resetRun);
+el("btn-watch").addEventListener("click", () => { if (watch.timer) stopWatch(); else startWatch(); });
 initForm();
 initToken();
 renderSteps();
+startWatch();
 </script>
 </body>
 </html>

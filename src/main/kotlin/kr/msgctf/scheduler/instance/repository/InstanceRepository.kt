@@ -74,4 +74,7 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
 
     // 조회 시각이 된 폴링 대상을 조회한다
     fun findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(nextPollAt: Instant): List<Instance>
+
+    // 데모 감시 화면이 새 인스턴스를 알아채는 용도라 최근 20개만 조회한다
+    fun findTop20ByOrderByCreatedAtDesc(): List<Instance>
 }
