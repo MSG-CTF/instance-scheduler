@@ -7,6 +7,7 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
 // create 서비스에 넘기는 요청 값
@@ -16,6 +17,7 @@ data class CreateInstanceCommand(
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
     val registryRevision: Long,
+    val isolationProfile: IsolationProfile,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,
     val ttlMinutes: Long,

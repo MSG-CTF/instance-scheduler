@@ -16,6 +16,7 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
@@ -247,6 +248,7 @@ class InstanceCommandIntegrationTest {
               "challenge_id": "${testUuid(1)}",
               "containers": [ { "name": "", "image": "", "ports": [], "expose": true } ],
               "registry_revision": 0,
+              "isolation_profile": "WEB",
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": -500,
@@ -279,6 +281,7 @@ class InstanceCommandIntegrationTest {
               "challenge_id": "${testUuid(1)}",
               "containers": [ { "name": " ", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
               "registry_revision": 3,
+              "isolation_profile": "WEB",
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": 500,
@@ -318,6 +321,7 @@ class InstanceCommandIntegrationTest {
                 { "name": "db", "image": "$dbImage", "ports": [5432], "expose": false }
               ],
               "registry_revision": 7,
+              "isolation_profile": "WEB",
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": 500,
@@ -346,6 +350,64 @@ class InstanceCommandIntegrationTest {
         assertEquals(listOf(webImage, dbImage), decoded.map { it.image })
         assertEquals(listOf(true, false), decoded.map { it.expose })
         assertEquals(7L, saved.registryRevision)
+        assertEquals(IsolationProfile.WEB, saved.isolationProfile)
+    }
+
+    // 보낸 격리 정책이 그대로 저장돼야 한다
+    @Test
+    fun `create api stores requested isolation profile`() {
+        // given
+        val requestBody = createRequestBody(
+            teamId = testUuid(911),
+            challengeId = testUuid(10),
+            isolationProfile = "PWN",
+        )
+
+        // when
+        val response = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect { status { isAccepted() } }.andReturn().response.contentAsString
+
+        // then
+        val saved = instanceRepository.findById(readInstanceId(response)).orElseThrow()
+        assertEquals(IsolationProfile.PWN, saved.isolationProfile)
+    }
+
+    // 런타임이 값을 필수로 받으므로 빠진 요청은 접수 단계에서 막는다
+    @Test
+    fun `create api rejects missing isolation profile`() {
+        val requestBody = createRequestBody(
+            teamId = testUuid(912),
+            challengeId = testUuid(10),
+            isolationProfile = null,
+        )
+
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
+    }
+
+    // 정해진 두 값 밖의 격리 정책은 접수하지 않는다
+    @Test
+    fun `create api rejects unknown isolation profile`() {
+        val requestBody = createRequestBody(
+            teamId = testUuid(913),
+            challengeId = testUuid(10),
+            isolationProfile = "REV",
+        )
+
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
     }
 
     // 런타임이 거절하는 중복 포트가 우리 쪽 400으로 걸리는 것을 고정한다
@@ -744,6 +806,7 @@ class InstanceCommandIntegrationTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
             registryRevision = 3,
@@ -763,14 +826,18 @@ class InstanceCommandIntegrationTest {
         teamId: UUID,
         challengeId: UUID,
         userId: UUID = UUID.randomUUID(),
-    ): String =
-        """
+        // null이면 필드를 아예 빼서 값을 보내지 않는 요청을 만든다
+        isolationProfile: String? = "WEB",
+    ): String {
+        val profileLine = isolationProfile?.let { """"isolation_profile": "$it",""" } ?: ""
+        return """
             {
               "team_id": "$teamId",
               "user_id": "$userId",
               "challenge_id": "$challengeId",
               "containers": [ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
               "registry_revision": 3,
+              $profileLine
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": 500,
@@ -781,6 +848,7 @@ class InstanceCommandIntegrationTest {
               "hard_timeout_minutes": 180
             }
         """.trimIndent()
+    }
 
     // data.instance_id 추출
     private fun readInstanceId(responseBody: String): UUID {

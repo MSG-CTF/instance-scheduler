@@ -18,7 +18,7 @@ data class RuntimeCreateRequest(
 
     // Runtime이 문제 유형에 맞는 격리 정책을 고르는 값
     @JsonProperty("isolation_profile")
-    val isolationProfile: String,
+    val isolationProfile: IsolationProfile,
 
     val target: RuntimeTarget,
     val workload: RuntimeWorkload,
@@ -97,6 +97,12 @@ data class RuntimeDeleteRequest(
     @JsonProperty("delete_reason")
     val reason: RuntimeDeleteReason,
 )
+
+// Runtime이 적용할 격리 정책, 어떤 문제 유형을 어느 값으로 보낼지는 백엔드가 정한다
+enum class IsolationProfile {
+    WEB,
+    PWN,
+}
 
 enum class RuntimeDeleteReason {
     USER_REQUESTED,

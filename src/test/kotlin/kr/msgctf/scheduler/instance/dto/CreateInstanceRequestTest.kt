@@ -8,10 +8,47 @@ import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testUuid
+import tools.jackson.databind.ObjectMapper
+import tools.jackson.databind.PropertyNamingStrategies
+import tools.jackson.databind.exc.MismatchedInputException
+import tools.jackson.databind.json.JsonMapper
+import tools.jackson.module.kotlin.kotlinModule
+import tools.jackson.module.kotlin.readValue
 
-// containers 계약 위반이 접수 전에 400으로 거절되는지 확인
+// containers 계약 위반이 접수 전에 400으로 거절되는지, 요청 값이 그대로 command에 실리는지 확인
 class CreateInstanceRequestTest {
+
+    @Test
+    fun `keeps requested isolation profile`() {
+        val request = newRequest(listOf(container()), isolationProfile = IsolationProfile.PWN)
+
+        assertEquals(IsolationProfile.PWN, request.toCommand().isolationProfile)
+    }
+
+    // 아래 세 건은 요청 body를 읽는 단계를 직접 확인한다
+    // 400 응답까지 확인하는 통합 테스트는 Docker가 있어야 돌아서, 읽기 실패 자체는 여기서 고정한다
+    @Test
+    fun `reads documented request body`() {
+        val request = requestMapper.readValue<CreateInstanceRequest>(requestJson(""""isolation_profile": "PWN","""))
+
+        assertEquals(IsolationProfile.PWN, request.isolationProfile)
+    }
+
+    @Test
+    fun `fails to read request body without isolation profile`() {
+        assertFailsWith<MismatchedInputException> {
+            requestMapper.readValue<CreateInstanceRequest>(requestJson(""))
+        }
+    }
+
+    @Test
+    fun `fails to read request body with unknown isolation profile`() {
+        assertFailsWith<MismatchedInputException> {
+            requestMapper.readValue<CreateInstanceRequest>(requestJson(""""isolation_profile": "REV","""))
+        }
+    }
 
     @Test
     fun `accepts multi container request with one exposed`() {
@@ -176,13 +213,46 @@ class CreateInstanceRequestTest {
     ): ContainerSpecRequest =
         ContainerSpecRequest(name = name, image = image, ports = ports, expose = expose)
 
-    private fun newRequest(containers: List<ContainerSpecRequest>): CreateInstanceRequest =
+    // 앱과 같은 snake_case 규칙으로 읽어야 실제 요청과 같은 조건이 된다
+    private val requestMapper: ObjectMapper = JsonMapper.builder()
+        .addModule(kotlinModule())
+        .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+        .build()
+
+    // 격리 정책 줄만 갈아 끼워 읽기 성공과 실패를 같은 body로 비교한다
+    private fun requestJson(isolationProfileLine: String): String =
+        """
+            {
+              "team_id": "${testUuid(1)}",
+              "user_id": "${testUuid(2)}",
+              "challenge_id": "${testUuid(10)}",
+              "containers": [
+                { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true }
+              ],
+              "registry_revision": 3,
+              $isolationProfileLine
+              "architecture": "AMD64",
+              "resource_profile": {
+                "cpu_millicores": 500,
+                "memory_mib": 512,
+                "ephemeral_storage_mib": 1024
+              },
+              "ttl_minutes": 120,
+              "hard_timeout_minutes": 180
+            }
+        """.trimIndent()
+
+    private fun newRequest(
+        containers: List<ContainerSpecRequest>,
+        isolationProfile: IsolationProfile = IsolationProfile.WEB,
+    ): CreateInstanceRequest =
         CreateInstanceRequest(
             teamId = testUuid(1),
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             containers = containers,
             registryRevision = 3,
+            isolationProfile = isolationProfile,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfileRequest(
                 cpuMillicores = 500,

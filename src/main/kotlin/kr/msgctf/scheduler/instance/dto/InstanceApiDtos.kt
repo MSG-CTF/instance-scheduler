@@ -16,6 +16,7 @@ import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
 // create API 요청 body
@@ -34,6 +35,10 @@ data class CreateInstanceRequest(
     // 스케줄러는 Registry를 직접 조회하지 않고 받은 값을 저장만 한다
     @field:Positive
     val registryRevision: Long,
+
+    // Runtime에 그대로 넘길 격리 정책
+    // 런타임 계약이 값을 필수로 받으므로 여기서 빠지면 접수하지 않는다
+    val isolationProfile: IsolationProfile,
 
     val architecture: Architecture,
 
@@ -58,6 +63,7 @@ data class CreateInstanceRequest(
             challengeId = challengeId,
             containers = containerSpecs,
             registryRevision = registryRevision,
+            isolationProfile = isolationProfile,
             architecture = architecture,
             resourceProfile = resourceProfile.toResourceProfile(),
             ttlMinutes = ttlMinutes,

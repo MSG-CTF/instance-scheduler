@@ -27,6 +27,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeContainer
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
@@ -176,8 +177,7 @@ class InstanceOperationService(
                     requestId = "runtime-create-$instanceId",
                     instanceId = instanceId,
                     teamId = spec.teamId,
-                    // 문제 유형 정보가 실행 스펙에 아직 없어 웹 기본값으로 보낸다
-                    isolationProfile = "WEB",
+                    isolationProfile = spec.isolationProfile,
                     target = target,
                     workload = RuntimeWorkload(
                         containers = spec.containers.map { container ->
@@ -598,6 +598,7 @@ class InstanceOperationService(
             teamId = instance.teamId,
             challengeId = instance.challengeId,
             containers = containers,
+            isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
             resourceProfile = ResourceProfile(
                 cpuMillicores = instance.cpuMillicores ?: return null,
@@ -618,6 +619,7 @@ private data class WorkloadSpec(
     val teamId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
+    val isolationProfile: IsolationProfile,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,
 )

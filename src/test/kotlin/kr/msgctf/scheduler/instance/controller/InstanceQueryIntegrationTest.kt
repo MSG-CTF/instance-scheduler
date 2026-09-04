@@ -10,6 +10,7 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -111,6 +112,7 @@ class InstanceQueryIntegrationTest {
                 userId = UUID.randomUUID(),
                 challengeId = testUuid(10),
                 status = InstanceStatus.FAILED,
+                isolationProfile = IsolationProfile.WEB,
                 expiresAt = Instant.parse("2026-07-04T14:00:00Z"),
                 hardExpiresAt = Instant.parse("2026-07-04T15:00:00Z"),
             ),
@@ -352,6 +354,7 @@ class InstanceQueryIntegrationTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             provider = "SELF_HOSTED",
             accountId = "self-hosted-1",

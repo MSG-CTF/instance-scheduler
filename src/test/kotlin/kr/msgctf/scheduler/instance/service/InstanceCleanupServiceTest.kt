@@ -11,6 +11,7 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testUuid
 
@@ -221,6 +222,7 @@ class InstanceCleanupServiceTest {
             userId = userId,
             challengeId = testUuid(10),
             status = status,
+            isolationProfile = IsolationProfile.WEB,
             action = if (status == InstanceStatus.RUNNING) InstanceAction.CREATE else InstanceAction.CLEANUP,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
@@ -236,6 +238,7 @@ class InstanceCleanupServiceTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             status = status,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
@@ -250,6 +253,7 @@ class InstanceCleanupServiceTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             status = status,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             expiresAt = NOW.minusSeconds(120),
             hardExpiresAt = NOW.minusSeconds(60),

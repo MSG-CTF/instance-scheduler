@@ -8,6 +8,7 @@ import kotlin.test.assertNotNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
@@ -310,6 +311,7 @@ class InstanceRepositoryTest {
             userId = userId,
             challengeId = challengeId,
             status = status,
+            isolationProfile = IsolationProfile.WEB,
             expiresAt = now.plusSeconds(7200),
             hardExpiresAt = now.plusSeconds(10800),
         )
@@ -321,6 +323,7 @@ class InstanceRepositoryTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             runtimeWorkloadId = "workload-$teamId",
             expiresAt = expiresAt,
             hardExpiresAt = expiresAt.plusSeconds(3600),
@@ -336,6 +339,7 @@ class InstanceRepositoryTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.PROVISIONING,
+            isolationProfile = IsolationProfile.WEB,
             expiresAt = hardExpiresAt.plusSeconds(3600),
             hardExpiresAt = hardExpiresAt,
         )
@@ -351,6 +355,7 @@ class InstanceRepositoryTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.CLEANUP_PENDING,
+            isolationProfile = IsolationProfile.WEB,
             runtimeWorkloadId = "workload-$teamId",
             expiresAt = expiresAt,
             hardExpiresAt = expiresAt.plusSeconds(3600),

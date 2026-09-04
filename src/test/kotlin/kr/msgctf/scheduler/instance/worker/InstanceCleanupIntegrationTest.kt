@@ -15,6 +15,7 @@ import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.AfterEach
@@ -96,6 +97,7 @@ class InstanceCleanupIntegrationTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
