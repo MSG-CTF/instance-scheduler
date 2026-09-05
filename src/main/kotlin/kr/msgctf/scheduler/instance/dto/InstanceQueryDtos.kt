@@ -9,6 +9,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 
 // 단건 조회 서비스가 돌려주는 결과 값
 // 운영자가 실행 위치와 수명을 함께 확인할 수 있도록 runtime 정보까지 담는다
@@ -25,6 +26,8 @@ data class InstanceDetailResult(
     val runtimeTargetId: String?,
     val runtimeWorkloadId: String?,
     val serviceUrl: String?,
+    // 공개 접속점 전체, Runtime이 아직 안 보냈거나 생성 전이면 비어 있다
+    val endpoints: List<ServiceEndpoint>,
     val createdAt: Instant?,
     val updatedAt: Instant?,
     val expiresAt: Instant,
@@ -35,7 +38,8 @@ data class InstanceDetailResult(
 
     companion object {
 
-        fun from(instance: Instance): InstanceDetailResult =
+        // endpoints는 저장된 JSON을 푼 값이라 코덱을 가진 호출자가 넘긴다
+        fun from(instance: Instance, endpoints: List<ServiceEndpoint>): InstanceDetailResult =
             InstanceDetailResult(
                 instanceId = instance.instanceId,
                 teamId = instance.teamId,
@@ -49,6 +53,7 @@ data class InstanceDetailResult(
                 runtimeTargetId = instance.runtimeTargetId,
                 runtimeWorkloadId = instance.runtimeWorkloadId,
                 serviceUrl = instance.serviceUrl,
+                endpoints = endpoints,
                 createdAt = instance.createdAt,
                 updatedAt = instance.updatedAt,
                 expiresAt = instance.expiresAt,

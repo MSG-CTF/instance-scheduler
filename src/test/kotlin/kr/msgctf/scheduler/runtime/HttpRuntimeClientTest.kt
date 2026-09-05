@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
@@ -123,6 +124,29 @@ class HttpRuntimeClientTest {
         assertEquals(RuntimeOperationState.SUCCEEDED, snapshot.status)
         assertEquals("aws-k3s-001/ctf-1/challenge", snapshot.result?.runtimeWorkloadId)
         assertEquals("https://challenge.example.com/instances/1", snapshot.result?.serviceUrl)
+        // 계약이 필수라고 적었지만 아직 안 보내는 Runtime도 받아야 한다
+        assertNull(snapshot.result?.endpoints)
+    }
+
+    // 계약 문서의 생성 성공 예시를 그대로 읽는지 확인
+    @Test
+    fun `parses endpoints from documented result`() {
+        server.expect(requestTo("http://runtime.test/internal/v1/operations/op-create-123"))
+            .andExpect(method(HttpMethod.GET))
+            .andRespond(
+                withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"operation_id":"op-create-123","request_id":"runtime-create-018f3f1e","type":"CREATE","status":"SUCCEEDED","attempt":1,"max_attempts":3,"result":{"runtime_workload_id":"aws-k3s-001/ctf-018f3f1e/challenge","service_url":"http://203.0.113.10:31042","endpoints":[{"container_name":"web","port":8080,"protocol":"HTTP","service_url":"http://203.0.113.10:31042"},{"container_name":"shell","port":31337,"protocol":"TCP","service_url":"tcp://203.0.113.10:31043"}]}}"""),
+            )
+
+        val snapshot = client.getOperation("op-create-123")
+
+        assertEquals(
+            listOf(
+                RuntimeEndpoint("web", 8080, EndpointProtocol.HTTP, "http://203.0.113.10:31042"),
+                RuntimeEndpoint("shell", 31337, EndpointProtocol.TCP, "tcp://203.0.113.10:31043"),
+            ),
+            snapshot.result?.endpoints,
+        )
     }
 
     // 진행 중 응답의 Retry-After와 FAILED 응답의 last_error_code가 읽히는지 확인

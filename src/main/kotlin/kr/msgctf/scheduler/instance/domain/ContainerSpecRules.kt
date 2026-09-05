@@ -10,6 +10,10 @@ object ContainerSpecRules {
     // 실제 문제는 컨테이너당 포트가 한두 개다, 상한은 여유 있게 둔다
     const val MAX_PORTS_PER_CONTAINER = 8
 
+    // 공개 포트마다 런타임이 주소를 하나씩 발급하므로 총량을 묶어둔다
+    // 실제 문제는 공개 포트가 한두 개다, 상한은 여유 있게 둔다
+    const val MAX_EXPOSED_PORTS = 8
+
     // TCP 포트 범위
     const val MIN_PORT = 1
     const val MAX_PORT = 65_535
@@ -62,16 +66,14 @@ object ContainerSpecRules {
                 }
             }
         }
-        // service_url이 하나라 공개 컨테이너도 하나만 받는다
-        val exposedCount = containers.count { it.expose }
-        if (exposedCount != 1) {
-            return "expose=true count=$exposedCount, required=1"
+        // 참가자가 접속할 곳이 없으면 문제가 성립하지 않는다
+        val exposed = containers.filter { it.expose }
+        if (exposed.isEmpty()) {
+            return "expose=true count=0, required=at least 1"
         }
-        // 공개 포트가 여러 개면 주소를 하나만 저장하는 지금 구조에서 나머지 주소가 사라진다
-        // 주소 목록 저장이 들어오기 전까지 공개 컨테이너의 포트도 하나만 받는다
-        val exposed = containers.first { it.expose }
-        if (exposed.ports.size != 1) {
-            return "container=${exposed.name}, exposed ports=${exposed.ports.size}, required=1"
+        val exposedPorts = exposed.sumOf { it.ports.size }
+        if (exposedPorts > MAX_EXPOSED_PORTS) {
+            return "exposed ports=$exposedPorts, max=$MAX_EXPOSED_PORTS"
         }
         return null
     }

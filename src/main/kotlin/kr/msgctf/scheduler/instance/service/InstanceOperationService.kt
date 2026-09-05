@@ -25,6 +25,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
@@ -33,6 +34,7 @@ import kr.msgctf.scheduler.runtime.RuntimeContainer
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
+import kr.msgctf.scheduler.runtime.RuntimeEndpoint
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
@@ -55,6 +57,7 @@ class InstanceOperationService(
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
     private val containerSpecCodec: ContainerSpecCodec,
+    private val serviceEndpointCodec: ServiceEndpointCodec,
     private val cleanupProperties: CleanupProperties,
     private val operationProperties: OperationProperties,
     private val clock: Clock,
@@ -372,7 +375,10 @@ class InstanceOperationService(
                 InstanceStatus.PROVISIONING -> {
                     val result = checkNotNull(snapshot.result) { "operation result missing: $instanceId" }
                     instance.runtimeWorkloadId = result.runtimeWorkloadId
-                    instance.serviceUrl = result.serviceUrl
+                    // 계약이 service_url을 첫 번째 공개 접속점으로 정의하므로 빠져 왔으면 그 정의대로 채운다
+                    // 백엔드는 service_url이 채워지는 것으로 생성 완료를 판정해서 비워두면 완료를 못 알아챈다
+                    instance.serviceUrl = result.serviceUrl ?: result.endpoints?.firstOrNull()?.serviceUrl
+                    applyEndpoints(instance, result.endpoints)
                     move(instance, InstanceStatus.RUNNING)
                     instance.action = null
                     clearOperation(instance)
@@ -578,6 +584,42 @@ class InstanceOperationService(
     private fun move(instance: Instance, to: InstanceStatus) {
         transitionService.validateTransition(instance.status, to)
         instance.status = to
+    }
+
+    // Runtime이 endpoints를 안 보내면 비워둔다
+    // service_url 하나로 목록을 지어내면 나머지 주소가 빠진 것을 아무도 알아채지 못한다
+    private fun applyEndpoints(instance: Instance, endpoints: List<RuntimeEndpoint>?) {
+        if (endpoints.isNullOrEmpty()) {
+            instance.endpoints = null
+            // 공개 포트가 하나면 service_url로 충분하지만 여럿이면 주소가 실제로 모자란다
+            if (exposedPortCount(instance) > 1) {
+                log.warn(
+                    "runtime returned no endpoints while instance exposes multiple ports: instanceId={}",
+                    instance.instanceId,
+                )
+            }
+            return
+        }
+        instance.endpoints = serviceEndpointCodec.encode(
+            endpoints.map { endpoint ->
+                ServiceEndpoint(
+                    containerName = endpoint.containerName,
+                    port = endpoint.port,
+                    protocol = endpoint.protocol,
+                    serviceUrl = endpoint.serviceUrl,
+                )
+            },
+        )
+    }
+
+    // 경고를 낼지만 판단한다, 못 읽으면 toWorkloadSpec이 같은 상황을 이미 경고하므로 조용히 넘어간다
+    private fun exposedPortCount(instance: Instance): Int {
+        val containersJson = instance.containers ?: return 0
+        return try {
+            containerSpecCodec.decode(containersJson).filter { it.expose }.sumOf { it.ports.size }
+        } catch (_: Exception) {
+            0
+        }
     }
 
     // 행에 저장한 실행 스펙을 다시 읽는다, 값이 빠졌거나 JSON을 못 읽거나 규칙에 어긋나면 null

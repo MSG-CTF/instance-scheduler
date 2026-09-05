@@ -23,7 +23,47 @@ class FakeRuntimeClientTest {
         val snapshot = client.getOperation(accepted.operationId)
         assertEquals(RuntimeOperationState.SUCCEEDED, snapshot.status)
         assertEquals("workload-$instanceId", snapshot.result?.runtimeWorkloadId)
-        assertEquals("https://team-${testUuid(7)}.local", snapshot.result?.serviceUrl)
+        assertEquals("https://team-${testUuid(7)}.local:8080", snapshot.result?.serviceUrl)
+        assertEquals(
+            listOf(
+                RuntimeEndpoint(
+                    containerName = "challenge",
+                    port = 8080,
+                    protocol = EndpointProtocol.HTTP,
+                    serviceUrl = "https://team-${testUuid(7)}.local:8080",
+                ),
+            ),
+            snapshot.result?.endpoints,
+        )
+    }
+
+    // 공개 포트마다 주소를 하나씩 만드는지 확인, 실 계약이 endpoints[]를 그렇게 채운다
+    @Test
+    fun `returns one endpoint per exposed port`() {
+        val client = FakeRuntimeClient()
+        val instanceId = UUID.randomUUID()
+        val request = createRequest(instanceId, ports = listOf(8080, 9090))
+
+        val accepted = assertIs<RuntimeSubmitResult.Accepted>(client.submitCreate(request))
+
+        val endpoints = client.getOperation(accepted.operationId).result?.endpoints
+        assertEquals(listOf(8080, 9090), endpoints?.map { it.port })
+        // 계약상 service_url은 첫 번째 공개 접속점이다
+        assertEquals(endpoints?.first()?.serviceUrl, client.getOperation(accepted.operationId).result?.serviceUrl)
+    }
+
+    // PWN 문제의 주소는 TCP로 표시되는지 확인
+    @Test
+    fun `marks pwn endpoints as tcp`() {
+        val client = FakeRuntimeClient()
+        val request = createRequest(UUID.randomUUID(), isolationProfile = IsolationProfile.PWN)
+
+        val accepted = assertIs<RuntimeSubmitResult.Accepted>(client.submitCreate(request))
+
+        assertEquals(
+            listOf(EndpointProtocol.TCP),
+            client.getOperation(accepted.operationId).result?.endpoints?.map { it.protocol },
+        )
     }
 
     // OPERATION_FAIL 모드가 FAILED와 last_error_code를 돌려주는지 확인
@@ -64,19 +104,23 @@ class FakeRuntimeClientTest {
         assertFailsWith<SchedulerException> { client.getOperation("op-unknown") }
     }
 
-    private fun createRequest(instanceId: UUID): RuntimeCreateRequest =
+    private fun createRequest(
+        instanceId: UUID,
+        ports: List<Int> = listOf(8080),
+        isolationProfile: IsolationProfile = IsolationProfile.WEB,
+    ): RuntimeCreateRequest =
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
             teamId = testUuid(7),
-            isolationProfile = IsolationProfile.WEB,
+            isolationProfile = isolationProfile,
             target = RuntimeTarget(RuntimeType.KUBERNETES, "cluster-main"),
             workload = RuntimeWorkload(
                 containers = listOf(
                     RuntimeContainer(
                         name = "challenge",
                         image = "registry.msgctf.local/challenges/web-01:2026.07.01",
-                        ports = listOf(8080),
+                        ports = ports,
                         expose = true,
                         runAsUser = 10001,
                     ),

@@ -69,6 +69,11 @@ class Instance(
     @Column(name = "service_url")
     var serviceUrl: String? = null,
 
+    // Runtime이 발급한 공개 접속점 목록, ServiceEndpoint 배열의 JSON 문자열
+    // Runtime이 계약대로 안 보내면 null로 남고 조회는 service_url 하나만 내보낸다
+    @Column(name = "endpoints", columnDefinition = "text")
+    var endpoints: String? = null,
+
     // create 진행이 워커로 미뤄지므로 요청의 실행 스펙을 행에 보관한다
     // ContainerSpec 배열의 JSON 문자열
     @Column(name = "containers", columnDefinition = "text")

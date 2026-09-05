@@ -147,10 +147,35 @@ data class RuntimeOperationResult(
     @JsonProperty("runtime_workload_id")
     val runtimeWorkloadId: String,
 
+    // 공개 접속점 중 첫 번째, 계약이 하위 호환용으로 남겨둔 값이다
     // DELETE operation에는 없다
     @JsonProperty("service_url")
     val serviceUrl: String?,
+
+    // 공개 포트마다 하나씩 온다, DELETE operation에는 없다
+    // 계약상 CREATE 성공에는 필수지만 런타임이 아직 안 보낼 수 있어 없는 경우를 받는다
+    val endpoints: List<RuntimeEndpoint>?,
 )
+
+// 참가자가 접속할 주소 하나
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeEndpoint(
+    @JsonProperty("container_name")
+    val containerName: String,
+
+    val port: Int,
+
+    val protocol: EndpointProtocol,
+
+    @JsonProperty("service_url")
+    val serviceUrl: String,
+)
+
+// 공개 주소로 주고받는 통신 규약, WEB 문제는 HTTP고 PWN 문제는 TCP다
+enum class EndpointProtocol {
+    HTTP,
+    TCP,
+}
 
 // 접수 202 응답 body
 @JsonIgnoreProperties(ignoreUnknown = true)

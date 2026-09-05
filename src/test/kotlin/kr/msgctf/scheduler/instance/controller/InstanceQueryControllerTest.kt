@@ -14,6 +14,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.service.InstanceQueryService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
+import kr.msgctf.scheduler.instance.service.ServiceEndpointCodec
 import kr.msgctf.scheduler.instance.service.TestInstanceEventRepository
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
 import kr.msgctf.scheduler.testUuid
@@ -102,6 +103,7 @@ class InstanceQueryControllerTest {
             instanceRepository = repository.repository,
             instanceEventRepository = eventRepository.repository,
             transitionService = InstanceStateTransitionService(),
+            serviceEndpointCodec = ServiceEndpointCodec(),
         )
 
     private fun newRunningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =
