@@ -18,4 +18,12 @@ data class OperationProperties(
     val backoffMax: Duration = Duration.ofSeconds(30),
     // broker 후보 조회를 이 횟수만큼 실패하면 FAILED로 확정한다
     val brokerRetryLimit: Int = 3,
+    // PROVISIONING인데 operation을 접수하지 못한 행을 다시 접수하기까지 기다리는 시간
+    // 런타임 호출이 연결 2초와 읽기 5초로 최대 7초라 정상 접수 중인 행이 걸리지 않을 만큼 둔다
+    val resubmitDelay: Duration = Duration.ofSeconds(30),
+    // 재접수를 이 횟수까지 시도하고 넘어가면 정리 대기로 보낸다, 이 횟수째 시도는 수행한다
+    // 접수 호출이 실패하면 그 자리에서 정리 대기로 가므로, 이 값을 다 쓰는 것은
+    // 접수 뒤 결과를 저장하기 전에 끊기는 일이 거듭될 때다
+    // brokerRetryLimit은 "이 횟수째에 포기"라 같은 숫자라도 시도 횟수가 하나 다르다
+    val resubmitRetryLimit: Int = 5,
 )

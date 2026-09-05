@@ -48,6 +48,9 @@ class InstanceOperationServiceTest {
 
     private val clock = Clock.fixed(Instant.parse("2026-08-12T00:00:00Z"), ZoneOffset.UTC)
 
+    // broker 가짜가 돌려주는 cluster-main과 달라야 저장된 target을 썼는지 가려진다
+    private val STALLED_TARGET_ID = "cluster-stale"
+
     // REQUESTED가 broker 선택과 접수를 거쳐 PROVISIONING까지 가는지 확인
     @Test
     fun `progresses requested instance to provisioning with operation id`() {
@@ -426,8 +429,270 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertNull(instance.runtimeOperationId)
-        assertNull(instance.nextPollAt)
+        // 폴링 단계에 들어가지 않았다는 증거로 쓴다, storeAcceptedOperation만 이 값을 채운다
+        // nextPollAt은 PROVISIONING에서 재접수 예정 시각으로도 쓰여 이 판정에 못 쓴다
+        assertNull(instance.pollDeadlineAt)
     }
+
+    // PROVISIONING 전이 때 재접수 예정 시각을 남겨야 접수 도중 끊긴 행을 워커가 찾을 수 있다
+    // 접수가 끝나면 폴링 시각으로 덮이므로 접수 호출 시점의 값을 본다
+    @Test
+    fun `marks resubmit deadline when entering provisioning`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var deadlineAtSubmit: Instant? = null
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                deadlineAtSubmit = instance.nextPollAt
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(30), deadlineAtSubmit)
+    }
+
+    // 접수 도중 끊겨 operation이 없는 PROVISIONING 행을 다시 접수하는지 확인
+    @Test
+    fun `resubmits create for stalled provisioning instance`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newStalledProvisioning())
+        val service = newService(repository)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNotNull(instance.runtimeOperationId)
+        assertNotNull(instance.pollDeadlineAt)
+    }
+
+    // 재접수는 저장된 target을 그대로 쓴다
+    // 후보를 다시 고르면 런타임이 기억하는 target과 어긋나므로 broker를 부르면 안 된다
+    @Test
+    fun `does not call broker on resubmit`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newStalledProvisioning())
+        var brokerCalls = 0
+        val brokerClient = object : BrokerClient by FakeBrokerClient() {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                brokerCalls += 1
+                return FakeBrokerClient().getCandidates(request)
+            }
+        }
+        var captured: RuntimeCreateRequest? = null
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = brokerClient, runtimeClient = runtimeClient)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(0, brokerCalls)
+        assertEquals(STALLED_TARGET_ID, captured!!.target.targetId)
+        // 같은 request_id라야 런타임이 workload를 새로 만들지 않고 기존 operation을 돌려준다
+        assertEquals("runtime-create-${instance.instanceId}", captured!!.requestId)
+    }
+
+    // 한도가 5면 5회째 시도는 수행한다, 경계 반대편을 함께 고정한다
+    @Test
+    fun `still resubmits on the last allowed attempt`() {
+        // given
+        val repository = TestInstanceRepository()
+        // 다음 시도에서 attemptCount가 5가 되어 한도와 같아진다
+        val instance = repository.save(newStalledProvisioning().apply { attemptCount = 4 })
+        val service = newService(repository)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNotNull(instance.runtimeOperationId)
+    }
+
+    // 재접수가 한도를 넘으면 런타임을 부르지 않고 정리 대기로 보내는지 확인
+    @Test
+    fun `parks instance when resubmit limit reached`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        // 한도가 5라 다음 시도에서 6이 되어 넘어간다
+        val instance = repository.save(newStalledProvisioning().apply { attemptCount = 5 })
+        var submitCalls = 0
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                submitCalls += 1
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(InstanceAction.CLEANUP, instance.action)
+        assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
+        assertEquals(0, submitCalls)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 접수 호출 중에는 워커가 같은 행을 다시 집으면 안 된다
+    // 호출 전에 다음 시각을 밀어두는지 접수 시점 값으로 확인한다
+    @Test
+    fun `holds the row while the submit call is in flight`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newStalledProvisioning())
+        var pollAtSubmit: Instant? = null
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                pollAtSubmit = instance.nextPollAt
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plus(OperationProperties().resubmitDelay), pollAtSubmit)
+    }
+
+    // 응답을 못 받은 접수는 접수가 런타임에 닿았을 수 있어 다시 시도한다
+    // 고아 workload가 생기는 가장 흔한 경로가 읽기 시간 초과다
+    @Test
+    fun `retries when the submit call gets no answer`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStalledProvisioning())
+        val service = newService(repository, runtimeClient = unansweredRuntimeClient(), events = events)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then: 파킹하지 않고 간격을 두고 다시 시도할 준비를 한다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(clock.instant().plus(OperationProperties().backoffBase), instance.nextPollAt)
+        assertEquals(0, events.saved.size)
+    }
+
+    // 런타임이 오류 응답을 준 경우는 만들어진 workload가 없으므로 바로 접는다
+    @Test
+    fun `parks when the runtime answers with an error`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStalledProvisioning())
+        val service = newService(
+            repository,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+        )
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 응답을 못 받는 일이 거듭되면 한도에서 접는다
+    @Test
+    fun `parks when unanswered submits reach the limit`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newStalledProvisioning().apply { attemptCount = OperationProperties().resubmitRetryLimit - 1 },
+        )
+        val service = newService(repository, runtimeClient = unansweredRuntimeClient())
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+    }
+
+    // 응답을 돌려주지 않는 client, 읽기 시간 초과와 연결 실패를 흉내낸다
+    // HttpRuntimeClient는 런타임이 준 오류 응답만 SchedulerException으로 바꾸므로 그 밖의 예외를 쓴다
+    private fun unansweredRuntimeClient(): RuntimeClient {
+        val delegate = FakeRuntimeClient()
+        return object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult =
+                throw IllegalStateException("read timed out")
+        }
+    }
+
+    // PROVISIONING까지 갔으면 스펙을 읽은 적이 있다, 그런데도 못 읽으면 재시도해도 마찬가지다
+    // 한도까지 헛돌지 않고 바로 정리로 보내는지 확인
+    @Test
+    fun `parks instance when stored spec is gone at resubmit`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStalledProvisioning().apply { containers = null })
+        val service = newService(repository, events = events)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, events.saved.size)
+    }
+
+    // 기다리는 사이 접수가 끝났으면 손대지 않는다
+    @Test
+    fun `skips resubmit when operation already stored`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newStalledProvisioning().apply { runtimeOperationId = "op-create-existing" },
+        )
+        val service = newService(repository)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals("op-create-existing", instance.runtimeOperationId)
+        assertEquals(0, instance.attemptCount)
+    }
+
+    // 접수 응답을 저장하지 못한 채 끊긴 행, PROVISIONING인데 operation이 없다
+    // target을 broker 가짜가 돌려주는 cluster-main과 다르게 둬야
+    // 저장된 값을 쓴 것과 후보를 새로 받아 쓴 것이 구분된다
+    private fun newStalledProvisioning(): Instance =
+        newRequested().apply {
+            status = InstanceStatus.PROVISIONING
+            runtimeType = RuntimeType.KUBERNETES
+            runtimeTargetId = STALLED_TARGET_ID
+            nextPollAt = clock.instant()
+        }
 
     // 저장된 컨테이너 배열이 순서, 포트, 공개 여부 그대로 runtime 요청에 실리는지 확인
     @Test

@@ -6,6 +6,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.common.error.SchedulerErrorCode
+import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
@@ -104,8 +106,13 @@ class InstanceOperationFailureIntegrationTest {
     }
 
     private class ThrowingRuntimeClient : RuntimeClient {
+        // 런타임이 오류 응답을 준 경우를 흉내낸다, HttpRuntimeClient가 그때만 이 예외로 바꾼다
+        // 응답 자체를 못 받은 경우는 접수가 닿았을 수 있어 재접수 대상이라 파킹되지 않는다
         override fun submitCreate(request: RuntimeCreateRequest) =
-            throw IllegalStateException("connect timed out")
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                adminDetail = "status=400, code=INVALID_CREATE_COMMAND",
+            )
 
         override fun submitDelete(request: RuntimeDeleteRequest) =
             throw UnsupportedOperationException("not used")
