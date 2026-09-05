@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -109,6 +110,7 @@ class InstanceQueryControllerTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             provider = "SELF_HOSTED",
             accountId = "self-hosted-1",

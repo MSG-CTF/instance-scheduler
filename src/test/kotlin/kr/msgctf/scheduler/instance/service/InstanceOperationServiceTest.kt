@@ -31,6 +31,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
@@ -459,6 +460,31 @@ class InstanceOperationServiceTest {
         assertEquals(multiContainers.map { it.ports }, sent.map { it.ports })
         assertEquals(multiContainers.map { it.expose }, sent.map { it.expose })
         assertEquals(listOf(10001L, 10001L), sent.map { it.runAsUser })
+    }
+
+    // 저장된 격리 정책이 runtime 요청에 그대로 실리는지 확인
+    @Test
+    fun `sends stored isolation profile to runtime`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newRequested().apply { isolationProfile = IsolationProfile.PWN },
+        )
+        var captured: RuntimeCreateRequest? = null
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(IsolationProfile.PWN, captured!!.isolationProfile)
     }
 
     // SUCCEEDED result를 반영해 RUNNING으로 확정하는지 확인
@@ -961,6 +987,7 @@ class InstanceOperationServiceTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(100),
             status = InstanceStatus.REQUESTED,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
             architecture = Architecture.AMD64,

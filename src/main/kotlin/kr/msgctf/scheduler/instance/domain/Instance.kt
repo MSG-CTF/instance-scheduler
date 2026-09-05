@@ -11,6 +11,7 @@ import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import org.springframework.data.annotation.CreatedDate
 import org.springframework.data.annotation.LastModifiedDate
@@ -77,6 +78,11 @@ class Instance(
     // 이 컬럼이 생기기 전 행은 값을 알 수 없어 null로 남는다
     @Column(name = "registry_revision")
     var registryRevision: Long? = null,
+
+    // Runtime에 그대로 넘길 격리 정책, 생성 요청이 반드시 값을 보낸다
+    @Enumerated(EnumType.STRING)
+    @Column(name = "isolation_profile", nullable = false)
+    var isolationProfile: IsolationProfile,
 
     @Enumerated(EnumType.STRING)
     @Column(name = "architecture")

@@ -19,6 +19,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
@@ -96,6 +97,7 @@ class InstanceCreateConcurrencyIntegrationTest {
             challengeId = testUuid(10),
             containers = testContainers(),
             registryRevision = 3,
+            isolationProfile = IsolationProfile.WEB,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
@@ -113,6 +115,7 @@ class InstanceCreateConcurrencyIntegrationTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",

@@ -7,6 +7,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
@@ -69,25 +70,25 @@ class InstanceCleanupWorkerTest {
 
     private fun running(expiresAt: Instant, hardExpiresAt: Instant): Instance =
         Instance(
-            teamId = testUuid(701), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.RUNNING,
+            teamId = testUuid(701), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.RUNNING, isolationProfile = IsolationProfile.WEB,
             runtimeWorkloadId = "workload-1", expiresAt = expiresAt, hardExpiresAt = hardExpiresAt,
         )
 
     private fun provisioning(hardExpiresAt: Instant): Instance =
         Instance(
-            teamId = testUuid(702), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.PROVISIONING,
+            teamId = testUuid(702), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.PROVISIONING, isolationProfile = IsolationProfile.WEB,
             expiresAt = hardExpiresAt.plusSeconds(3600), hardExpiresAt = hardExpiresAt,
         )
 
     private fun expired(): Instance =
         Instance(
-            teamId = testUuid(703), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.EXPIRED,
+            teamId = testUuid(703), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.EXPIRED, isolationProfile = IsolationProfile.WEB,
             runtimeWorkloadId = "workload-703", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
         )
 
     private fun cleanupPending(): Instance =
         Instance(
-            teamId = testUuid(704), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.CLEANUP_PENDING,
+            teamId = testUuid(704), userId = UUID.randomUUID(), challengeId = testUuid(10), status = InstanceStatus.CLEANUP_PENDING, isolationProfile = IsolationProfile.WEB,
             runtimeWorkloadId = "workload-704", expiresAt = NOW.minusSeconds(60), hardExpiresAt = NOW.plusSeconds(3600),
         )
 

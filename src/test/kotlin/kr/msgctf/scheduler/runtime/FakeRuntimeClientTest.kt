@@ -69,7 +69,7 @@ class FakeRuntimeClientTest {
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
             teamId = testUuid(7),
-            isolationProfile = "WEB",
+            isolationProfile = IsolationProfile.WEB,
             target = RuntimeTarget(RuntimeType.KUBERNETES, "cluster-main"),
             workload = RuntimeWorkload(
                 containers = listOf(

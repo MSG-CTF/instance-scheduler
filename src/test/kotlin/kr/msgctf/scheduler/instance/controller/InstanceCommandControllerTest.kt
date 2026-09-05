@@ -23,6 +23,7 @@ import kr.msgctf.scheduler.instance.service.InstancePolicyService
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
@@ -142,6 +143,7 @@ class InstanceCommandControllerTest {
                 ContainerSpecRequest(name = "challenge", image = TEST_DIGEST_IMAGE, ports = listOf(8080), expose = true),
             ),
             registryRevision = 3,
+            isolationProfile = IsolationProfile.WEB,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfileRequest(
                 cpuMillicores = 500,
@@ -158,6 +160,7 @@ class InstanceCommandControllerTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
             architecture = Architecture.AMD64,

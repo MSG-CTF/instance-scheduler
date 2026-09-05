@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
@@ -82,6 +83,7 @@ class InstanceOperationFailureIntegrationTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             status = InstanceStatus.REQUESTED,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
             architecture = Architecture.AMD64,

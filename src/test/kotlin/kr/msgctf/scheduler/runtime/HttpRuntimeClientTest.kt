@@ -167,7 +167,7 @@ class HttpRuntimeClientTest {
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
             teamId = testUuid(7),
-            isolationProfile = "WEB",
+            isolationProfile = IsolationProfile.WEB,
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             workload = RuntimeWorkload(
                 containers = listOf(

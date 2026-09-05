@@ -23,6 +23,7 @@ import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.testContainers
@@ -57,6 +58,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceAction.CREATE, saved.action)
         assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
         assertEquals(command.registryRevision, saved.registryRevision)
+        assertEquals(command.isolationProfile, saved.isolationProfile)
         assertEquals(command.architecture, saved.architecture)
         assertEquals(command.resourceProfile.cpuMillicores, saved.cpuMillicores)
         assertEquals(command.resourceProfile.memoryMib, saved.memoryMib)
@@ -275,7 +277,10 @@ class InstanceSchedulerServiceTest {
     fun `resets running instance into a fresh replacement`() {
         // given
         val instanceRepository = TestInstanceRepository()
-        val previous = instanceRepository.save(newRunningInstance())
+        // 기본값이 아닌 값으로 두어야 격리 정책이 실제로 옮겨졌는지 확인된다
+        val previous = instanceRepository.save(
+            newRunningInstance().apply { isolationProfile = IsolationProfile.PWN },
+        )
         val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
 
         // when
@@ -297,6 +302,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.challengeId, fresh.challengeId)
         assertEquals(previous.containers, fresh.containers)
         assertEquals(previous.registryRevision, fresh.registryRevision)
+        assertEquals(IsolationProfile.PWN, fresh.isolationProfile)
         assertEquals(previous.architecture, fresh.architecture)
         assertEquals(previous.cpuMillicores, fresh.cpuMillicores)
         assertEquals(previous.memoryMib, fresh.memoryMib)
@@ -399,6 +405,7 @@ class InstanceSchedulerServiceTest {
                 userId = testUserId,
                 challengeId = testUuid(10),
                 status = InstanceStatus.RUNNING,
+                isolationProfile = IsolationProfile.WEB,
                 action = InstanceAction.CREATE,
                 expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
                 hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
@@ -628,6 +635,7 @@ class InstanceSchedulerServiceTest {
                 userId = testUserId,
                 challengeId = testUuid(10),
                 status = InstanceStatus.CLEANUP_PENDING,
+                isolationProfile = IsolationProfile.WEB,
                 action = InstanceAction.CLEANUP,
                 expiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(7200),
                 hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(10800),
@@ -697,6 +705,7 @@ class InstanceSchedulerServiceTest {
                 userId = testUserId,
                 challengeId = testUuid(10),
                 status = InstanceStatus.RUNNING,
+                isolationProfile = IsolationProfile.WEB,
                 action = InstanceAction.CREATE,
                 expiresAt = Instant.parse("2026-07-04T12:00:00Z").minusSeconds(3600),
                 hardExpiresAt = Instant.parse("2026-07-04T12:00:00Z").plusSeconds(3600),
@@ -769,6 +778,8 @@ class InstanceSchedulerServiceTest {
             challengeId = testUuid(10),
             containers = testContainers(),
             registryRevision = 3,
+            // 기본값이 아닌 값을 써야 저장 매핑이 실제로 도는지 확인된다
+            isolationProfile = IsolationProfile.PWN,
             architecture = Architecture.AMD64,
             resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
@@ -804,6 +815,7 @@ class InstanceSchedulerServiceTest {
             userId = userId,
             challengeId = testUuid(10),
             status = InstanceStatus.RUNNING,
+            isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
             registryRevision = 3,

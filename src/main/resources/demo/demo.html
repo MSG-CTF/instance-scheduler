@@ -167,6 +167,13 @@
           <input id="registry_revision" type="number" value="1" min="1" required>
         </div>
         <div>
+          <label for="isolation_profile">isolation_profile</label>
+          <select id="isolation_profile">
+            <option>WEB</option>
+            <option>PWN</option>
+          </select>
+        </div>
+        <div>
           <label for="architecture">architecture</label>
           <select id="architecture">
             <option>AMD64</option>
@@ -359,6 +366,7 @@ function buildRequestBody() {
     challenge_id: el("challenge_id").value.trim(),
     containers: JSON.parse(el("containers").value),
     registry_revision: Number(el("registry_revision").value),
+    isolation_profile: el("isolation_profile").value,
     architecture: el("architecture").value,
     resource_profile: {
       cpu_millicores: Number(el("cpu_millicores").value),
