@@ -9,6 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
@@ -487,6 +488,110 @@ class InstanceOperationServiceTest {
         assertEquals(IsolationProfile.PWN, captured!!.isolationProfile)
     }
 
+    // 공개 포트마다 온 주소를 전부 저장하는지 확인, 하나만 남기면 나머지 주소로 갈 길이 없다
+    @Test
+    fun `stores every endpoint from runtime result`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { containers = twoExposedPortsJson() })
+        val service = newService(repository, runtimeClient = FakeRuntimeClient())
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        val stored = ServiceEndpointCodec().decodeOrEmpty(instance.endpoints, instance.instanceId)
+        assertEquals(listOf(8080, 9090), stored.map { it.port })
+        assertEquals("https://team-${testUuid(7)}.local:9090", stored.last().serviceUrl)
+    }
+
+    // 계약이 service_url을 첫 endpoint로 정의하므로 그것만 빠져 와도 완료 판정이 깨지지 않는다
+    @Test
+    fun `fills service url from first endpoint when runtime omits it`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = serviceUrllessRuntimeClient())
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals("https://team-${testUuid(7)}.local:8080", instance.serviceUrl)
+    }
+
+    // service_url만 뺀 결과를 돌려주는 client, endpoints[]로 넘어간 Runtime을 흉내낸다
+    private fun serviceUrllessRuntimeClient(): RuntimeClient {
+        val delegate = FakeRuntimeClient()
+        return object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot {
+                val snapshot = delegate.getOperation(operationId)
+                return snapshot.copy(result = snapshot.result?.copy(serviceUrl = null))
+            }
+        }
+    }
+
+    // Runtime이 계약을 아직 안 지켜도 인스턴스는 뜨고 주소 칸만 빈다
+    @Test
+    fun `leaves endpoints empty when runtime omits them`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = endpointlessRuntimeClient())
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertNull(instance.endpoints)
+        assertEquals("https://team-${testUuid(7)}.local:8080", instance.serviceUrl)
+    }
+
+    // 공개 포트가 여럿인데 주소가 안 오면 경고를 내는 분기를 태운다
+    // 로그 문자열은 보지 않고 인스턴스가 RUNNING까지 가는지만 확인한다
+    @Test
+    fun `keeps instance running when multi port instance gets no endpoints`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { containers = twoExposedPortsJson() })
+        val service = newService(repository, runtimeClient = endpointlessRuntimeClient())
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertNull(instance.endpoints)
+    }
+
+    private fun twoExposedPortsJson(): String =
+        ContainerSpecCodec().encode(
+            listOf(
+                ContainerSpec(
+                    name = "challenge",
+                    image = TEST_DIGEST_IMAGE,
+                    ports = listOf(8080, 9090),
+                    expose = true,
+                ),
+            ),
+        )
+
+    // endpoints를 뺀 결과를 돌려주는 client, 계약 이전 Runtime을 흉내낸다
+    private fun endpointlessRuntimeClient(): RuntimeClient {
+        val delegate = FakeRuntimeClient()
+        return object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot {
+                val snapshot = delegate.getOperation(operationId)
+                return snapshot.copy(result = snapshot.result?.copy(endpoints = null))
+            }
+        }
+    }
+
     // SUCCEEDED result를 반영해 RUNNING으로 확정하는지 확인
     @Test
     fun `promotes provisioning instance to running on succeeded`() {
@@ -503,7 +608,7 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.RUNNING, instance.status)
         assertEquals("workload-${instance.instanceId}", instance.runtimeWorkloadId)
-        assertEquals("https://team-${testUuid(7)}.local", instance.serviceUrl)
+        assertEquals("https://team-${testUuid(7)}.local:8080", instance.serviceUrl)
         assertNull(instance.runtimeOperationId)
         assertNull(instance.nextPollAt)
         assertNull(instance.action)
@@ -957,6 +1062,7 @@ class InstanceOperationServiceTest {
             resourceCandidateSelector = ResourceCandidateSelector(clock),
             runtimeClient = runtimeClient,
             containerSpecCodec = ContainerSpecCodec(),
+            serviceEndpointCodec = ServiceEndpointCodec(),
             cleanupProperties = cleanupProperties,
             operationProperties = operationProperties,
             clock = clock,

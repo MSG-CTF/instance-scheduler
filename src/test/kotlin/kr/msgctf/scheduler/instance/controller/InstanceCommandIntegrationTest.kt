@@ -11,16 +11,16 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
-import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.runtime.IsolationProfile
-import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
+import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -372,6 +372,76 @@ class InstanceCommandIntegrationTest {
         // then
         val saved = instanceRepository.findById(readInstanceId(response)).orElseThrow()
         assertEquals(IsolationProfile.PWN, saved.isolationProfile)
+    }
+
+    // 주소 목록을 저장하기 전에는 400으로 거절하던 요청이다
+    @Test
+    fun `create api accepts multiple exposed ports`() {
+        // given
+        val requestBody = createRequestBody(
+            teamId = testUuid(913),
+            challengeId = testUuid(10),
+            containers = """[ { "name": "web", "image": "$TEST_DIGEST_IMAGE", "ports": [8080, 9090], "expose": true } ]""",
+        )
+
+        // when
+        val response = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect { status { isAccepted() } }.andReturn().response.contentAsString
+
+        // then
+        val saved = instanceRepository.findById(readInstanceId(response)).orElseThrow()
+        assertEquals(listOf(8080, 9090), ContainerSpecCodec().decode(saved.containers!!).single().ports)
+    }
+
+    // 공개 컨테이너가 여럿인 요청도 접수한다, 런타임은 개수를 제한하지 않는다
+    @Test
+    fun `create api accepts two exposed containers`() {
+        // given
+        val requestBody = createRequestBody(
+            teamId = testUuid(914),
+            challengeId = testUuid(10),
+            containers = """
+                [
+                  { "name": "web", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true },
+                  { "name": "admin", "image": "$TEST_DIGEST_IMAGE", "ports": [9000], "expose": true }
+                ]
+            """.trimIndent(),
+        )
+
+        // when
+        val response = mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect { status { isAccepted() } }.andReturn().response.contentAsString
+
+        // then
+        val saved = instanceRepository.findById(readInstanceId(response)).orElseThrow()
+        assertEquals(listOf("web", "admin"), ContainerSpecCodec().decode(saved.containers!!).map { it.name })
+    }
+
+    // 공개 포트 총합 상한을 넘는 요청은 접수 단계에서 막는다
+    @Test
+    fun `create api rejects too many exposed ports`() {
+        val requestBody = createRequestBody(
+            teamId = testUuid(915),
+            challengeId = testUuid(10),
+            containers = """
+                [
+                  { "name": "web", "image": "$TEST_DIGEST_IMAGE", "ports": [8080, 8081, 8082, 8083, 8084, 8085, 8086, 8087], "expose": true },
+                  { "name": "admin", "image": "$TEST_DIGEST_IMAGE", "ports": [9000], "expose": true }
+                ]
+            """.trimIndent(),
+        )
+
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("INVALID_REQUEST") }
+        }
     }
 
     // 런타임이 값을 필수로 받으므로 빠진 요청은 접수 단계에서 막는다
@@ -828,6 +898,8 @@ class InstanceCommandIntegrationTest {
         userId: UUID = UUID.randomUUID(),
         // null이면 필드를 아예 빼서 값을 보내지 않는 요청을 만든다
         isolationProfile: String? = "WEB",
+        containers: String =
+            """[ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ]""",
     ): String {
         val profileLine = isolationProfile?.let { """"isolation_profile": "$it",""" } ?: ""
         return """
@@ -835,7 +907,7 @@ class InstanceCommandIntegrationTest {
               "team_id": "$teamId",
               "user_id": "$userId",
               "challenge_id": "$challengeId",
-              "containers": [ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ],
+              "containers": $containers,
               "registry_revision": 3,
               $profileLine
               "architecture": "AMD64",

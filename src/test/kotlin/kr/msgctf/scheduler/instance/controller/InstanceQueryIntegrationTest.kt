@@ -10,7 +10,6 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
-import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -18,6 +17,8 @@ import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.testEndpointsJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -83,6 +84,38 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.data.updated_at") { exists() }
                 jsonPath("$.data.expires_at") { exists() }
                 jsonPath("$.data.hard_expires_at") { exists() }
+            }
+    }
+
+    // 저장된 주소 목록이 계약대로 snake_case 배열로 나가는지 확인
+    @Test
+    fun `get api returns endpoints in snake case`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(120), endpoints = testEndpointsJson())
+
+        // when & then
+        mockMvc.get("/api/instances/$instanceId")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.endpoints[0].container_name") { value("challenge") }
+                jsonPath("$.data.endpoints[0].port") { value(8080) }
+                jsonPath("$.data.endpoints[0].protocol") { value("HTTP") }
+                jsonPath("$.data.endpoints[0].service_url") { value("https://team-1.local:8080") }
+            }
+    }
+
+    // Runtime이 아직 안 보낸 인스턴스는 빈 배열이 나가고 service_url만 남는다
+    @Test
+    fun `get api returns empty endpoints when runtime sent none`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(130))
+
+        // when & then
+        mockMvc.get("/api/instances/$instanceId")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.endpoints") { isEmpty() }
+                jsonPath("$.data.service_url") { value("https://team-${testUuid(130)}.local") }
             }
     }
 
@@ -175,6 +208,25 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.data.team_id") { value(testUuid(200).toString()) }
                 jsonPath("$.data.status") { value("RUNNING") }
                 jsonPath("$.data.service_url") { value("https://team-${testUuid(200)}.local") }
+            }
+    }
+
+    // 백엔드가 생성 완료를 확인하는 경로라 여기서도 주소 목록이 나가야 한다
+    // 단건 조회와 응답 클래스가 달라서 한쪽만 확인하면 다른 쪽이 비어도 모른다
+    @Test
+    fun `get active api returns endpoints in snake case`() {
+        // given
+        val userId = UUID.randomUUID()
+        createInstance(teamId = testUuid(220), userId = userId, endpoints = testEndpointsJson())
+
+        // when & then
+        mockMvc.get("/api/instances/active?user_id=$userId")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.endpoints[0].container_name") { value("challenge") }
+                jsonPath("$.data.endpoints[0].port") { value(8080) }
+                jsonPath("$.data.endpoints[0].protocol") { value("HTTP") }
+                jsonPath("$.data.endpoints[0].service_url") { value("https://team-1.local:8080") }
             }
     }
 
@@ -347,7 +399,11 @@ class InstanceQueryIntegrationTest {
 
     // create가 접수만 하므로 조회 대상 RUNNING 인스턴스를 저장소에 직접 넣는다
     // 만료 시각은 응답 직렬화 정밀도(밀리초)에 맞춘다
-    private fun createInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): UUID {
+    private fun createInstance(
+        teamId: UUID,
+        userId: UUID = UUID.randomUUID(),
+        endpoints: String? = null,
+    ): UUID {
         val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         val instance = Instance(
             teamId = teamId,
@@ -362,6 +418,7 @@ class InstanceQueryIntegrationTest {
             runtimeType = RuntimeType.KUBERNETES,
             runtimeTargetId = "cluster-main",
             serviceUrl = "https://team-$teamId.local",
+            endpoints = endpoints,
             expiresAt = now.plusSeconds(7200),
             hardExpiresAt = now.plusSeconds(10800),
         )

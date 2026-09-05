@@ -96,16 +96,17 @@ class CreateInstanceRequestTest {
         assertInvalidRequest { request.toCommand() }
     }
 
+    // 런타임은 공개 컨테이너 개수를 제한하지 않고 endpoints[]가 컨테이너 이름으로 주소를 가른다
     @Test
-    fun `rejects when two containers are exposed`() {
+    fun `accepts two exposed containers`() {
         val request = newRequest(
             listOf(
                 container(name = "web", expose = true),
-                container(name = "db", expose = true),
+                container(name = "admin", expose = true),
             ),
         )
 
-        assertInvalidRequest { request.toCommand() }
+        assertEquals(listOf(true, true), request.toCommand().containers.map { it.expose })
     }
 
     @Test
@@ -116,7 +117,6 @@ class CreateInstanceRequestTest {
     }
 
     // 한 컨테이너 안의 중복 포트가 거절되는지 확인
-    // 공개 컨테이너는 포트 1개 규칙에 먼저 걸리므로 비공개 컨테이너로 확인한다
     @Test
     fun `rejects duplicated ports in one container`() {
         val request = newRequest(
@@ -129,7 +129,7 @@ class CreateInstanceRequestTest {
         assertInvalidRequest { request.toCommand() }
     }
 
-    // 포트 상한은 비공개 컨테이너로 확인한다, 공개 컨테이너는 포트가 1개로 묶여 있어서다
+    // 비공개 컨테이너로 확인한다, 컨테이너당 상한과 공개 포트 총합 상한이 섞이지 않게 한다
     @Test
     fun `accepts max ports in one container`() {
         val request = newRequest(
@@ -161,10 +161,30 @@ class CreateInstanceRequestTest {
         assertInvalidRequest { request.toCommand() }
     }
 
-    // 주소를 하나만 저장하는 지금 구조에서 공개 포트가 여러 개면 나머지 주소가 사라진다
+    // endpoints[]가 포트마다 주소를 담으므로 공개 포트가 여러 개여도 주소가 사라지지 않는다
     @Test
-    fun `rejects exposed container with multiple ports`() {
+    fun `accepts exposed container with multiple ports`() {
         val request = newRequest(listOf(container(ports = listOf(8080, 9090), expose = true)))
+
+        assertEquals(listOf(8080, 9090), request.toCommand().containers.single().ports)
+    }
+
+    @Test
+    fun `accepts max exposed ports`() {
+        val request = newRequest(listOf(container(ports = (8080..8087).toList(), expose = true)))
+
+        assertEquals(8, request.toCommand().containers.single().ports.size)
+    }
+
+    // 공개 포트 상한은 컨테이너 하나가 아니라 공개 컨테이너 전체를 합쳐서 센다
+    @Test
+    fun `rejects too many exposed ports across containers`() {
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = (8080..8087).toList(), expose = true),
+                container(name = "admin", ports = listOf(9000), expose = true),
+            ),
+        )
 
         assertInvalidRequest { request.toCommand() }
     }

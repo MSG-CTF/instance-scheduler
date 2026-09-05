@@ -30,6 +30,7 @@ class InstanceSchedulerService(
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
     private val containerSpecCodec: ContainerSpecCodec,
+    private val serviceEndpointCodec: ServiceEndpointCodec,
     private val clock: Clock,
 ) {
 
@@ -76,7 +77,12 @@ class InstanceSchedulerService(
             ),
         )
 
-        return InstanceResult.from(instance, replacedInstanceId)
+        return InstanceResult.from(
+            instance = instance,
+            // 방금 만든 행이라 Runtime이 아직 주소를 주지 않았다
+            endpoints = emptyList(),
+            replacedInstanceId = replacedInstanceId,
+        )
     }
 
     // user의 이전 인스턴스는 RUNNING일 때만 교체 대상이다
@@ -143,7 +149,7 @@ class InstanceSchedulerService(
         instance.deleteReason = command.reason
         move(instance, InstanceStatus.STOPPING)
 
-        return InstanceResult.from(instance)
+        return InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
     }
 
     // 초기화는 저장된 실행 스펙으로 새 인스턴스를 만들어 자기 인스턴스를 교체한다
@@ -230,7 +236,12 @@ class InstanceSchedulerService(
             ),
         )
 
-        return InstanceResult.from(instance, replacedInstanceId)
+        return InstanceResult.from(
+            instance = instance,
+            // 방금 만든 행이라 Runtime이 아직 주소를 주지 않았다
+            endpoints = emptyList(),
+            replacedInstanceId = replacedInstanceId,
+        )
     }
 
     @Transactional
@@ -262,7 +273,7 @@ class InstanceSchedulerService(
         instance.expiresAt = extended
         instance.action = InstanceAction.EXTEND
 
-        return InstanceResult.from(instance)
+        return InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
     }
 
     // 분을 초로 바꾸는 곱셈은 Long을 넘으면 조용히 음수로 감긴다

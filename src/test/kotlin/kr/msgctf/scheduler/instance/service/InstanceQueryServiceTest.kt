@@ -9,12 +9,14 @@ import kotlin.test.assertNull
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
-import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.testEndpoints
+import kr.msgctf.scheduler.testEndpointsJson
 import kr.msgctf.scheduler.testUuid
 
 // 조회 서비스는 상태를 바꾸지 않고 저장된 값을 그대로 돌려준다
@@ -49,6 +51,39 @@ class InstanceQueryServiceTest {
         assertEquals(createdAt, result.updatedAt)
         assertEquals(createdAt.plusSeconds(7200), result.expiresAt)
         assertEquals(createdAt.plusSeconds(10800), result.hardExpiresAt)
+    }
+
+    // 저장된 주소 목록이 조회 결과로 풀려 나오는지 확인
+    @Test
+    fun `returns stored endpoints`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newRunningInstance(teamId = testUuid(1)).apply { endpoints = testEndpointsJson() },
+        )
+        val service = newService(repository)
+
+        // when
+        val result = service.getInstance(instance.instanceId)
+
+        // then
+        assertEquals(testEndpoints(), result.endpoints)
+    }
+
+    // Runtime이 아직 안 보낸 인스턴스는 빈 목록으로 나가고 service_url만 남는다
+    @Test
+    fun `returns empty endpoints when column is null`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        val service = newService(repository)
+
+        // when
+        val result = service.getInstance(instance.instanceId)
+
+        // then
+        assertEquals(emptyList(), result.endpoints)
+        assertEquals("https://team-1.local", result.serviceUrl)
     }
 
     // idle timeout은 아직 아무도 채우지 않아 null로 나간다
@@ -204,6 +239,7 @@ class InstanceQueryServiceTest {
             instanceRepository = repository.repository,
             instanceEventRepository = eventRepository.repository,
             transitionService = InstanceStateTransitionService(),
+            serviceEndpointCodec = ServiceEndpointCodec(),
         )
 
     private fun newRunningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =

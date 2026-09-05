@@ -16,6 +16,7 @@ import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
@@ -164,6 +165,8 @@ data class InstanceResponse(
     val challengeId: UUID,
     val status: InstanceStatus,
     val serviceUrl: String?,
+    // 공개 접속점 전체, 계약상 service_url은 이 중 첫 번째다
+    val endpoints: List<ServiceEndpoint>,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
     val replacedInstanceId: UUID?,
@@ -178,6 +181,7 @@ data class InstanceResponse(
                 challengeId = result.challengeId,
                 status = result.status,
                 serviceUrl = result.serviceUrl,
+                endpoints = result.endpoints,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
                 replacedInstanceId = result.replacedInstanceId,
@@ -199,6 +203,8 @@ data class InstanceDetailResponse(
     val runtimeTargetId: String?,
     val runtimeWorkloadId: String?,
     val serviceUrl: String?,
+    // 공개 접속점 전체, 계약상 service_url은 이 중 첫 번째다
+    val endpoints: List<ServiceEndpoint>,
     val createdAt: Instant?,
     val updatedAt: Instant?,
     val expiresAt: Instant,
@@ -223,6 +229,7 @@ data class InstanceDetailResponse(
                 runtimeTargetId = result.runtimeTargetId,
                 runtimeWorkloadId = result.runtimeWorkloadId,
                 serviceUrl = result.serviceUrl,
+                endpoints = result.endpoints,
                 createdAt = result.createdAt,
                 updatedAt = result.updatedAt,
                 expiresAt = result.expiresAt,

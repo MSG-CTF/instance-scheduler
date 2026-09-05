@@ -763,6 +763,7 @@ class InstanceSchedulerServiceTest {
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
             containerSpecCodec = ContainerSpecCodec(),
+            serviceEndpointCodec = ServiceEndpointCodec(),
             clock = fixedClock(),
         )
 

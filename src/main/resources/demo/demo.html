@@ -329,6 +329,23 @@ function esc(value) {
   return value === null || value === undefined ? null : escapeHtml(value);
 }
 
+function urlLink(url) {
+  return '<a href="' + escapeHtml(url) + '" target="_blank">' + escapeHtml(url) + "</a>";
+}
+
+// 공개 주소가 여러 개면 컨테이너와 포트로 구분해 전부 보여준다
+// endpoints가 비면 Runtime이 아직 안 보내는 것이라 service_url 한 줄로 돌아간다
+function endpointFacts(detail) {
+  const endpoints = detail.endpoints || [];
+  if (endpoints.length === 0) {
+    return [["url", detail.service_url ? urlLink(detail.service_url) : null]];
+  }
+  return endpoints.map((endpoint) => [
+    escapeHtml(endpoint.container_name + ":" + endpoint.port),
+    urlLink(endpoint.service_url),
+  ]);
+}
+
 function log(kind, text, detailText) {
   const tagNames = { client: "클라이언트", state: "상태", event: "이벤트", error: "오류" };
   const line = document.createElement("div");
@@ -507,12 +524,9 @@ function applyStatus(detail) {
     ["target", esc(detail.runtime_target_id)],
   ]);
   setFacts(2, [["workload", esc(detail.runtime_workload_id)]]);
-  setFacts(3, [
-    ["url", detail.service_url
-      ? '<a href="' + escapeHtml(detail.service_url) + '" target="_blank">' + escapeHtml(detail.service_url) + "</a>"
-      : null],
+  setFacts(3, endpointFacts(detail).concat([
     ["만료", detail.expires_at ? new Date(detail.expires_at).toLocaleTimeString("en-GB") : null],
-  ]);
+  ]));
 
   el("btn-delete").disabled = !(status in STATUS_RANK);
 }
@@ -578,8 +592,10 @@ const watch = { timer: null, known: new Set(), primed: false, errorLogged: false
 function renderWatchTable(list) {
   const rows = list.slice(0, 10).map((item) => {
     const cls = item.instance_id === state.instanceId ? ' class="watching"' : "";
+    // 표는 좁으니 첫 주소만 걸고 나머지는 개수로 알린다
+    const rest = Math.max((item.endpoints || []).length - 1, 0);
     const url = item.service_url
-      ? '<a href="' + escapeHtml(item.service_url) + '" target="_blank">' + escapeHtml(item.service_url) + "</a>"
+      ? urlLink(item.service_url) + (rest > 0 ? " 외 " + rest : "")
       : "-";
     return "<tr" + cls + "><td>" + escapeHtml(item.instance_id.slice(0, 8)) + "</td>"
       + "<td>" + escapeHtml(item.status) + "</td>"
