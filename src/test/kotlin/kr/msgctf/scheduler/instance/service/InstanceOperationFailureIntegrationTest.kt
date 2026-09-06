@@ -119,5 +119,8 @@ class InstanceOperationFailureIntegrationTest {
 
         override fun getOperation(operationId: String) =
             throw UnsupportedOperationException("not used")
+
+        override fun getRuntimeStatus(instanceId: UUID) =
+            throw UnsupportedOperationException("not used")
     }
 }

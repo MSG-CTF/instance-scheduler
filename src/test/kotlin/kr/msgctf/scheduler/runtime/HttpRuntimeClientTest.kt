@@ -19,6 +19,8 @@ import org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPat
 import org.springframework.test.web.client.match.MockRestRequestMatchers.method
 import org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo
 import org.springframework.test.web.client.response.MockRestResponseCreators.withStatus
+import org.springframework.web.client.HttpClientErrorException
+import org.springframework.web.client.HttpServerErrorException
 import org.springframework.web.client.RestClient
 
 class HttpRuntimeClientTest {
@@ -57,21 +59,37 @@ class HttpRuntimeClientTest {
         assertEquals(2L, accepted.retryAfterSeconds)
     }
 
-    // 접수 자체가 실패하면 상태와 응답 body를 담은 스케줄러 예외로 바뀌는지 확인
+    // 런타임이 요청을 거부한 4xx만 상태와 응답 body를 담은 스케줄러 예외로 바뀌는지 확인
     @Test
-    fun `maps create submission error to scheduler exception`() {
+    fun `maps create rejection to scheduler exception`() {
         server.expect(requestTo("http://runtime.test/internal/v1/instances"))
             .andRespond(
-                withStatus(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
-                    .body("""{"error":{"code":"CREATE_QUEUE_FAILED","message":"queue store failed"}}"""),
+                withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"INVALID_CREATE_COMMAND","message":"bad request"}}"""),
             )
 
         val exception = assertFailsWith<SchedulerException> {
             client.submitCreate(createRequest(UUID.randomUUID()))
         }
 
-        assertEquals(true, exception.adminDetail?.contains("status=502"))
-        assertEquals(true, exception.adminDetail?.contains("CREATE_QUEUE_FAILED"))
+        assertEquals(true, exception.adminDetail?.contains("status=400"))
+        assertEquals(true, exception.adminDetail?.contains("INVALID_CREATE_COMMAND"))
+    }
+
+    // 5xx는 감싸지 않고 그대로 전파하는지 확인
+    // 런타임은 기존 request_id 조회가 DB 오류로 실패해도 502를 준다
+    // 이걸 거부로 읽으면 이미 만들어진 workload를 없는 것으로 보고 정리를 끝내 버린다
+    @Test
+    fun `leaves create server error unwrapped`() {
+        server.expect(requestTo("http://runtime.test/internal/v1/instances"))
+            .andRespond(
+                withStatus(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"CREATE_QUEUE_FAILED","message":"queue store failed"}}"""),
+            )
+
+        assertFailsWith<HttpServerErrorException> {
+            client.submitCreate(createRequest(UUID.randomUUID()))
+        }
     }
 
     // 삭제 404는 지울 대상 없음으로 구분되는지 확인
@@ -207,6 +225,73 @@ class HttpRuntimeClientTest {
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
         )
+
+    // 200이면 workload id를 꺼내는지 확인, 나머지 응답 필드는 정리 판단에 쓰지 않는다
+    @Test
+    fun `reads workload id from runtime status`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
+            .andExpect(method(HttpMethod.GET))
+            .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
+            .andRespond(
+                withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON).body(
+                    """
+                    {
+                      "instance_id": "$instanceId",
+                      "target_id": "aws-k3s-001",
+                      "runtime_workload_id": "aws-k3s-001/ctf-abc/challenge",
+                      "phase": "READY",
+                      "endpoint_ready": true,
+                      "metrics_available": false,
+                      "observed_at": "2026-09-06T00:00:00Z",
+                      "node": { "ready": true },
+                      "containers": []
+                    }
+                    """.trimIndent(),
+                ),
+            )
+
+        val status = assertIs<RuntimeStatusResult.Found>(client.getRuntimeStatus(instanceId))
+
+        assertEquals("aws-k3s-001/ctf-abc/challenge", status.runtimeWorkloadId)
+    }
+
+    // 404는 런타임에 저장된 정보가 없다는 뜻이라 만들어진 것도 없음이 확정된다
+    @Test
+    fun `reads not found from runtime status 404`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
+            .andRespond(
+                withStatus(HttpStatus.NOT_FOUND).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"INSTANCE_NOT_FOUND","message":"not found"}}"""),
+            )
+
+        assertIs<RuntimeStatusResult.NotFound>(client.getRuntimeStatus(instanceId))
+    }
+
+    // 코드 없는 404는 만들어진 것이 없다는 근거가 못 된다
+    // 경로가 아직 없거나 프록시가 대신 낸 404도 같은 상태 코드로 오기 때문이다
+    @Test
+    fun `propagates runtime status 404 without the not found code`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
+            .andRespond(withStatus(HttpStatus.NOT_FOUND).contentType(MediaType.TEXT_HTML).body("404 page not found"))
+
+        assertFailsWith<HttpClientErrorException.NotFound> { client.getRuntimeStatus(instanceId) }
+    }
+
+    // 조회 실패는 무엇이 있는지 모르는 상태라 결과로 삼지 않고 전파한다
+    @Test
+    fun `propagates runtime status lookup failure`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
+            .andRespond(
+                withStatus(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"K3S_UNAVAILABLE","message":"unavailable"}}"""),
+            )
+
+        assertFailsWith<HttpServerErrorException> { client.getRuntimeStatus(instanceId) }
+    }
 
     private fun deleteRequest(instanceId: UUID): RuntimeDeleteRequest =
         RuntimeDeleteRequest(

@@ -124,6 +124,37 @@ sealed interface RuntimeSubmitResult {
     data object TargetMissing : RuntimeSubmitResult
 }
 
+// runtime-status 조회 결과
+// 조회가 실패한 경우는 예외로 전파한다, 그때는 무엇이 만들어졌는지 알 수 없다
+sealed interface RuntimeStatusResult {
+
+    // runtime이 이 instance로 만든 workload가 있다
+    data class Found(val runtimeWorkloadId: String) : RuntimeStatusResult
+
+    // runtime에 이 instance로 저장된 정보가 없다, 만들어진 것도 없다
+    data object NotFound : RuntimeStatusResult
+}
+
+// runtime-status 응답에서 쓰는 값만 담는다
+// 노드 자원과 컨테이너 상태도 함께 오지만 정리 판단에는 쓰지 않는다
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeStatusResponse(
+    @JsonProperty("runtime_workload_id")
+    val runtimeWorkloadId: String,
+)
+
+// runtime이 오류로 답할 때 함께 오는 body
+// 같은 HTTP 상태라도 code가 달라 뜻이 갈리는 자리에서 쓴다
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeErrorResponse(
+    val error: RuntimeErrorBody?,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeErrorBody(
+    val code: String?,
+)
+
 enum class RuntimeOperationState {
     QUEUED,
     RUNNING,

@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.runtime
 
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
@@ -14,10 +15,14 @@ class FakeRuntimeClient(
 
     private val operations = ConcurrentHashMap<String, RuntimeOperationResult>()
 
+    // 접수가 성공한 instance를 기억해 두고 runtime-status 조회가 읽는다
+    private val createdWorkloads = ConcurrentHashMap<UUID, String>()
+
     override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
         failSubmitIfConfigured(request.requestId, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         val operationId = "op-create-${request.instanceId}"
         val endpoints = fakeEndpoints(request)
+        createdWorkloads[request.instanceId] = "workload-${request.instanceId}"
         operations[operationId] = RuntimeOperationResult(
             runtimeWorkloadId = "workload-${request.instanceId}",
             // 계약대로 첫 번째 공개 접속점을 담는다
@@ -40,6 +45,13 @@ class FakeRuntimeClient(
         )
         return RuntimeSubmitResult.Accepted(operationId = operationId, retryAfterSeconds = 0)
     }
+
+    // 접수가 한 번이라도 성공했으면 workload가 만들어진 것으로 본다
+    // 삭제해도 기록을 지우지 않는다, 계약이 삭제 완료 뒤에도 workload id를 계속 돌려주기 때문이다
+    override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
+        createdWorkloads[instanceId]
+            ?.let { RuntimeStatusResult.Found(it) }
+            ?: RuntimeStatusResult.NotFound
 
     override fun getOperation(operationId: String): RuntimeOperationSnapshot {
         val result = operations[operationId] ?: throw SchedulerException(

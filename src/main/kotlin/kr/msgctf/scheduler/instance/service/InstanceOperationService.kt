@@ -38,6 +38,7 @@ import kr.msgctf.scheduler.runtime.RuntimeEndpoint
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
+import kr.msgctf.scheduler.runtime.RuntimeStatusResult
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
@@ -193,7 +194,6 @@ class InstanceOperationService(
             val dueAt = instance.nextPollAt
             if (dueAt != null && dueAt.isAfter(clock.instant())) return@execute null
 
-            // 접수 실패 횟수는 submitCreateAndStore가 센다, 여기서는 한도만 본다
             // parkForCreateCleanup이 attemptCount를 0으로 되돌리므로 기록할 값을 먼저 담는다
             val attempts = instance.attemptCount
             if (attempts >= operationProperties.resubmitRetryLimit) {
@@ -204,6 +204,8 @@ class InstanceOperationService(
             }
             // 접수 호출이 끝날 때까지 다시 집히지 않게 민다, 실패하면 그쪽에서 backoff로 다시 잡는다
             instance.nextPollAt = clock.instant().plus(operationProperties.resubmitDelay)
+            // 런타임을 부르기 전에 커밋한다, 실패 처리로 옮기면 접수 뒤 저장이 끊기는 경우가 안 세어진다
+            instance.attemptCount = attempts + 1
 
             // 여기까지 온 행은 PROVISIONING까지 갔으므로 스펙과 좌표를 이미 읽은 적이 있다
             // 그런데도 못 읽으면 다시 시도해도 마찬가지라 한도까지 헛돌지 않고 바로 정리로 보낸다
@@ -280,6 +282,7 @@ class InstanceOperationService(
 
     fun submitDelete(instanceId: UUID) {
         var reservationToRelease: String? = null
+        var workloadUnknown = false
         val request = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null) return@execute null
@@ -296,12 +299,9 @@ class InstanceOperationService(
                 reservationToRelease = takeReservation(instance)
                 return@execute null
             }
-            // 삭제 API는 workload id로만 지우므로 id가 없으면 부를 수단이 없다
-            // 여기서는 workload가 남았는지 구분할 정보가 이미 지워진 뒤라 판단하지 않는다
-            // 남았을 만한 경우는 파킹하는 쪽에서 그때의 사유와 함께 경고를 남긴다
+            // id가 없다고 지울 대상이 없는 것은 아니다, 접수 응답만 못 받고 workload는 만들어졌을 수 있다
             if (instance.runtimeWorkloadId == null) {
-                completeDelete(instance)
-                reservationToRelease = takeReservation(instance)
+                workloadUnknown = true
                 return@execute null
             }
             if (instance.deleteReason == null) {
@@ -318,6 +318,10 @@ class InstanceOperationService(
             )
         }
         releaseReservationQuietly(reservationToRelease)
+        if (workloadUnknown) {
+            resolveWorkloadForDelete(instanceId)
+            return
+        }
         if (request == null) return
 
         val submitted = try {
@@ -357,6 +361,64 @@ class InstanceOperationService(
             }
         }
         releaseReservationQuietly(missingReservation)
+    }
+
+    // 확인 없이 정리를 끝내면 접수가 닿았던 workload가 런타임에 남는다
+    private fun resolveWorkloadForDelete(instanceId: UUID) {
+        val status = try {
+            runtimeClient.getRuntimeStatus(instanceId)
+        } catch (exception: Exception) {
+            // 계약이 조회 실패만으로 상태를 바꾸지 말라고 적고 있다
+            retryCleanupLater(instanceId, "runtime status unavailable, ${failureDetail(exception)}")
+            return
+        }
+
+        var reservationToRelease: String? = null
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            // 확인하는 사이 다른 경로가 이 행을 옮겼으면 그쪽 판단을 덮지 않는다
+            if (instance.status !in DELETE_SUBMIT_STATES) return@executeWithoutResult
+            // 다른 노드가 먼저 id를 채웠으면 뒤늦게 도착한 조회 결과로 뒤집지 않는다
+            if (instance.runtimeWorkloadId != null) return@executeWithoutResult
+            when (status) {
+                is RuntimeStatusResult.Found -> {
+                    instance.runtimeWorkloadId = status.runtimeWorkloadId
+                    instance.nextPollAt = clock.instant()
+                    // 조회에 쓴 재시도 예산을 돌려준다, 삭제 접수는 아직 한 번도 안 했다
+                    instance.cleanupRetryCount = 0
+                    log.info(
+                        "recovered workload id for cleanup: instanceId={}, runtimeWorkloadId={}",
+                        instanceId,
+                        status.runtimeWorkloadId,
+                    )
+                }
+                // 만들어진 것이 없음이 확정되므로 정리를 끝낸다
+                RuntimeStatusResult.NotFound -> {
+                    completeDelete(instance)
+                    reservationToRelease = takeReservation(instance)
+                }
+            }
+        }
+        releaseReservationQuietly(reservationToRelease)
+    }
+
+    // 한도에 닿으면 CLEANED가 아니라 FAILED로 남긴다, 지워졌는지 모르는 채로 추적을 끝내지 않는다
+    private fun retryCleanupLater(instanceId: UUID, detail: String) {
+        // 한도에 닿는 경우까지 사유가 로그에 남게 잠금 밖에서 먼저 남긴다
+        log.warn("cleanup deferred: instanceId={}, reason={}", instanceId, detail)
+        var reservationToRelease: String? = null
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            if (instance.status !in DELETE_SUBMIT_STATES) return@executeWithoutResult
+            instance.cleanupRetryCount += 1
+            if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
+                parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=$detail")
+                reservationToRelease = takeReservation(instance)
+            } else {
+                instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
+            }
+        }
+        releaseReservationQuietly(reservationToRelease)
     }
 
     fun pollOperation(instanceId: UUID) {
@@ -525,25 +587,26 @@ class InstanceOperationService(
 
     // 예약은 여기서 반납하지 않는다, 정리 흐름이 끝나는 completeDelete나 parkFailed에서 반납한다
     // 생성 접수가 실패했을 때 다시 시도할지 접을지 가른다
-    // HttpRuntimeClient는 런타임이 준 오류 응답만 SchedulerException으로 바꾼다
-    // 그 외 예외는 응답 자체를 못 받은 것이라 접수가 런타임에 닿았는지 알 수 없다
+    // HttpRuntimeClient는 런타임이 4xx로 거부한 경우만 SchedulerException으로 바꾼다
+    // 5xx와 전송 실패는 그대로 전파되며, 접수가 런타임에 닿았는지 알 수 없는 경우다
     private fun handleSubmitFailure(instanceId: UUID, exception: Exception) {
-        val answered = exception is SchedulerException
+        val rejected = exception is SchedulerException
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 기다리는 사이 정리 경로로 넘어갔으면 그쪽 판단을 덮지 않는다
             if (instance.status != InstanceStatus.PROVISIONING) return@executeWithoutResult
 
-            if (answered) {
-                // 런타임이 접수를 거부했으므로 만들어진 workload가 없다
+            if (rejected) {
+                // 런타임이 요청 자체를 거부했으므로 다시 보내도 같은 답이 온다
                 parkForCreateCleanup(instance)
                 recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, failureDetail(exception))
                 return@executeWithoutResult
             }
 
-            // 응답을 못 받았을 뿐 접수는 닿았을 수 있다
+            // 결과를 모르는 실패다, 접수가 닿아 workload가 만들어졌을 수 있다
             // request_id가 고정이라 같은 요청을 다시 보내도 workload가 새로 생기지 않는다
-            val attempts = instance.attemptCount + 1
+            // 횟수는 resubmitCreate가 호출 전에 올려 두었으므로 여기서는 세지 않는다
+            val attempts = instance.attemptCount
             if (attempts >= operationProperties.resubmitRetryLimit) {
                 warnPossibleOrphan(instance, "submit unanswered $attempts times, ${failureDetail(exception)}")
                 parkForCreateCleanup(instance)
@@ -554,8 +617,8 @@ class InstanceOperationService(
                 )
                 return@executeWithoutResult
             }
-            instance.attemptCount = attempts
-            instance.nextPollAt = clock.instant().plus(backoffDelay(attempts))
+            // 첫 접수 실패는 재접수를 거치지 않아 attempts가 0이다, backoffDelay는 1부터 세므로 맞춰 준다
+            instance.nextPollAt = clock.instant().plus(backoffDelay(attempts.coerceAtLeast(1)))
             log.warn(
                 "runtime submit unanswered, will resubmit: instanceId={}, attempt={}, reason={}",
                 instanceId,
@@ -565,13 +628,11 @@ class InstanceOperationService(
         }
     }
 
-    // 생성을 접는데 workload id가 없으면 삭제 API를 부를 수단이 없어 정리 경로도 지우지 못한다
-    // 접수가 런타임에 닿았다면 workload가 남으므로 사유와 함께 흔적을 남긴다
-    // 런타임이 실패를 확정해 준 경우는 만들어진 것이 없으므로 부르지 않는다
+    // workload id 없이 생성을 접은 기록, 정리 단계까지 실패하면 이 사유를 이어 본다
     private fun warnPossibleOrphan(instance: Instance, reason: String) {
         if (instance.runtimeWorkloadId != null) return
         log.warn(
-            "giving up create without workload id, runtime workload may be left behind: " +
+            "giving up create without workload id, cleanup will ask runtime for it: " +
                 "instanceId={}, target={}, reason={}",
             instance.instanceId,
             instance.runtimeTargetId,
