@@ -119,6 +119,38 @@ class InstanceQueryIntegrationTest {
             }
     }
 
+    // 운영자가 어느 릴리스를 띄운 인스턴스인지 여기서 확인한다
+    @Test
+    fun `get api returns registry revision`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(140), registryRevision = 7)
+
+        // when & then
+        mockMvc.get("/api/instances/$instanceId")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.registry_revision") { value(7) }
+            }
+    }
+
+    // 값이 없어도 키는 남긴다, 응답 클래스가 달라서 active 쪽 확인이 여기를 대신하지 못한다
+    // 지금은 Jackson 전역 설정 하나가 두 응답을 함께 정하지만, 한쪽에만 @JsonInclude가 붙으면 갈라진다
+    @Test
+    fun `get api keeps null revision key for rows created before the column`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(150), registryRevision = null)
+
+        // when
+        val response = mockMvc.get("/api/instances/$instanceId")
+            .andExpect { status { isOk() } }
+            .andReturn().response.contentAsString
+
+        // then
+        val data = objectMapper.readTree(response).get("data")
+        assertTrue(data.has("registry_revision"), "registry_revision 키가 응답에 없다")
+        assertTrue(data.get("registry_revision").isNull, "registry_revision 값이 null이 아니다")
+    }
+
     // 아직 아무도 채우지 않는 값은 null로 내보낸다
     @Test
     fun `get api returns null for idle fields`() {
@@ -228,6 +260,42 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.data.endpoints[0].protocol") { value("HTTP") }
                 jsonPath("$.data.endpoints[0].service_url") { value("https://team-1.local:8080") }
             }
+    }
+
+    // 백엔드가 자기 기록을 잃었을 때 어느 릴리스에 연결할지 이 값으로 가른다
+    // 단건 조회와 응답 클래스가 달라서 한쪽만 확인하면 다른 쪽이 비어도 모른다
+    @Test
+    fun `get active api returns registry revision`() {
+        // given
+        val userId = UUID.randomUUID()
+        createInstance(teamId = testUuid(230), userId = userId, registryRevision = 7)
+
+        // when & then
+        mockMvc.get("/api/instances/active?user_id=$userId")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.registry_revision") { value(7) }
+            }
+    }
+
+    // 컬럼이 생기기 전 행은 값을 알 수 없다, 지어내지 않고 null로 내보낸다
+    // 키까지 빠지면 백엔드가 "스케줄러가 아직 안 올라감"과 "옛 인스턴스"를 구분하지 못한다
+    // jsonPath는 값이 null이면 키가 없는 것과 같게 판정하므로 트리를 직접 본다
+    @Test
+    fun `get active api keeps null revision key for rows created before the column`() {
+        // given
+        val userId = UUID.randomUUID()
+        createInstance(teamId = testUuid(240), userId = userId, registryRevision = null)
+
+        // when
+        val response = mockMvc.get("/api/instances/active?user_id=$userId")
+            .andExpect { status { isOk() } }
+            .andReturn().response.contentAsString
+
+        // then
+        val data = objectMapper.readTree(response).get("data")
+        assertTrue(data.has("registry_revision"), "registry_revision 키가 응답에 없다")
+        assertTrue(data.get("registry_revision").isNull, "registry_revision 값이 null이 아니다")
     }
 
     // active 응답은 runtime 내부 정보를 내보내지 않는다
@@ -403,6 +471,8 @@ class InstanceQueryIntegrationTest {
         teamId: UUID,
         userId: UUID = UUID.randomUUID(),
         endpoints: String? = null,
+        // 컬럼이 생기기 전 행을 흉내내려면 null을 넣는다
+        registryRevision: Long? = 3,
     ): UUID {
         val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         val instance = Instance(
@@ -419,6 +489,7 @@ class InstanceQueryIntegrationTest {
             runtimeTargetId = "cluster-main",
             serviceUrl = "https://team-$teamId.local",
             endpoints = endpoints,
+            registryRevision = registryRevision,
             expiresAt = now.plusSeconds(7200),
             hardExpiresAt = now.plusSeconds(10800),
         )

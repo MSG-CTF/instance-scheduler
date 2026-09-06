@@ -69,7 +69,8 @@ class InstanceCommandIntegrationTest {
         // when
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
-            content = createRequestBody(teamId = testUuid(100), challengeId = testUuid(10))
+            // 픽스처 기본값 3을 피해야 다른 경로에서 새어 들어온 값과 구분된다
+            content = createRequestBody(teamId = testUuid(100), challengeId = testUuid(10), registryRevision = 5)
         }.andExpect {
             status { isAccepted() }
             jsonPath("$.code") { value("SUCCESS") }
@@ -77,6 +78,8 @@ class InstanceCommandIntegrationTest {
             jsonPath("$.data.challenge_id") { value(testUuid(10).toString()) }
             jsonPath("$.data.status") { value("REQUESTED") }
             jsonPath("$.data.service_url") { doesNotExist() }
+            // 요청에 실려온 값을 그대로 돌려준다, Registry를 따로 보지 않는다
+            jsonPath("$.data.registry_revision") { value(5) }
             jsonPath("$.data.hard_expires_at") { exists() }
         }.andReturn().response.contentAsString
 
@@ -87,7 +90,7 @@ class InstanceCommandIntegrationTest {
         assertNotNull(saved)
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(testContainersJson(), saved.containers)
-        assertEquals(3L, saved.registryRevision)
+        assertEquals(5L, saved.registryRevision)
         assertEquals(500, saved.cpuMillicores)
         assertEquals(null, saved.provider)
         assertEquals(null, saved.runtimeWorkloadId)
@@ -207,6 +210,23 @@ class InstanceCommandIntegrationTest {
         assertEquals(old.registryRevision, fresh.registryRevision)
         assertEquals(old.expiresAt, fresh.expiresAt)
         assertEquals(old.hardExpiresAt, fresh.hardExpiresAt)
+    }
+
+    // 초기화해도 릴리스는 그대로여야 한다, 그 사이 Registry가 새 릴리스를 올렸어도 마찬가지다
+    // 흔히 쓰는 3이 아닌 값을 두어 다른 경로에서 새어 들어온 값과 구분한다
+    @Test
+    fun `reset api response keeps the revision of the previous instance`() {
+        // given
+        val previous = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(245), registryRevision = 9),
+        )
+
+        // when & then
+        mockMvc.post("/api/instances/${previous.instanceId}/reset")
+            .andExpect {
+                status { isAccepted() }
+                jsonPath("$.data.registry_revision") { value(9) }
+            }
     }
 
     // 실행 중이 아닌 인스턴스의 초기화는 거절된다
@@ -870,7 +890,11 @@ class InstanceCommandIntegrationTest {
 
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
 
-    private fun runningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =
+    private fun runningInstance(
+        teamId: UUID,
+        userId: UUID = UUID.randomUUID(),
+        registryRevision: Long = 3,
+    ): Instance =
         Instance(
             teamId = teamId,
             userId = userId,
@@ -879,7 +903,7 @@ class InstanceCommandIntegrationTest {
             isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             containers = testContainersJson(),
-            registryRevision = 3,
+            registryRevision = registryRevision,
             architecture = Architecture.AMD64,
             cpuMillicores = 500,
             memoryMib = 512,
@@ -900,6 +924,7 @@ class InstanceCommandIntegrationTest {
         isolationProfile: String? = "WEB",
         containers: String =
             """[ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ]""",
+        registryRevision: Long = 3,
     ): String {
         val profileLine = isolationProfile?.let { """"isolation_profile": "$it",""" } ?: ""
         return """
@@ -908,7 +933,7 @@ class InstanceCommandIntegrationTest {
               "user_id": "$userId",
               "challenge_id": "$challengeId",
               "containers": $containers,
-              "registry_revision": 3,
+              "registry_revision": $registryRevision,
               $profileLine
               "architecture": "AMD64",
               "resource_profile": {
