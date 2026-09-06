@@ -32,7 +32,7 @@ data class CreateInstanceRequest(
     @field:NotEmpty
     val containers: List<ContainerSpecRequest>,
 
-    // 백엔드가 Registry에서 고른 문제 배포판 번호(revision)
+    // 백엔드가 Registry에서 고른 릴리스 번호(revision)
     // 스케줄러는 Registry를 직접 조회하지 않고 받은 값을 저장만 한다
     @field:Positive
     val registryRevision: Long,
@@ -167,6 +167,7 @@ data class InstanceResponse(
     val serviceUrl: String?,
     // 공개 접속점 전체, 계약상 service_url은 이 중 첫 번째다
     val endpoints: List<ServiceEndpoint>,
+    val registryRevision: Long?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
     val replacedInstanceId: UUID?,
@@ -182,6 +183,7 @@ data class InstanceResponse(
                 status = result.status,
                 serviceUrl = result.serviceUrl,
                 endpoints = result.endpoints,
+                registryRevision = result.registryRevision,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
                 replacedInstanceId = result.replacedInstanceId,
@@ -205,6 +207,7 @@ data class InstanceDetailResponse(
     val serviceUrl: String?,
     // 공개 접속점 전체, 계약상 service_url은 이 중 첫 번째다
     val endpoints: List<ServiceEndpoint>,
+    val registryRevision: Long?,
     val createdAt: Instant?,
     val updatedAt: Instant?,
     val expiresAt: Instant,
@@ -230,6 +233,7 @@ data class InstanceDetailResponse(
                 runtimeWorkloadId = result.runtimeWorkloadId,
                 serviceUrl = result.serviceUrl,
                 endpoints = result.endpoints,
+                registryRevision = result.registryRevision,
                 createdAt = result.createdAt,
                 updatedAt = result.updatedAt,
                 expiresAt = result.expiresAt,

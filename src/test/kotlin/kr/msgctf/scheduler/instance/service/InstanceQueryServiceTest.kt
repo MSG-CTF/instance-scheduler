@@ -47,6 +47,7 @@ class InstanceQueryServiceTest {
         assertEquals("cluster-main", result.runtimeTargetId)
         assertEquals("workload-1", result.runtimeWorkloadId)
         assertEquals("https://team-1.local", result.serviceUrl)
+        assertEquals(3L, result.registryRevision)
         assertEquals(createdAt, result.createdAt)
         assertEquals(createdAt, result.updatedAt)
         assertEquals(createdAt.plusSeconds(7200), result.expiresAt)
@@ -126,9 +127,26 @@ class InstanceQueryServiceTest {
         // when
         val result = service.getActiveInstanceByUser(userId)
 
-        // then
+        // then: 백엔드가 자기 기록을 잃었을 때 어느 릴리스에 연결할지 revision으로 가른다
         assertEquals(instance.instanceId, result.instanceId)
         assertEquals(InstanceStatus.RUNNING, result.status)
+        assertEquals(3L, result.registryRevision)
+    }
+
+    // 컬럼이 생기기 전 행은 값을 알 수 없다, 지어내지 않고 null 그대로 내보낸다
+    @Test
+    fun `returns null revision for rows created before the column`() {
+        // given
+        val repository = TestInstanceRepository()
+        val userId = UUID.randomUUID()
+        repository.save(newRunningInstance(teamId = testUuid(8), userId = userId, registryRevision = null))
+        val service = newService(repository)
+
+        // when
+        val result = service.getActiveInstanceByUser(userId)
+
+        // then
+        assertNull(result.registryRevision)
     }
 
     @Test
@@ -242,7 +260,12 @@ class InstanceQueryServiceTest {
             serviceEndpointCodec = ServiceEndpointCodec(),
         )
 
-    private fun newRunningInstance(teamId: UUID, userId: UUID = UUID.randomUUID()): Instance =
+    private fun newRunningInstance(
+        teamId: UUID,
+        userId: UUID = UUID.randomUUID(),
+        // 컬럼이 생기기 전 행을 흉내내려면 null을 넣는다
+        registryRevision: Long? = 3,
+    ): Instance =
         Instance(
             teamId = teamId,
             userId = userId,
@@ -250,6 +273,7 @@ class InstanceQueryServiceTest {
             status = InstanceStatus.RUNNING,
             isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
+            registryRevision = registryRevision,
             provider = "SELF_HOSTED",
             accountId = "self-hosted-1",
             region = "seoul",

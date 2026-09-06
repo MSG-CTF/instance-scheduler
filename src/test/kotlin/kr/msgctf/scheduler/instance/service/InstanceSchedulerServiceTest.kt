@@ -54,6 +54,8 @@ class InstanceSchedulerServiceTest {
 
         assertEquals(InstanceStatus.REQUESTED, result.status)
         assertNull(result.serviceUrl)
+        // 요청에 실려온 값을 그대로 돌려준다, Registry를 따로 보지 않는다
+        assertEquals(command.registryRevision, result.registryRevision)
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(InstanceAction.CREATE, saved.action)
         assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
@@ -302,6 +304,8 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.challengeId, fresh.challengeId)
         assertEquals(previous.containers, fresh.containers)
         assertEquals(previous.registryRevision, fresh.registryRevision)
+        // 초기화 응답도 옛 인스턴스의 릴리스를 잇는다, 그 사이 Registry가 새 릴리스를 올렸어도 마찬가지다
+        assertEquals(previous.registryRevision, result.registryRevision)
         assertEquals(IsolationProfile.PWN, fresh.isolationProfile)
         assertEquals(previous.architecture, fresh.architecture)
         assertEquals(previous.cpuMillicores, fresh.cpuMillicores)
