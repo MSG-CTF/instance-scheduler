@@ -37,6 +37,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeEndpoint
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
+import kr.msgctf.scheduler.runtime.RuntimeOperationType
 import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeStatusResult
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
@@ -378,7 +379,7 @@ class InstanceOperationService(
 
         var reservationToRelease: String? = null
         var waitStarted = false
-        var timedOut = false
+        var alerted = false
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 확인하는 사이 다른 경로가 이 행을 옮겼으면 그쪽 판단을 덮지 않는다
@@ -406,31 +407,31 @@ class InstanceOperationService(
                     completeDelete(instance)
                     reservationToRelease = takeReservation(instance)
                 }
-                // 저장된 정보가 없다는 답만으로는 정리를 끝낼 수 없다
-                // runtime은 workload를 만든 뒤에 정보를 저장하므로, 진행 중인 생성도 같은 답을 준다
-                // 여기서 끝내면 그 생성이 나중에 끝났을 때 workload만 런타임에 남는다
+                // 저장된 정보가 없다는 답만으로는 아무것도 확정되지 않는다
+                // runtime은 workload를 만든 뒤에 정보를 저장하므로 진행 중인 생성도 같은 답을 주고,
+                // 시간이 지났다고 큐에 남은 생성을 취소하지도 않는다
+                // 그래서 여기서 정리를 끝내면 그 생성이 나중에 끝났을 때 만들어진 workload를 지울 수단이 없다
+                // 기다리는 상한은 정리를 끝내는 기준이 아니라 운영자에게 알리는 기준으로만 쓴다
                 RuntimeStatusResult.NotStored -> {
                     val now = clock.instant()
                     val started = instance.pollDeadlineAt
                     val deadline = started
                         ?: now.plus(cleanupProperties.resolveTimeout).also { instance.pollDeadlineAt = it }
-                    if (now.isBefore(deadline)) {
-                        waitStarted = started == null
-                        // 실패를 세는 값과 섞지 않는다, 이건 실패가 아니라 기다리는 중이다
-                        // 섞으면 조회가 실제로 실패할 때 운영자에게 알리는 한도가 이미 지나가 있다
-                        instance.nextPollAt = clampToDeadline(now.plus(operationProperties.backoffMax), deadline)
-                    } else {
-                        // 기다리는 상한만큼 지나도 저장된 정보가 없으면 그 생성은 끝났고 남긴 것도 없다
-                        // 확인이 아니라 시간으로 내리는 판단이라 어느 쪽이었는지 기록을 남긴다
-                        // 나중에 런타임에 workload가 남은 것이 발견되면 이 기록부터 본다
-                        completeDelete(instance)
-                        reservationToRelease = takeReservation(instance)
-                        timedOut = true
+                    waitStarted = started == null
+                    // 실패를 세는 값과 섞지 않는다, 이건 실패가 아니라 기다리는 중이다
+                    // 섞으면 조회가 실제로 실패할 때 운영자에게 알리는 한도가 이미 지나가 있다
+                    // 마감으로 자르지 않는다, 마감이 끝내는 시각이 아니라 알리는 시각이라 넘겨도 된다
+                    instance.nextPollAt = now.plus(operationProperties.backoffMax)
+                    if (!now.isBefore(deadline)) {
+                        // 알릴 때마다 다음 알림 시각을 뒤로 민다
+                        // 매 주기마다 쌓지 않으면서, 멈춘 채로 있으면 같은 간격으로 다시 알린다
+                        instance.pollDeadlineAt = now.plus(cleanupProperties.resolveTimeout)
+                        alerted = true
                         recordError(
                             instance,
                             SchedulerErrorCode.RUNTIME_DELETE_FAILED,
-                            "runtime did not store the instance within ${cleanupProperties.resolveTimeout}, " +
-                                "completed cleanup without a delete submit",
+                            "runtime has not stored the instance for ${cleanupProperties.resolveTimeout}, " +
+                                "cleanup still pending",
                         )
                     }
                 }
@@ -445,9 +446,9 @@ class InstanceOperationService(
                 cleanupProperties.resolveTimeout,
             )
         }
-        if (timedOut) {
+        if (alerted) {
             log.warn(
-                "cleanup completed on wait timeout, runtime never stored the instance: instanceId={}, waitedFor={}",
+                "cleanup still pending, runtime has not stored the instance: instanceId={}, waitedFor={}",
                 instanceId,
                 cleanupProperties.resolveTimeout,
             )
@@ -560,10 +561,31 @@ class InstanceOperationService(
                     clearOperation(instance)
                     reservationToCommit = takeReservation(instance)
                 }
-                InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
-                    completeDelete(instance)
-                    reservationToRelease = takeReservation(instance)
-                }
+                // 정리로 넘어온 뒤에 끝난 생성이다, 그 결과로 만들어진 workload를 지워야 한다
+                // 여기서 삭제 성공으로 읽으면 방금 생긴 자원을 남긴 채 정리를 끝내게 된다
+                InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING ->
+                    if (snapshot.type == RuntimeOperationType.CREATE) {
+                        val result = checkNotNull(snapshot.result) { "operation result missing: $instanceId" }
+                        instance.runtimeWorkloadId = result.runtimeWorkloadId
+                        clearOperation(instance)
+                        instance.nextPollAt = clock.instant()
+                        // 삭제 접수는 아직 한 번도 안 했으므로 재시도 예산을 돌려준다
+                        instance.cleanupRetryCount = 0
+                        recordError(
+                            instance,
+                            SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                            "create finished after cleanup started, runtimeWorkloadId=${result.runtimeWorkloadId}",
+                        )
+                        log.warn(
+                            "create finished after cleanup started, deleting the workload: " +
+                                "instanceId={}, runtimeWorkloadId={}",
+                            instanceId,
+                            result.runtimeWorkloadId,
+                        )
+                    } else {
+                        completeDelete(instance)
+                        reservationToRelease = takeReservation(instance)
+                    }
                 else -> return@executeWithoutResult
             }
         }
@@ -586,6 +608,19 @@ class InstanceOperationService(
                     )
                 }
                 InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
+                    // 생성이 끝내 실패한 것이라 더 진행되지 않는다
+                    // 다만 실패한 생성이 자원을 남겼을 수 있어 여기서 끝내지 않고 조회로 확인하게 넘긴다
+                    if (snapshot.type == RuntimeOperationType.CREATE) {
+                        clearOperation(instance)
+                        instance.nextPollAt = clock.instant()
+                        recordError(
+                            instance,
+                            SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                            "create failed after cleanup started, operationId=${snapshot.operationId}, " +
+                                "lastErrorCode=${snapshot.lastErrorCode}",
+                        )
+                        return@executeWithoutResult
+                    }
                     if (snapshot.lastErrorCode == NOT_FOUND_ERROR_CODE) {
                         completeDelete(instance)
                     } else {
@@ -604,20 +639,32 @@ class InstanceOperationService(
 
     // 반납할 예약 id를 돌려주고, 호출자가 잠금 밖에서 반납한다
     private fun giveUpPolling(instance: Instance, operationId: String): String? {
-        log.warn("operation poll timed out: instanceId={}, operationId={}", instance.instanceId, operationId)
+        log.warn("operation poll deadline passed: instanceId={}, operationId={}", instance.instanceId, operationId)
         val detail = "operationId=$operationId, reason=poll timeout"
         return when (instance.status) {
             InstanceStatus.PROVISIONING -> {
                 // 접수는 됐고 결과를 끝내 못 받은 경우라 workload가 남았을 가능성이 가장 높다
-                warnPossibleOrphan(instance, "poll timeout")
-                parkForCreateCleanup(instance)
+                // 생성은 아직 끝나지 않았으므로 정리 단계에서 결과를 이어서 본다
+                parkForCreateCleanup(instance, keepOperation = true)
                 recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, detail)
                 null
             }
-            InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
-                parkFailed(instance, detail)
-                takeReservation(instance)
-            }
+            // workload id를 모르면 정리 중에 이어 보던 생성이다, 여기서 접지 않고 조회 경로로 넘긴다
+            // 조회는 instance id만으로 workload를 찾을 수 있어 operation이 사라져도 쓸 수 있다
+            InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING ->
+                if (instance.runtimeWorkloadId == null) {
+                    clearOperation(instance)
+                    instance.nextPollAt = clock.instant()
+                    recordError(
+                        instance,
+                        SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                        "create result unavailable, $detail, falling back to runtime status",
+                    )
+                    null
+                } else {
+                    parkFailed(instance, detail)
+                    takeReservation(instance)
+                }
             else -> {
                 clearOperation(instance)
                 null
@@ -649,6 +696,7 @@ class InstanceOperationService(
     // 5xx와 전송 실패는 그대로 전파되며, 접수가 런타임에 닿았는지 알 수 없는 경우다
     private fun handleSubmitFailure(instanceId: UUID, exception: Exception) {
         val rejected = exception is SchedulerException
+        var rejectedReservation: String? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 기다리는 사이 정리 경로로 넘어갔으면 그쪽 판단을 덮지 않는다
@@ -656,8 +704,13 @@ class InstanceOperationService(
 
             if (rejected) {
                 // 런타임이 요청 자체를 거부했으므로 다시 보내도 같은 답이 온다
+                // 거부는 큐에 들어간 것이 없다는 뜻이라 지울 자원도 없다, 정리를 기다리지 않고 끝낸다
+                // 같은 request_id를 다른 operation이 쓰고 있는 409는 여기 오지 않는다
+                // 그쪽은 무언가 이미 있다는 뜻이라 client가 거부로 감싸지 않는다
                 parkForCreateCleanup(instance)
                 recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, failureDetail(exception))
+                completeDelete(instance)
+                rejectedReservation = takeReservation(instance)
                 return@executeWithoutResult
             }
 
@@ -684,6 +737,7 @@ class InstanceOperationService(
                 failureDetail(exception),
             )
         }
+        releaseReservationQuietly(rejectedReservation)
     }
 
     // workload id 없이 생성을 접은 기록, 정리 단계까지 실패하면 이 사유를 이어 본다
@@ -698,11 +752,24 @@ class InstanceOperationService(
         )
     }
 
-    private fun parkForCreateCleanup(instance: Instance) {
+    // keepOperation은 생성이 아직 끝나지 않았을 때만 켠다
+    // 그 생성은 정리로 넘어온 뒤에도 런타임 큐에 남아 나중에 끝날 수 있고, 그때 만들어진 workload를
+    // 지우려면 결과를 이어서 봐야 한다
+    // 결과를 이미 받은 호출자는 켜지 않는다, 같은 답을 다시 받아 기록만 두 번 남는다
+    private fun parkForCreateCleanup(instance: Instance, keepOperation: Boolean = false) {
         instance.action = InstanceAction.CLEANUP
         instance.deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
         move(instance, InstanceStatus.CLEANUP_PENDING)
-        clearOperation(instance)
+        if (!keepOperation || instance.runtimeOperationId == null) {
+            clearOperation(instance)
+            return
+        }
+        // 이어서 보되 무한히 보지는 않는다
+        // 런타임 operation은 보관 기간이 정해져 있지 않고 저장소가 메모리면 재시작에 사라진다
+        // 그러면 조회가 영구히 404라, 상한이 없으면 workload id를 찾을 수 있는 조회 경로로 못 내려간다
+        instance.pollDeadlineAt = clock.instant().plus(cleanupProperties.resolveTimeout)
+        instance.nextPollAt = clock.instant()
+        instance.attemptCount = 0
     }
 
     // 예약 처리는 잠금 밖에서 하도록 tx 안에서는 id 회수만 한다

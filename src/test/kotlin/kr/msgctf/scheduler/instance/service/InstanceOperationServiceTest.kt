@@ -41,6 +41,7 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
+import kr.msgctf.scheduler.runtime.RuntimeOperationType
 import kr.msgctf.scheduler.runtime.RuntimeStatusResult
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.testContainersJson
@@ -570,56 +571,152 @@ class InstanceOperationServiceTest {
         movingClock.advance(resolveTimeout.dividedBy(2))
         service.submitDelete(instance.instanceId)
 
-        // then: 마감이 밀리지 않는다
+        // then: 상한 안에서는 마감이 밀리지 않는다
         assertEquals(start.plus(resolveTimeout), firstDeadline)
         assertEquals(firstDeadline, instance.pollDeadlineAt)
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(0, events.saved.size)
 
         // when: 상한을 넘긴다
         movingClock.advance(resolveTimeout)
         service.submitDelete(instance.instanceId)
 
-        // then: 시간으로 내린 판단이므로 기록을 남기고 끝낸다
-        assertEquals(InstanceStatus.CLEANED, instance.status)
-        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        // then: 상한은 정리를 끝내는 기준이 아니라 운영자에게 알리는 기준이다
+        // 런타임은 시간이 지났다고 큐에 남은 생성을 취소하지 않으므로 여기서 끝내면 안 된다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
         assertEquals(
             listOf(InstanceEventType.ERROR_RECORDED),
             events.repository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId).map { it.eventType },
         )
+
+        // when: 알린 뒤에도 계속 기다린다
+        movingClock.advance(resolveTimeout.dividedBy(2))
+        service.submitDelete(instance.instanceId)
+
+        // then: 알림은 같은 간격으로 다시 나가므로 매 주기마다 쌓이지 않는다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
-    // 접수한 생성의 결과를 기다리는 상한만큼 지나도 저장된 정보가 없으면
-    // 그 생성은 끝났고 남긴 것도 없으므로 삭제 접수 없이 정리를 끝낸다
+    // 런타임은 workload를 만든 뒤 결과를 먼저 저장하고 그다음 binding을 저장한다
+    // 그 사이가 깨지면 살아 있는 workload를 남긴 채 operation이 FAILED로 끝난다
+    // 실제로 고아를 만드는 쪽이 이 분기라, 여기서 정리를 끝내면 안 된다
     @Test
-    fun `completes cleanup when the wait for the runtime record runs out`() {
+    fun `falls back to runtime status when the create fails after cleanup started`() {
         // given
         val repository = TestInstanceRepository()
-        val broker = FakeBrokerClient()
-        val instance = repository.save(
-            newCleanupPending().apply {
-                runtimeWorkloadId = null
-                reservationId = "reservation-held"
-            },
-        )
-        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
-            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = RuntimeStatusResult.NotStored
+        val events = TestInstanceEventRepository()
+        val runtimeClient = FakeRuntimeClient()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+        service.progressRequested(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant()
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
 
+        // when: 이어 보던 생성이 끝내 실패한다
+        runtimeClient.mode = FakeRuntimeMode.OPERATION_FAIL
+        service.pollOperation(instance.instanceId)
+
+        // then: 여기서 끝내지 않고 조회 경로로 넘긴다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNull(instance.runtimeOperationId)
+        assertNotNull(instance.nextPollAt)
+        assertNotEquals(InstanceStatus.CLEANED, instance.status)
+    }
+
+    // 생성 결과를 이어 보는 동안에는 삭제 접수가 이 행을 건드리면 안 된다
+    // 두 워커가 같은 행을 집으면 조회 결과가 오기 전에 삭제가 먼저 나간다
+    @Test
+    fun `does not submit delete while the create operation is still tracked`() {
+        // given
+        val repository = TestInstanceRepository()
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
             override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
                 throw IllegalStateException("delete must not be submitted")
+
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
+                throw IllegalStateException("runtime status must not be asked")
         }
-        val service = newService(
-            repository,
-            brokerClient = broker,
-            runtimeClient = runtimeClient,
-            cleanupProperties = CleanupProperties(resolveTimeout = Duration.ZERO),
-        )
+        val service = newService(repository, runtimeClient = runtimeClient)
+        val instance = repository.save(newRequested())
+        service.progressRequested(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant()
+        service.pollOperation(instance.instanceId)
 
         // when
         service.submitDelete(instance.instanceId)
 
-        // then
-        assertEquals(InstanceStatus.CLEANED, instance.status)
-        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        // then: operation을 쥐고 있는 동안은 폴링 쪽이 맡는다
+        assertNotNull(instance.runtimeOperationId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+    }
+
+    // 이어 보기에도 상한이 있어야 한다
+    // 런타임 operation 저장소가 메모리면 재시작에 사라져 조회가 영구히 404가 되는데,
+    // 상한이 없으면 workload id를 찾을 수 있는 조회 경로로 영영 못 내려간다
+    @Test
+    fun `hands the cleanup over to runtime status when the create poll deadline passes`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val start = Instant.parse("2026-08-12T00:00:00Z")
+        val movingClock = MutableClock(start)
+        val service = newService(repository, events = events, clock = movingClock)
+        val instance = repository.save(newRequested())
+        service.progressRequested(instance.instanceId)
+        instance.pollDeadlineAt = movingClock.instant()
+        service.pollOperation(instance.instanceId)
+        assertNotNull(instance.runtimeOperationId)
+
+        // when: 정리 단계에서 이어 보는 상한을 넘긴다
+        movingClock.advance(CleanupProperties().resolveTimeout.plusMinutes(1))
+        service.pollOperation(instance.instanceId)
+
+        // then: 접지 않고 조회 경로로 내려보낸다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNull(instance.runtimeOperationId)
+        assertNotNull(instance.nextPollAt)
+        assertNotEquals(InstanceStatus.FAILED, instance.status)
+    }
+
+    // 정리로 넘어온 뒤에 생성이 끝나는 경우다
+    // 런타임은 시간이 지났다고 큐에 남은 생성을 취소하지 않으므로 이 순서가 실제로 생긴다
+    // 그때 만들어진 workload를 지우지 못하면 이 브랜치가 없애려던 고아가 그대로 생긴다
+    @Test
+    fun `deletes the workload when the create finishes after cleanup started`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val runtimeClient = FakeRuntimeClient()
+        var submittedWorkloadId: String? = null
+        val watched = object : RuntimeClient by runtimeClient {
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                submittedWorkloadId = request.runtimeWorkloadId
+                return runtimeClient.submitDelete(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = watched)
+
+        // when: 접수까지 간 뒤 폴 시한이 지나 정리로 넘어간다
+        service.progressRequested(instance.instanceId)
+        val createOperationId = instance.runtimeOperationId
+        instance.pollDeadlineAt = clock.instant()
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+
+        // when: 정리 중에 원래 생성이 끝난다
+        service.pollOperation(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then: 늦게 만들어진 workload로 삭제가 접수된다
+        assertNotNull(createOperationId)
+        assertEquals("workload-${instance.instanceId}", instance.runtimeWorkloadId)
+        assertEquals("workload-${instance.instanceId}", submittedWorkloadId)
+        assertNotEquals(InstanceStatus.CLEANED, instance.status)
     }
 
     // 생성 실패로 잡은 예약이 정리 완료 때 반납되는지 확인
@@ -636,24 +733,14 @@ class InstanceOperationServiceTest {
                     adminDetail = "status=503",
                 )
         }
-        // workload id를 모르는 채로 정리에 들어가므로 런타임 확인을 기다린다
-        // 여기서 보는 것은 반납 자체라 그 대기를 0으로 두고 결론까지 간다
-        val service = newService(
-            repository,
-            brokerClient = broker,
-            runtimeClient = throwingRuntime,
-            cleanupProperties = CleanupProperties(resolveTimeout = Duration.ZERO),
-        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = throwingRuntime)
 
-        // when
+        // when: 런타임이 거부하면 큐에 들어간 것이 없으므로 그 자리에서 정리가 끝난다
+        val heldReservationId = "reservation-${instance.instanceId}"
         service.progressRequested(instance.instanceId)
-        val heldReservationId = instance.reservationId
-        service.submitDelete(instance.instanceId)
-        service.pollOperation(instance.instanceId)
 
         // then
         assertEquals(InstanceStatus.CLEANED, instance.status)
-        assertEquals("reservation-${instance.instanceId}", heldReservationId)
         assertNull(instance.reservationId)
         assertEquals(listOf(heldReservationId), broker.releasedReservations)
         assertEquals(emptyList(), broker.committedReservations)
@@ -699,9 +786,8 @@ class InstanceOperationServiceTest {
         // when
         service.progressRequested(instance.instanceId)
 
-        // then
-        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
-        assertEquals(InstanceAction.CLEANUP, instance.action)
+        // then: 런타임이 요청을 거부해서 큐에 들어간 것이 없다, 지울 자원도 없으므로 바로 끝난다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
         assertNull(instance.runtimeOperationId)
     }
@@ -915,8 +1001,8 @@ class InstanceOperationServiceTest {
         // when
         service.resubmitCreate(instance.instanceId)
 
-        // then
-        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        // then: 거부는 큐에 들어간 것이 없다는 뜻이라 정리를 기다리지 않고 끝난다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
         assertEquals(1, events.saved.size)
     }
 
@@ -1288,6 +1374,8 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
+        // 생성 결과를 이미 받았으므로 operation을 놓는다
+        // 남겨 두면 다음 주기에 같은 실패를 다시 받아 기록만 두 번 남는다
         assertNull(instance.runtimeOperationId)
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
@@ -1347,6 +1435,7 @@ class InstanceOperationServiceTest {
             override fun getOperation(operationId: String): RuntimeOperationSnapshot =
                 RuntimeOperationSnapshot(
                     operationId = operationId,
+                    type = RuntimeOperationType.CREATE,
                     status = RuntimeOperationState.QUEUED,
                     retryAfterSeconds = 7,
                     result = null,
@@ -1376,6 +1465,7 @@ class InstanceOperationServiceTest {
             override fun getOperation(operationId: String): RuntimeOperationSnapshot =
                 RuntimeOperationSnapshot(
                     operationId = operationId,
+                    type = RuntimeOperationType.CREATE,
                     status = RuntimeOperationState.QUEUED,
                     retryAfterSeconds = null,
                     result = null,
@@ -1421,6 +1511,7 @@ class InstanceOperationServiceTest {
             override fun getOperation(operationId: String): RuntimeOperationSnapshot =
                 RuntimeOperationSnapshot(
                     operationId = operationId,
+                    type = RuntimeOperationType.CREATE,
                     status = RuntimeOperationState.QUEUED,
                     retryAfterSeconds = 3600,
                     result = null,
@@ -1657,8 +1748,11 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
-        assertNull(instance.runtimeOperationId)
-        assertNull(instance.pollDeadlineAt)
+        // 생성 자체는 런타임 큐에 남아 나중에 끝날 수 있다
+        // 그때 만들어진 workload를 지우려면 operation id가 있어야 한다
+        assertNotNull(instance.runtimeOperationId)
+        // 이어 보되 상한을 다시 잡는다, 상한이 없으면 조회 경로로 내려갈 길이 막힌다
+        assertEquals(clock.instant().plus(CleanupProperties().resolveTimeout), instance.pollDeadlineAt)
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 

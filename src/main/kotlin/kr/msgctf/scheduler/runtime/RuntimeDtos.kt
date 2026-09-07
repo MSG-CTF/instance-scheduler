@@ -173,9 +173,16 @@ enum class RuntimeOperationState {
     FAILED,
 }
 
+// 정리 단계에서도 생성 operation을 이어서 보므로 어느 쪽 결과인지 가려야 한다
+enum class RuntimeOperationType {
+    CREATE,
+    DELETE,
+}
+
 // operation 조회 결과
 data class RuntimeOperationSnapshot(
     val operationId: String,
+    val type: RuntimeOperationType,
     val status: RuntimeOperationState,
     val retryAfterSeconds: Long?,
     val result: RuntimeOperationResult?,
@@ -230,6 +237,10 @@ data class RuntimeOperationAcceptedResponse(
 data class RuntimeOperationStatusResponse(
     @JsonProperty("operation_id")
     val operationId: String,
+
+    // phase와 달리 없을 때 대신 쓸 값이 없다, CREATE와 DELETE 중 무엇으로 넘겨짚어도 틀린다
+    // 계약이 필수로 정하고 있으므로 안 오면 역직렬화에서 드러내는 편이 낫다
+    val type: RuntimeOperationType,
 
     val status: RuntimeOperationState,
 

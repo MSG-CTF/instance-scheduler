@@ -5,6 +5,7 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
+import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.web.client.HttpClientErrorException
@@ -32,6 +33,10 @@ class HttpRuntimeClient(
             // 5xx는 런타임 내부 사정이라 접수가 닿았는지 알 수 없으므로 그대로 전파한다
             // 기존 request_id 조회가 DB 오류로 실패해도 502가 오므로, 5xx를 거부로 읽으면
             // 이미 만들어진 workload를 없는 것으로 보고 정리를 끝내 버린다
+            //
+            // 409만 4xx에서 뺀다, 같은 request_id를 다른 operation이 쓰고 있다는 뜻이라
+            // 거부와 달리 런타임에 무언가 이미 있다
+            if (HttpStatus.CONFLICT.isSameCodeAs(exception.statusCode)) throw exception
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
                 adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
@@ -101,6 +106,7 @@ class HttpRuntimeClient(
         val body = checkNotNull(response.body) { "operation response body missing: $operationId" }
         return RuntimeOperationSnapshot(
             operationId = body.operationId,
+            type = body.type,
             status = body.status,
             retryAfterSeconds = retryAfterSeconds(response.headers),
             result = body.result,

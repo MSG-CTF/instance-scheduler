@@ -15,6 +15,9 @@ class FakeRuntimeClient(
 
     private val operations = ConcurrentHashMap<String, RuntimeOperationResult>()
 
+    // operation 종류, 정리 단계에서 생성 결과와 삭제 결과를 가려야 한다
+    private val operationTypes = ConcurrentHashMap<String, RuntimeOperationType>()
+
     // 접수가 성공한 instance를 기억해 두고 runtime-status 조회가 읽는다
     private val createdWorkloads = ConcurrentHashMap<UUID, String>()
 
@@ -26,6 +29,7 @@ class FakeRuntimeClient(
     override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
         failSubmitIfConfigured(request.requestId, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         val operationId = "op-create-${request.instanceId}"
+        operationTypes[operationId] = RuntimeOperationType.CREATE
         val endpoints = fakeEndpoints(request)
         createdWorkloads[request.instanceId] = "workload-${request.instanceId}"
         operations[operationId] = RuntimeOperationResult(
@@ -44,6 +48,7 @@ class FakeRuntimeClient(
         failSubmitIfConfigured(request.requestId, SchedulerErrorCode.RUNTIME_DELETE_FAILED)
         deletedWorkloads.add(request.instanceId)
         val operationId = "op-delete-${request.instanceId}"
+        operationTypes[operationId] = RuntimeOperationType.DELETE
         operations[operationId] = RuntimeOperationResult(
             runtimeWorkloadId = request.runtimeWorkloadId ?: request.instanceId.toString(),
             serviceUrl = null,
@@ -66,9 +71,13 @@ class FakeRuntimeClient(
             errorCode = SchedulerErrorCode.INTERNAL_ERROR,
             adminDetail = "operationId=$operationId",
         )
+        // 접수할 때 결과와 종류를 함께 넣으므로 결과가 있으면 종류도 있다
+        // 없으면 가짜 구현이 깨진 것이라 CREATE로 넘겨짚지 않고 드러낸다
+        val type = checkNotNull(operationTypes[operationId]) { "operation type missing: $operationId" }
         if (mode == FakeRuntimeMode.OPERATION_FAIL) {
             return RuntimeOperationSnapshot(
                 operationId = operationId,
+                type = type,
                 status = RuntimeOperationState.FAILED,
                 retryAfterSeconds = null,
                 result = null,
@@ -77,6 +86,7 @@ class FakeRuntimeClient(
         }
         return RuntimeOperationSnapshot(
             operationId = operationId,
+            type = type,
             status = RuntimeOperationState.SUCCEEDED,
             retryAfterSeconds = null,
             result = result,

@@ -92,6 +92,21 @@ class HttpRuntimeClientTest {
         }
     }
 
+    // 409는 같은 request_id를 다른 operation이 쓰고 있다는 뜻이라 거부로 감싸지 않는다
+    // 거부로 읽으면 런타임에 무언가 있는데 없는 것으로 보고 정리를 끝내게 된다
+    @Test
+    fun `propagates create conflict without wrapping`() {
+        server.expect(requestTo("http://runtime.test/internal/v1/instances"))
+            .andRespond(
+                withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"REQUEST_ID_CONFLICT","message":"request_id is already used"}}"""),
+            )
+
+        assertFailsWith<HttpClientErrorException.Conflict> {
+            client.submitCreate(createRequest(UUID.randomUUID()))
+        }
+    }
+
     // 삭제 404는 지울 대상 없음으로 구분되는지 확인
     @Test
     fun `returns target missing on delete 404`() {

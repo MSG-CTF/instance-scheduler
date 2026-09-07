@@ -56,9 +56,10 @@ class InstanceOperationFailureIntegrationTest {
         instanceRepository.deleteAll()
     }
 
-    // 접수 단계의 일반 예외에도 CLEANUP_PENDING과 이벤트가 commit으로 남는지 확인
+    // 런타임이 접수를 거부했을 때 상태 전이와 이벤트가 실제로 commit되는지 확인
+    // 거부는 큐에 들어간 것이 없다는 뜻이라 정리를 기다리지 않고 CLEANED까지 간다
     @Test
-    fun `commits cleanup pending when runtime submit fails`() {
+    fun `commits the cleanup result when runtime rejects the submit`() {
         // given
         val saved = instanceRepository.saveAndFlush(newRequested())
 
@@ -67,8 +68,7 @@ class InstanceOperationFailureIntegrationTest {
 
         // then
         val found = instanceRepository.findById(saved.instanceId).orElseThrow()
-        assertEquals(InstanceStatus.CLEANUP_PENDING, found.status)
-        assertEquals(InstanceAction.CLEANUP, found.action)
+        assertEquals(InstanceStatus.CLEANED, found.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, found.deleteReason)
         // broker 통과 기록과 접수 실패 기록이 순서대로 남는다
         val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(saved.instanceId)
