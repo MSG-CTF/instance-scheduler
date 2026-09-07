@@ -14,6 +14,13 @@ data class CleanupProperties(
     val enabled: Boolean = false,
     // 워커 실행 주기, @Scheduled는 fixed-delay placeholder를 읽으므로 이 필드는 문서용이다
     val fixedDelay: Duration = Duration.ofSeconds(30),
-    // runtime 삭제 재시도 한도, 도달하면 FAILED로 전이한다
+    // runtime 삭제 재시도 한도
+    // 지울 workload id를 아는 경우에만 이 횟수에서 FAILED로 바꾼다
+    // 모르는 경우에는 FAILED로 바꾸지 않고 오류 이벤트를 남기는 시점으로만 쓴다
     val retryLimit: Int = 5,
+    // workload id를 모르는 채로 정리할 때 runtime에 정보가 저장되기를 기다리는 상한
+    // 이만큼 기다려도 없으면 그 생성은 끝났고 남긴 것도 없다고 본다
+    // runtime이 생성을 마치고 정보를 저장하기까지의 최악보다 길어야 한다
+    // 그 시간은 PROVISIONER_MAX_ATTEMPTS와 PROVISIONER_READY_TIMEOUT에 달려 있다
+    val resolveTimeout: Duration = Duration.ofMinutes(10),
 )

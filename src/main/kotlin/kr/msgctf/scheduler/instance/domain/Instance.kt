@@ -116,6 +116,7 @@ class Instance(
     var nextPollAt: Instant? = null,
 
     // 이 시각까지 안 끝난 operation은 폴링을 멈추고 실패로 처리한다
+    // operation 없이 정리에 들어간 구간에서는 runtime에 저장된 정보를 기다리는 상한이다
     @Column(name = "poll_deadline_at")
     var pollDeadlineAt: Instant? = null,
 

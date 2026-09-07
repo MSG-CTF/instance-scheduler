@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.service
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.UUID
 import kotlin.test.Test
@@ -364,12 +365,14 @@ class InstanceOperationServiceTest {
         assertEquals(emptyList(), broker.releasedReservations)
     }
 
-    // 끝내 확인하지 못하면 CLEANED가 아니라 FAILED로 남긴다, 지워졌는지 모르는 채 추적을 끝내지 않는다
+    // 한도를 넘겨도 FAILED로 보내지 않는다
+    // FAILED는 워커가 보는 상태가 아니라서 런타임이 돌아와도 정리가 다시 시작되지 않는다
     @Test
-    fun `parks failed when runtime status keeps failing to the limit`() {
+    fun `keeps cleanup pending when runtime status keeps failing past the limit`() {
         // given
         val repository = TestInstanceRepository()
         val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
         val instance = repository.save(
             newCleanupPending().apply {
                 runtimeWorkloadId = null
@@ -377,14 +380,112 @@ class InstanceOperationServiceTest {
                 cleanupRetryCount = CleanupProperties().retryLimit - 1
             },
         )
-        val service = newService(repository, brokerClient = broker, runtimeClient = statuslessRuntimeClient())
+        val service = newService(
+            repository,
+            brokerClient = broker,
+            runtimeClient = statuslessRuntimeClient(),
+            events = events,
+        )
+
+        // when: 한도에 닿는 회차와 그 다음 회차
+        service.submitDelete(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then: 자원이 남았는지 모르는 동안은 예약과 정리 경로를 함께 유지한다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(CleanupProperties().retryLimit + 1, instance.cleanupRetryCount)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertNotNull(instance.nextPollAt)
+        // FAILED를 대신하는 유일한 운영자 신호다, 한도를 넘어설 때 한 번만 남는다
+        assertEquals(
+            listOf(InstanceEventType.ERROR_RECORDED),
+            events.repository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId).map { it.eventType },
+        )
+    }
+
+    // 이미 지워진 workload는 삭제를 접수하면 런타임이 상태 전이 위반으로 거절한다
+    // 지울 것이 없으므로 접수 없이 정리를 끝낸다
+    @Test
+    fun `completes cleanup when runtime reports the workload already deleted`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
+                RuntimeStatusResult.AlreadyDeleted("cluster-main/ns/gone")
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
 
         // when
         service.submitDelete(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals("cluster-main/ns/gone", instance.runtimeWorkloadId)
         assertEquals(listOf("reservation-held"), broker.releasedReservations)
+    }
+
+    // 조회가 다시 되면 그때 workload id를 받아 실제 삭제 접수까지 이어져야 한다
+    @Test
+    fun `submits delete after runtime status recovers`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                reservationId = "reservation-held"
+            },
+        )
+        val delegate = FakeRuntimeClient()
+        var down = true
+        var submittedWorkloadId: String? = null
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                if (down) throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "k3s unavailable")
+                return RuntimeStatusResult.Found("cluster-main/ns/leftover")
+            }
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                submittedWorkloadId = request.runtimeWorkloadId
+                return delegate.submitDelete(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when: 한도를 넘도록 실패시킨 뒤 복구한다
+        repeat(CleanupProperties().retryLimit + 1) { service.submitDelete(instance.instanceId) }
+        assertNull(submittedWorkloadId)
+        down = false
+        service.submitDelete(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals("cluster-main/ns/leftover", submittedWorkloadId)
+        assertNotEquals(InstanceStatus.FAILED, instance.status)
+    }
+
+    // 시간이 흘러야 확인되는 것이 있어 고정 시계로는 못 보는 자리에 쓴다
+    private class MutableClock(private var now: Instant) : Clock() {
+        fun advance(amount: Duration) {
+            now = now.plus(amount)
+        }
+
+        override fun instant(): Instant = now
+
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+
+        override fun withZone(zone: ZoneId): Clock = this
     }
 
     // runtime-status 조회가 실패하는 client, 502와 503을 흉내낸다
@@ -399,29 +500,126 @@ class InstanceOperationServiceTest {
         }
     }
 
-    // 런타임에 저장된 정보가 없으면 만들어진 것도 없으므로 삭제 접수 없이 정리 완료로 간다
+    // 저장된 정보가 없다는 답만으로 정리를 끝내면 안 된다
+    // runtime은 workload를 만든 뒤에 정보를 저장하므로 진행 중인 생성도 같은 답을 준다
+    // 여기서 끝내면 그 생성이 나중에 끝났을 때 workload만 런타임에 남는다
     @Test
-    fun `completes cleanup without delete submit when workload id is missing`() {
+    fun `waits while runtime has not stored the instance yet`() {
         // given
         val repository = TestInstanceRepository()
-        val instance = repository.save(newRequested())
-        val throwingRuntime = object : RuntimeClient by FakeRuntimeClient() {
-            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult =
-                throw SchedulerException(
-                    errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
-                    adminDetail = "status=400",
-                )
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = RuntimeStatusResult.NotStored
+
             override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
                 throw IllegalStateException("delete must not be submitted")
         }
-        val service = newService(repository, runtimeClient = throwingRuntime)
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
 
         // when
-        service.progressRequested(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then: 확인 전이므로 완료로 넘기지도, 예약을 반납하지도 않는다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertNotNull(instance.nextPollAt)
+    }
+
+    // 마감은 처음 한 번만 정해야 대기가 끝난다
+    // 조회할 때마다 다시 정하면 상한이 계속 밀려 영원히 기다린다
+    @Test
+    fun `sets the wait deadline once and completes after it passes`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val start = Instant.parse("2026-08-12T00:00:00Z")
+        val movingClock = MutableClock(start)
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = RuntimeStatusResult.NotStored
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
+        val resolveTimeout = CleanupProperties().resolveTimeout
+        val service = newService(
+            repository,
+            brokerClient = broker,
+            runtimeClient = runtimeClient,
+            events = events,
+            clock = movingClock,
+        )
+
+        // when: 대기를 시작하고, 상한 안에서 한 번 더 조회한다
+        service.submitDelete(instance.instanceId)
+        val firstDeadline = instance.pollDeadlineAt
+        movingClock.advance(resolveTimeout.dividedBy(2))
+        service.submitDelete(instance.instanceId)
+
+        // then: 마감이 밀리지 않는다
+        assertEquals(start.plus(resolveTimeout), firstDeadline)
+        assertEquals(firstDeadline, instance.pollDeadlineAt)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+
+        // when: 상한을 넘긴다
+        movingClock.advance(resolveTimeout)
+        service.submitDelete(instance.instanceId)
+
+        // then: 시간으로 내린 판단이므로 기록을 남기고 끝낸다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        assertEquals(
+            listOf(InstanceEventType.ERROR_RECORDED),
+            events.repository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId).map { it.eventType },
+        )
+    }
+
+    // 접수한 생성의 결과를 기다리는 상한만큼 지나도 저장된 정보가 없으면
+    // 그 생성은 끝났고 남긴 것도 없으므로 삭제 접수 없이 정리를 끝낸다
+    @Test
+    fun `completes cleanup when the wait for the runtime record runs out`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = RuntimeStatusResult.NotStored
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
+        val service = newService(
+            repository,
+            brokerClient = broker,
+            runtimeClient = runtimeClient,
+            cleanupProperties = CleanupProperties(resolveTimeout = Duration.ZERO),
+        )
+
+        // when
         service.submitDelete(instance.instanceId)
 
         // then
         assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
     }
 
     // 생성 실패로 잡은 예약이 정리 완료 때 반납되는지 확인
@@ -438,7 +636,14 @@ class InstanceOperationServiceTest {
                     adminDetail = "status=503",
                 )
         }
-        val service = newService(repository, brokerClient = broker, runtimeClient = throwingRuntime)
+        // workload id를 모르는 채로 정리에 들어가므로 런타임 확인을 기다린다
+        // 여기서 보는 것은 반납 자체라 그 대기를 0으로 두고 결론까지 간다
+        val service = newService(
+            repository,
+            brokerClient = broker,
+            runtimeClient = throwingRuntime,
+            cleanupProperties = CleanupProperties(resolveTimeout = Duration.ZERO),
+        )
 
         // when
         service.progressRequested(instance.instanceId)
@@ -1505,6 +1710,7 @@ class InstanceOperationServiceTest {
         cleanupProperties: CleanupProperties = CleanupProperties(),
         operationProperties: OperationProperties = OperationProperties(),
         tx: TransactionOperations = TransactionOperations.withoutTransaction(),
+        clock: Clock = this.clock,
     ): InstanceOperationService =
         InstanceOperationService(
             transitionService = InstanceStateTransitionService(),

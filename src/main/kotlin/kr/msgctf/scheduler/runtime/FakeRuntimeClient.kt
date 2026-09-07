@@ -18,6 +18,11 @@ class FakeRuntimeClient(
     // 접수가 성공한 instance를 기억해 두고 runtime-status 조회가 읽는다
     private val createdWorkloads = ConcurrentHashMap<UUID, String>()
 
+    // 삭제한 instance
+    // 접수와 동시에 삭제가 끝나는 것으로 다룬다, 생성을 그렇게 다루는 것과 같다
+    // 실제 runtime은 접수 시점에 TERMINATING이고 삭제를 마쳐야 TERMINATED가 된다
+    private val deletedWorkloads = ConcurrentHashMap.newKeySet<UUID>()
+
     override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
         failSubmitIfConfigured(request.requestId, SchedulerErrorCode.RUNTIME_CREATE_FAILED)
         val operationId = "op-create-${request.instanceId}"
@@ -37,6 +42,7 @@ class FakeRuntimeClient(
             return RuntimeSubmitResult.TargetMissing
         }
         failSubmitIfConfigured(request.requestId, SchedulerErrorCode.RUNTIME_DELETE_FAILED)
+        deletedWorkloads.add(request.instanceId)
         val operationId = "op-delete-${request.instanceId}"
         operations[operationId] = RuntimeOperationResult(
             runtimeWorkloadId = request.runtimeWorkloadId ?: request.instanceId.toString(),
@@ -46,12 +52,14 @@ class FakeRuntimeClient(
         return RuntimeSubmitResult.Accepted(operationId = operationId, retryAfterSeconds = 0)
     }
 
-    // 접수가 한 번이라도 성공했으면 workload가 만들어진 것으로 본다
+    // 접수와 동시에 생성이 끝나므로 접수한 instance는 바로 Found로 답한다
+    // 실제 runtime은 생성을 마친 뒤에 정보를 저장해서 진행 중에는 NotStored가 온다
     // 삭제해도 기록을 지우지 않는다, 계약이 삭제 완료 뒤에도 workload id를 계속 돌려주기 때문이다
-    override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
-        createdWorkloads[instanceId]
-            ?.let { RuntimeStatusResult.Found(it) }
-            ?: RuntimeStatusResult.NotFound
+    override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+        val workloadId = createdWorkloads[instanceId] ?: return RuntimeStatusResult.NotStored
+        if (instanceId in deletedWorkloads) return RuntimeStatusResult.AlreadyDeleted(workloadId)
+        return RuntimeStatusResult.Found(workloadId)
+    }
 
     override fun getOperation(operationId: String): RuntimeOperationSnapshot {
         val result = operations[operationId] ?: throw SchedulerException(

@@ -286,7 +286,10 @@ class InstanceOperationService(
         val request = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null) return@execute null
-            if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
+            // 지울 대상을 아는 상태에서만 한도로 접는다
+            // workload id를 모르는 동안 접으면 무엇이 남았는지 모른 채 추적이 끊기고
+            // FAILED는 워커가 보는 상태가 아니라서 런타임이 돌아와도 정리가 다시 시작되지 않는다
+            if (instance.runtimeWorkloadId != null && instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
                 parkFailed(instance, "retries=${instance.cleanupRetryCount}")
                 reservationToRelease = takeReservation(instance)
                 return@execute null
@@ -374,6 +377,8 @@ class InstanceOperationService(
         }
 
         var reservationToRelease: String? = null
+        var waitStarted = false
+        var timedOut = false
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 확인하는 사이 다른 경로가 이 행을 옮겼으면 그쪽 판단을 덮지 않는다
@@ -384,6 +389,7 @@ class InstanceOperationService(
                 is RuntimeStatusResult.Found -> {
                     instance.runtimeWorkloadId = status.runtimeWorkloadId
                     instance.nextPollAt = clock.instant()
+                    instance.pollDeadlineAt = null
                     // 조회에 쓴 재시도 예산을 돌려준다, 삭제 접수는 아직 한 번도 안 했다
                     instance.cleanupRetryCount = 0
                     log.info(
@@ -392,33 +398,85 @@ class InstanceOperationService(
                         status.runtimeWorkloadId,
                     )
                 }
-                // 만들어진 것이 없음이 확정되므로 정리를 끝낸다
-                RuntimeStatusResult.NotFound -> {
+                // 이미 지워졌으므로 삭제를 접수하지 않고 끝낸다
+                // 접수하면 런타임이 상태 전이 위반으로 거절해서 지울 것이 없는데 실패로 남는다
+                // id는 어느 workload였는지 추적할 수 있게 남긴다
+                is RuntimeStatusResult.AlreadyDeleted -> {
+                    instance.runtimeWorkloadId = status.runtimeWorkloadId
                     completeDelete(instance)
                     reservationToRelease = takeReservation(instance)
+                }
+                // 저장된 정보가 없다는 답만으로는 정리를 끝낼 수 없다
+                // runtime은 workload를 만든 뒤에 정보를 저장하므로, 진행 중인 생성도 같은 답을 준다
+                // 여기서 끝내면 그 생성이 나중에 끝났을 때 workload만 런타임에 남는다
+                RuntimeStatusResult.NotStored -> {
+                    val now = clock.instant()
+                    val started = instance.pollDeadlineAt
+                    val deadline = started
+                        ?: now.plus(cleanupProperties.resolveTimeout).also { instance.pollDeadlineAt = it }
+                    if (now.isBefore(deadline)) {
+                        waitStarted = started == null
+                        // 실패를 세는 값과 섞지 않는다, 이건 실패가 아니라 기다리는 중이다
+                        // 섞으면 조회가 실제로 실패할 때 운영자에게 알리는 한도가 이미 지나가 있다
+                        instance.nextPollAt = clampToDeadline(now.plus(operationProperties.backoffMax), deadline)
+                    } else {
+                        // 기다리는 상한만큼 지나도 저장된 정보가 없으면 그 생성은 끝났고 남긴 것도 없다
+                        // 확인이 아니라 시간으로 내리는 판단이라 어느 쪽이었는지 기록을 남긴다
+                        // 나중에 런타임에 workload가 남은 것이 발견되면 이 기록부터 본다
+                        completeDelete(instance)
+                        reservationToRelease = takeReservation(instance)
+                        timedOut = true
+                        recordError(
+                            instance,
+                            SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+                            "runtime did not store the instance within ${cleanupProperties.resolveTimeout}, " +
+                                "completed cleanup without a delete submit",
+                        )
+                    }
                 }
             }
         }
         releaseReservationQuietly(reservationToRelease)
+        // 기다리는 동안 주기마다 남기면 한 인스턴스가 로그를 채운다, 시작할 때만 남긴다
+        if (waitStarted) {
+            log.info(
+                "cleanup waiting for runtime to store instance info: instanceId={}, waitFor={}",
+                instanceId,
+                cleanupProperties.resolveTimeout,
+            )
+        }
+        if (timedOut) {
+            log.warn(
+                "cleanup completed on wait timeout, runtime never stored the instance: instanceId={}, waitedFor={}",
+                instanceId,
+                cleanupProperties.resolveTimeout,
+            )
+        }
     }
 
-    // 한도에 닿으면 CLEANED가 아니라 FAILED로 남긴다, 지워졌는지 모르는 채로 추적을 끝내지 않는다
+    // 조회가 안 되는 동안은 자원이 남았는지 모르는 상태다
+    // FAILED로 옮기면 워커가 보는 상태에서 빠져 런타임이 돌아와도 정리를 다시 시작하지 않는다
+    // 예약도 쥔 채로 둔다, 반납하면 브로커는 빈 용량으로 알고 그 자리에 다시 배정한다
     private fun retryCleanupLater(instanceId: UUID, detail: String) {
         // 한도에 닿는 경우까지 사유가 로그에 남게 잠금 밖에서 먼저 남긴다
         log.warn("cleanup deferred: instanceId={}, reason={}", instanceId, detail)
-        var reservationToRelease: String? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             if (instance.status !in DELETE_SUBMIT_STATES) return@executeWithoutResult
-            instance.cleanupRetryCount += 1
-            if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
-                parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=$detail")
-                reservationToRelease = takeReservation(instance)
-            } else {
-                instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
+            val before = instance.cleanupRetryCount
+            instance.cleanupRetryCount = before + 1
+            // 한도는 정리를 접는 기준이 아니라 운영자가 알아채는 기준으로만 쓴다
+            // 넘어설 때마다 쌓지 않도록 넘어서는 순간 한 번만 남긴다
+            // 값이 같은지 보면 한도를 0 이하로 두었을 때 영영 안 남는다, 넘어섰는지로 본다
+            if (before < cleanupProperties.retryLimit && instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
+                recordError(
+                    instance,
+                    SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+                    "retries=${instance.cleanupRetryCount}, reason=$detail",
+                )
             }
+            instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
         }
-        releaseReservationQuietly(reservationToRelease)
     }
 
     fun pollOperation(instanceId: UUID) {

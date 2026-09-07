@@ -62,7 +62,7 @@ class HttpRuntimeClient(
             )
         }
 
-    // INSTANCE_NOT_FOUND를 명시한 404만 "만들어진 것이 없음"으로 읽는다
+    // INSTANCE_NOT_FOUND를 명시한 404만 저장된 정보 없음으로 읽는다
     // 그 밖의 실패는 무엇이 있는지 모르는 상태라 전파해서 호출자가 판단을 미루게 한다
     override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
         try {
@@ -72,12 +72,16 @@ class HttpRuntimeClient(
                 .retrieve()
                 .toEntity(RuntimeStatusResponse::class.java)
             val body = checkNotNull(response.body) { "runtime-status response body missing: $instanceId" }
-            RuntimeStatusResult.Found(body.runtimeWorkloadId)
+            if (body.phase == TERMINATED_PHASE) {
+                RuntimeStatusResult.AlreadyDeleted(body.runtimeWorkloadId)
+            } else {
+                RuntimeStatusResult.Found(body.runtimeWorkloadId)
+            }
         } catch (exception: HttpClientErrorException.NotFound) {
             // 상태 코드만 보면 안 된다, 경로가 아직 없거나 프록시가 대신 낸 404도 같은 404다
-            // 그걸 "만들어진 것 없음"으로 읽으면 확인을 거치고도 workload를 남긴 채 정리를 끝내게 된다
+            // 그걸 runtime의 답으로 읽으면 조회를 거치고도 엉뚱한 근거로 정리를 끝내게 된다
             if (errorCodeOf(exception) != INSTANCE_NOT_FOUND) throw exception
-            RuntimeStatusResult.NotFound
+            RuntimeStatusResult.NotStored
         }
 
     // body를 못 읽으면 코드를 확인하지 못한 것이므로 null을 돌려 호출자가 보수적으로 처리하게 한다
@@ -118,5 +122,10 @@ class HttpRuntimeClient(
     companion object {
         // runtime에 저장된 인스턴스 정보가 없을 때 오는 코드
         private const val INSTANCE_NOT_FOUND = "INSTANCE_NOT_FOUND"
+
+        // 삭제가 끝난 인스턴스의 phase, 정보는 남아 있어 404가 아니라 200으로 온다
+        // 삭제 중을 뜻하는 TERMINATING은 가르지 않는다, 아직 남아 있으므로 삭제 대상으로 본다
+        // 그 경우 삭제를 한 번 더 접수하게 되는데 runtime이 거절하지 않아 operation만 하나 더 생긴다
+        private const val TERMINATED_PHASE = "TERMINATED"
     }
 }

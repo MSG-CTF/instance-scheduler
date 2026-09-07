@@ -256,9 +256,45 @@ class HttpRuntimeClientTest {
         assertEquals("aws-k3s-001/ctf-abc/challenge", status.runtimeWorkloadId)
     }
 
-    // 404는 런타임에 저장된 정보가 없다는 뜻이라 만들어진 것도 없음이 확정된다
+    // 삭제가 끝난 인스턴스는 정보가 남아 있어 404가 아니라 200 TERMINATED로 온다
+    // 이걸 그냥 Found로 읽으면 지울 것이 없는데 삭제를 접수하게 된다
     @Test
-    fun `reads not found from runtime status 404`() {
+    fun `reads already deleted from terminated phase`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
+            .andRespond(
+                withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"instance_id":"$instanceId","runtime_workload_id":"aws-k3s-001/ctf-abc/challenge","phase":"TERMINATED","containers":[]}"""),
+            )
+
+        val status = client.getRuntimeStatus(instanceId)
+
+        assertEquals(
+            RuntimeStatusResult.AlreadyDeleted("aws-k3s-001/ctf-abc/challenge"),
+            status,
+        )
+    }
+
+    // 계약은 phase를 필수로 적지만 안 왔다고 역직렬화가 깨지면 안 된다
+    // 없으면 지워졌다고 볼 근거가 없으므로 남아 있는 쪽으로 읽는다
+    @Test
+    fun `reads found when phase is missing`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
+            .andRespond(
+                withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"runtime_workload_id":"aws-k3s-001/ctf-abc/challenge"}"""),
+            )
+
+        assertEquals(
+            RuntimeStatusResult.Found("aws-k3s-001/ctf-abc/challenge"),
+            client.getRuntimeStatus(instanceId),
+        )
+    }
+
+    // 404는 런타임에 저장된 정보가 없다는 뜻까지만 읽는다
+    @Test
+    fun `reads not stored from runtime status 404`() {
         val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/runtime-status"))
             .andRespond(
@@ -266,10 +302,10 @@ class HttpRuntimeClientTest {
                     .body("""{"error":{"code":"INSTANCE_NOT_FOUND","message":"not found"}}"""),
             )
 
-        assertIs<RuntimeStatusResult.NotFound>(client.getRuntimeStatus(instanceId))
+        assertIs<RuntimeStatusResult.NotStored>(client.getRuntimeStatus(instanceId))
     }
 
-    // 코드 없는 404는 만들어진 것이 없다는 근거가 못 된다
+    // 코드 없는 404는 런타임이 답한 것이라는 근거가 못 된다
     // 경로가 아직 없거나 프록시가 대신 낸 404도 같은 상태 코드로 오기 때문이다
     @Test
     fun `propagates runtime status 404 without the not found code`() {
