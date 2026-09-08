@@ -49,6 +49,7 @@ import kr.msgctf.scheduler.testUuid
 import org.springframework.http.HttpStatus
 import org.springframework.transaction.support.TransactionCallback
 import org.springframework.transaction.support.TransactionOperations
+import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.client.HttpServerErrorException
 
 class InstanceOperationServiceTest {
@@ -985,7 +986,8 @@ class InstanceOperationServiceTest {
         assertEquals(0, events.saved.size)
     }
 
-    // 런타임이 오류 응답을 준 경우는 만들어진 workload가 없으므로 바로 접는다
+    // 재접수가 거부되면 다시 보내지 않고 정리로 넘긴다
+    // 다만 거부는 이번 요청에 대한 답일 뿐이라, 앞서 보낸 접수가 남긴 것이 있는지 확인하기 전에는 끝내지 않는다
     @Test
     fun `parks when the runtime answers with an error`() {
         // given
@@ -1001,9 +1003,88 @@ class InstanceOperationServiceTest {
         // when
         service.resubmitCreate(instance.instanceId)
 
-        // then: 거부는 큐에 들어간 것이 없다는 뜻이라 정리를 기다리지 않고 끝난다
-        assertEquals(InstanceStatus.CLEANED, instance.status)
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals(1, events.saved.size)
+    }
+
+    // 첫 접수는 런타임에 닿았는데 응답만 못 받았고, 재접수는 인증 실패로 거부된 경우다
+    // 거부는 이번 요청에 대한 답일 뿐이라 앞서 접수된 생성이 남긴 것을 확인하고 지워야 한다
+    // 여기서 끝내면 그 생성이 나중에 끝났을 때 런타임에는 인스턴스가 남고 스케줄러는 손을 뗀 상태가 된다
+    @Test
+    fun `deletes the earlier workload when the resubmit is rejected and auth later recovers`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val delegate = FakeRuntimeClient()
+        var authBroken = false
+        val submittedWorkloadIds = mutableListOf<String?>()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                if (authBroken) {
+                    // 인증 실패는 요청이 처리되기 전에 막히므로 런타임에 아무것도 남기지 않는다
+                    throw SchedulerException(
+                        errorCode = SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                        adminDetail = "status=401",
+                    )
+                }
+                // 런타임은 받아들였지만 응답이 스케줄러에 닿지 않는다
+                delegate.submitCreate(request)
+                throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "response lost")
+            }
+
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                if (authBroken) throw HttpClientErrorException(HttpStatus.UNAUTHORIZED, "unauthorized")
+                return delegate.getRuntimeStatus(instanceId)
+            }
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                submittedWorkloadIds += request.runtimeWorkloadId
+                return delegate.submitDelete(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+        val instance = repository.save(newRequested())
+
+        // when: 첫 접수 응답이 유실되고, 재접수는 인증 실패로 거부된다
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        // 재접수 예정 시각이 지나 워커가 이 행을 집는 시점을 흉내낸다
+        instance.nextPollAt = clock.instant()
+        authBroken = true
+        service.resubmitCreate(instance.instanceId)
+
+        // then: 정리로 넘어가되 끝내지 않는다, 예약도 쥔다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNotNull(instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertEquals(emptyList<String?>(), submittedWorkloadIds)
+
+        // when: 인증이 막힌 동안 확인이 실패한다
+        service.submitDelete(instance.instanceId)
+
+        // then: 확인 실패로 미뤄지되 끝내지 않는다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, instance.cleanupRetryCount)
+        assertNull(instance.runtimeWorkloadId)
+        assertEquals(emptyList<String?>(), submittedWorkloadIds)
+
+        // when: 인증이 복구되고 워커가 다시 집는다
+        authBroken = false
+        instance.nextPollAt = clock.instant()
+        service.submitDelete(instance.instanceId)
+
+        // then: 앞서 접수된 생성이 만든 workload를 찾고, 확인에 쓴 재시도 예산을 돌려받는다
+        assertEquals("workload-${instance.instanceId}", instance.runtimeWorkloadId)
+        assertEquals(0, instance.cleanupRetryCount)
+
+        // when: 그 id로 삭제를 접수한다
+        service.submitDelete(instance.instanceId)
+
+        // then: 삭제가 한 번 나가고 그 operation을 폴링한다
+        assertEquals(listOf<String?>("workload-${instance.instanceId}"), submittedWorkloadIds)
+        assertNotNull(instance.runtimeOperationId)
+        assertNotEquals(InstanceStatus.CLEANED, instance.status)
     }
 
     // 응답을 못 받는 일이 거듭되면 한도에서 접는다

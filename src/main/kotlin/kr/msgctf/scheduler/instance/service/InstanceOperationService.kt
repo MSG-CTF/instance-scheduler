@@ -178,7 +178,7 @@ class InstanceOperationService(
             return
         }
 
-        submitCreateAndStore(instanceId, spec, target)
+        submitCreateAndStore(instanceId, spec, target, firstSubmit = true)
     }
 
     // PROVISIONING인데 operation을 접수하지 못한 행을 다시 접수한다
@@ -230,11 +230,18 @@ class InstanceOperationService(
             spec to RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId)
         } ?: return
 
-        submitCreateAndStore(instanceId, resumed.first, resumed.second)
+        submitCreateAndStore(instanceId, resumed.first, resumed.second, firstSubmit = false)
     }
 
     // 런타임에 생성을 접수하고 결과를 행에 반영한다, 첫 접수와 재접수가 함께 쓴다
-    private fun submitCreateAndStore(instanceId: UUID, spec: WorkloadSpec, target: RuntimeTarget) {
+    // firstSubmit은 이 instance로 런타임에 보내는 첫 접수일 때만 켠다
+    // 재접수는 앞서 보낸 접수의 응답을 못 받은 뒤에 오므로, 그 접수가 남긴 것이 있을 수 있다
+    private fun submitCreateAndStore(
+        instanceId: UUID,
+        spec: WorkloadSpec,
+        target: RuntimeTarget,
+        firstSubmit: Boolean,
+    ) {
         val submitted = try {
             runtimeClient.submitCreate(
                 RuntimeCreateRequest(
@@ -265,7 +272,7 @@ class InstanceOperationService(
                 ),
             )
         } catch (exception: Exception) {
-            handleSubmitFailure(instanceId, exception)
+            handleSubmitFailure(instanceId, exception, firstSubmit)
             return
         }
 
@@ -694,23 +701,32 @@ class InstanceOperationService(
     // 생성 접수가 실패했을 때 다시 시도할지 접을지 가른다
     // HttpRuntimeClient는 런타임이 4xx로 거부한 경우만 SchedulerException으로 바꾼다
     // 5xx와 전송 실패는 그대로 전파되며, 접수가 런타임에 닿았는지 알 수 없는 경우다
-    private fun handleSubmitFailure(instanceId: UUID, exception: Exception) {
+    private fun handleSubmitFailure(instanceId: UUID, exception: Exception, firstSubmit: Boolean) {
         val rejected = exception is SchedulerException
         var rejectedReservation: String? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 기다리는 사이 정리 경로로 넘어갔으면 그쪽 판단을 덮지 않는다
             if (instance.status != InstanceStatus.PROVISIONING) return@executeWithoutResult
+            // 이 호출이 도는 사이 다른 접수가 먼저 202를 받아 저장했으면 늦게 온 실패로 덮지 않는다
+            // 재접수 유예가 런타임 읽기 시간보다 짧게 설정되면 생길 수 있다
+            if (instance.runtimeOperationId != null) return@executeWithoutResult
 
             if (rejected) {
-                // 런타임이 요청 자체를 거부했으므로 다시 보내도 같은 답이 온다
-                // 거부는 큐에 들어간 것이 없다는 뜻이라 지울 자원도 없다, 정리를 기다리지 않고 끝낸다
+                // 런타임이 이번 요청을 거부했으므로 같은 요청을 다시 보내도 같은 답이 온다
                 // 같은 request_id를 다른 operation이 쓰고 있는 409는 여기 오지 않는다
                 // 그쪽은 무언가 이미 있다는 뜻이라 client가 거부로 감싸지 않는다
                 parkForCreateCleanup(instance)
                 recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, failureDetail(exception))
-                completeDelete(instance)
-                rejectedReservation = takeReservation(instance)
+                // 거부가 뜻하는 것은 이번 요청 하나다
+                // 첫 접수가 거부됐으면 런타임에 닿은 요청이 하나도 없어 지울 자원도 없다, 바로 끝낸다
+                // 재접수가 거부됐으면 앞서 보낸 접수는 응답만 못 받았을 수 있고,
+                // 인증 실패처럼 이번 요청만 막힌 것일 수도 있다
+                // 그 접수가 남긴 것이 있는지는 정리 경로가 runtime에 물어 확인하므로 여기서 끝내지 않는다
+                if (firstSubmit) {
+                    completeDelete(instance)
+                    rejectedReservation = takeReservation(instance)
+                }
                 return@executeWithoutResult
             }
 
