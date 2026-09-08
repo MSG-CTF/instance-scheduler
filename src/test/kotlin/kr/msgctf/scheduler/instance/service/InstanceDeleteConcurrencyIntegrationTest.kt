@@ -149,5 +149,7 @@ class InstanceDeleteConcurrencyIntegrationTest {
         }
 
         override fun getOperation(operationId: String) = delegate.getOperation(operationId)
+
+        override fun getRuntimeStatus(instanceId: UUID) = delegate.getRuntimeStatus(instanceId)
     }
 }

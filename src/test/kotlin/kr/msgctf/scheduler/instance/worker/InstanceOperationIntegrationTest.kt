@@ -5,6 +5,7 @@ import java.time.Instant
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
@@ -86,6 +87,53 @@ class InstanceOperationIntegrationTest {
         val found = instanceRepository.findById(saved.instanceId).orElseThrow()
         assertEquals(InstanceStatus.CLEANED, found.status)
         assertNull(found.action)
+    }
+
+    // 접수 도중 끊겨 operation이 없는 PROVISIONING 행을 워커가 찾아 다시 접수하는지 확인
+    // 진행, 폴링, 삭제 접수 어느 쿼리에도 안 걸려 방치되던 조합이다
+    @Test
+    fun `worker resubmits stalled provisioning instance`() {
+        val saved = instanceRepository.saveAndFlush(
+            newRequested().apply {
+                status = InstanceStatus.PROVISIONING
+                runtimeType = RuntimeType.KUBERNETES
+                runtimeTargetId = "cluster-main"
+                // 재접수 예정 시각이 지났다
+                nextPollAt = Instant.now().minusSeconds(60)
+            },
+        )
+        val worker = newWorker()
+
+        worker.progressOperations()
+
+        val resubmitted = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertNotNull(resubmitted.runtimeOperationId)
+
+        // 이어서 폴링까지 돌면 RUNNING으로 확정된다
+        worker.progressOperations()
+
+        val found = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.RUNNING, found.status)
+    }
+
+    // 재접수 예정 시각 전에는 집지 않는다, 정상 접수 중인 행을 건드리면 안 된다
+    @Test
+    fun `worker leaves provisioning instance alone before resubmit deadline`() {
+        val saved = instanceRepository.saveAndFlush(
+            newRequested().apply {
+                status = InstanceStatus.PROVISIONING
+                runtimeType = RuntimeType.KUBERNETES
+                runtimeTargetId = "cluster-main"
+                nextPollAt = Instant.now().plusSeconds(60)
+            },
+        )
+        val worker = newWorker()
+
+        worker.progressOperations()
+
+        val found = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertNull(found.runtimeOperationId)
+        assertEquals(InstanceStatus.PROVISIONING, found.status)
     }
 
     private fun newWorker(): InstanceOperationWorker =

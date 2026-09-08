@@ -124,6 +124,47 @@ sealed interface RuntimeSubmitResult {
     data object TargetMissing : RuntimeSubmitResult
 }
 
+// runtime-status 조회 결과
+// 조회가 실패한 경우는 예외로 전파한다, 그때는 무엇이 만들어졌는지 알 수 없다
+sealed interface RuntimeStatusResult {
+
+    // runtime이 이 instance로 만든 workload가 있다
+    data class Found(val runtimeWorkloadId: String) : RuntimeStatusResult
+
+    // 만들었던 workload가 이미 지워졌다, 지울 것이 남아 있지 않다
+    // 계약이 삭제 완료 뒤에도 정보를 남겨 TERMINATED로 답한다고 적고 있다
+    data class AlreadyDeleted(val runtimeWorkloadId: String) : RuntimeStatusResult
+
+    // runtime에 이 instance로 저장된 정보가 아직 없다
+    // 만들어진 것이 없다는 뜻은 아니다, runtime은 workload를 만든 뒤에 정보를 저장하므로
+    // 진행 중인 생성도 같은 답을 받는다
+    data object NotStored : RuntimeStatusResult
+}
+
+// runtime-status 응답에서 쓰는 값만 담는다
+// 노드 자원과 컨테이너 상태도 함께 오지만 정리 판단에는 쓰지 않는다
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeStatusResponse(
+    @JsonProperty("runtime_workload_id")
+    val runtimeWorkloadId: String,
+
+    // 계약이 정한 다섯 값 중 TERMINATED만 정리 판단에 쓴다
+    // 값을 못 받으면 지워졌다고 볼 근거가 없으므로 남아 있는 쪽으로 읽는다
+    val phase: String? = null,
+)
+
+// runtime이 오류로 답할 때 함께 오는 body
+// 같은 HTTP 상태라도 code가 달라 뜻이 갈리는 자리에서 쓴다
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeErrorResponse(
+    val error: RuntimeErrorBody?,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class RuntimeErrorBody(
+    val code: String?,
+)
+
 enum class RuntimeOperationState {
     QUEUED,
     RUNNING,
@@ -132,9 +173,16 @@ enum class RuntimeOperationState {
     FAILED,
 }
 
+// 정리 단계에서도 생성 operation을 이어서 보므로 어느 쪽 결과인지 가려야 한다
+enum class RuntimeOperationType {
+    CREATE,
+    DELETE,
+}
+
 // operation 조회 결과
 data class RuntimeOperationSnapshot(
     val operationId: String,
+    val type: RuntimeOperationType,
     val status: RuntimeOperationState,
     val retryAfterSeconds: Long?,
     val result: RuntimeOperationResult?,
@@ -189,6 +237,10 @@ data class RuntimeOperationAcceptedResponse(
 data class RuntimeOperationStatusResponse(
     @JsonProperty("operation_id")
     val operationId: String,
+
+    // phase와 달리 없을 때 대신 쓸 값이 없다, CREATE와 DELETE 중 무엇으로 넘겨짚어도 틀린다
+    // 계약이 필수로 정하고 있으므로 안 오면 역직렬화에서 드러내는 편이 낫다
+    val type: RuntimeOperationType,
 
     val status: RuntimeOperationState,
 

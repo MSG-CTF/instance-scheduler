@@ -53,7 +53,8 @@ class InstanceCleanupService(
             instance.attemptCount = 0
             return
         }
-        // 생성 operation이 남아 있으면 삭제가 시작되지 않으므로 지운다
+        // 하드타임아웃은 더 기다리지 않기로 한 시점이라 생성 결과를 이어 보지 않는다
+        // 정리 경로가 instance id로 runtime에 물어 workload를 찾으므로 id를 놓아도 지울 수 있다
         // STOPPING은 삭제 operation이 돌고 있거나 접수 재시도를 기다리는 중이라 그대로 둔다
         if (instance.status != InstanceStatus.STOPPING) {
             instance.runtimeOperationId = null

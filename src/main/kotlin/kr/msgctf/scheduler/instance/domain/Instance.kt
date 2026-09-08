@@ -111,10 +111,12 @@ class Instance(
     var reservationId: String? = null,
 
     // operation 폴링 예정 시각, 접수 전 단계에서는 다음 재시도 시각으로 쓴다
+    // PROVISIONING인데 operation을 아직 못 받은 구간에서는 재접수 예정 시각이다
     @Column(name = "next_poll_at")
     var nextPollAt: Instant? = null,
 
     // 이 시각까지 안 끝난 operation은 폴링을 멈추고 실패로 처리한다
+    // operation 없이 정리에 들어간 구간에서는 runtime에 저장된 정보를 기다리는 상한이다
     @Column(name = "poll_deadline_at")
     var pollDeadlineAt: Instant? = null,
 
@@ -153,7 +155,7 @@ class Instance(
     var cleanupRetryCount: Int = 0,
 
     // 단계 안에서 실패한 횟수, 재시도 간격 계산에 쓰고 단계가 바뀌면 0으로 되돌린다
-    // broker 후보 조회 단계와 operation 폴링 단계에서 각각 센다
+    // broker 후보 조회, 생성 재접수, operation 폴링 단계에서 각각 센다
     @Column(name = "attempt_count", nullable = false)
     var attemptCount: Int = 0,
 )
