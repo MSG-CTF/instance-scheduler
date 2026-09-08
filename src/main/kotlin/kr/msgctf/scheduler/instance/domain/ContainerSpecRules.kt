@@ -1,5 +1,7 @@
 package kr.msgctf.scheduler.instance.domain
 
+import kr.msgctf.scheduler.runtime.IsolationProfile
+
 // 컨테이너 실행 스펙의 값 규칙
 // create 접수와 reset의 저장 스펙 재검증이 같은 규칙을 쓴다
 object ContainerSpecRules {
@@ -13,6 +15,11 @@ object ContainerSpecRules {
     // 공개 포트마다 런타임이 주소를 하나씩 발급하므로 총량을 묶어둔다
     // 실제 문제는 공개 포트가 한두 개다, 상한은 여유 있게 둔다
     const val MAX_EXPOSED_PORTS = 8
+
+    // PWN은 gVisor와 NodePort를 쓰는 실행 대상이 필요해 런타임이 공개 컨테이너를 하나로 묶는다
+    // 그 컨테이너가 선언한 포트도 하나여야 한다
+    const val PWN_EXPOSED_CONTAINERS = 1
+    const val PWN_EXPOSED_PORTS = 1
 
     // TCP 포트 범위
     const val MIN_PORT = 1
@@ -29,7 +36,8 @@ object ContainerSpecRules {
     private const val IMAGE_REGISTRY_PREFIX = "ghcr.io/"
 
     // 위반이 없으면 null, 있으면 원인 설명을 돌려준다
-    fun violation(containers: List<ContainerSpec>): String? {
+    // 공개 규칙이 격리 정책마다 달라 정책을 함께 받는다
+    fun violation(containers: List<ContainerSpec>, isolationProfile: IsolationProfile): String? {
         if (containers.isEmpty()) {
             return "containers is empty"
         }
@@ -71,9 +79,31 @@ object ContainerSpecRules {
         if (exposed.isEmpty()) {
             return "expose=true count=0, required=at least 1"
         }
+        return when (isolationProfile) {
+            IsolationProfile.WEB -> webViolation(exposed)
+            IsolationProfile.PWN -> pwnViolation(exposed)
+        }
+    }
+
+    private fun webViolation(exposed: List<ContainerSpec>): String? {
         val exposedPorts = exposed.sumOf { it.ports.size }
         if (exposedPorts > MAX_EXPOSED_PORTS) {
             return "exposed ports=$exposedPorts, max=$MAX_EXPOSED_PORTS"
+        }
+        return null
+    }
+
+    // PWN은 참가자가 셸을 따는 것이 목적이라 런타임이 공개 면적을 하나로 묶는다
+    // 런타임이 거절할 요청을 여기서 걸러야 접수 단계에서 400으로 알려줄 수 있다
+    // PWN 규칙은 비공개 보조 컨테이너를 묶지 않는다, 묶는 것은 공개하는 쪽뿐이다
+    private fun pwnViolation(exposed: List<ContainerSpec>): String? {
+        if (exposed.size != PWN_EXPOSED_CONTAINERS) {
+            return "isolationProfile=PWN, expose=true count=${exposed.size}, required=$PWN_EXPOSED_CONTAINERS"
+        }
+        val container = exposed.single()
+        if (container.ports.size != PWN_EXPOSED_PORTS) {
+            return "isolationProfile=PWN, container=${container.name}, " +
+                "ports=${container.ports.size}, required=$PWN_EXPOSED_PORTS"
         }
         return null
     }

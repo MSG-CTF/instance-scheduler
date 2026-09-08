@@ -494,6 +494,32 @@ class InstanceSchedulerServiceTest {
         assertEquals(1, instanceRepository.savedInstances.size)
     }
 
+    // 저장된 정책이 PWN이면 초기화 재검증도 PWN 규칙을 써야 한다
+    // 같은 스펙이 WEB에서는 통과하므로, 정책을 안 넘기면 이 경로로만 조용히 새어 나간다
+    @Test
+    fun `rejects reset when stored containers break pwn rules`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply {
+                isolationProfile = IsolationProfile.PWN
+                containers =
+                    """[{"name":"challenge","image":"$TEST_DIGEST_IMAGE","ports":[8080,9090],"expose":true}]"""
+            },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 옛 인스턴스는 상태가 바뀌지 않고 새 행도 생기면 안 된다
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
     // 꽉 찬 팀에서도 자기 초기화는 개수가 늘지 않아 허용하는지 확인
     @Test
     fun `resets own instance when team is full`() {
