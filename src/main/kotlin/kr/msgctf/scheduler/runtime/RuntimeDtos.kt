@@ -39,7 +39,8 @@ data class RuntimeWorkload(
     val containers: List<RuntimeContainer>,
 
     // 컨테이너 사이 통신을 허용할 목록, 비어 있으면 컨테이너끼리 통신하지 못한다
-    // 생략과 빈 배열의 뜻이 같다, 비면 필드를 빼서 연결을 안 쓰는 문제의 요청 형태를 바꾸지 않는다
+    // 생략과 빈 배열의 뜻이 같다
+    // 목록이 비어 있으면 이 필드를 통째로 빼서, 연결을 안 쓰는 문제의 요청 형태를 바꾸지 않는다
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     @JsonProperty("internal_connections")
     val internalConnections: List<RuntimeInternalConnection>,
