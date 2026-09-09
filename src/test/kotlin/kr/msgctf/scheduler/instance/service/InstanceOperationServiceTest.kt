@@ -133,6 +133,30 @@ class InstanceOperationServiceTest {
         assertNull(instance.runtimeOperationId)
     }
 
+    // 저장된 정책이 PWN이면 재접수도 PWN 규칙으로 걸러야 한다
+    // 같은 스펙이 WEB에서는 통과하므로, 정책을 안 넘기면 이 경로로만 조용히 새어 나간다
+    @Test
+    fun `fails requested pwn instance when stored containers break pwn rules`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(
+            newRequested().apply {
+                isolationProfile = IsolationProfile.PWN
+                containers = twoExposedPortsJson()
+            },
+        )
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+        assertNull(instance.runtimeOperationId)
+    }
+
     // broker가 후보를 못 주면 간격을 두고 다시 시도하는지 확인
     @Test
     fun `schedules retry when broker gives no candidate`() {

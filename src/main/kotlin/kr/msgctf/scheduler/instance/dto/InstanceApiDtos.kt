@@ -57,7 +57,7 @@ data class CreateInstanceRequest(
     fun toCommand(): CreateInstanceCommand {
         val containerSpecs = containers.map { it.toContainerSpec() }
         // 접수(202) 뒤에 걸리면 400이 아니라 FAILED 상태로만 보이므로 여기서 거른다
-        ContainerSpecRules.violation(containerSpecs)?.let { reject(it) }
+        ContainerSpecRules.violation(containerSpecs, isolationProfile)?.let { reject(it) }
         return CreateInstanceCommand(
             teamId = teamId,
             userId = userId,

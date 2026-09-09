@@ -207,7 +207,7 @@ class InstanceSchedulerService(
                 cause = exception,
             )
         }
-        ContainerSpecRules.violation(storedContainers)?.let { reason ->
+        ContainerSpecRules.violation(storedContainers, previous.isolationProfile)?.let { reason ->
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.INTERNAL_ERROR,
                 adminDetail = "instanceId=${command.instanceId}, reason=stored containers invalid, $reason",

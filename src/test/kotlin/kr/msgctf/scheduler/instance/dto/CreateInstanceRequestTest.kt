@@ -189,6 +189,65 @@ class CreateInstanceRequestTest {
         assertInvalidRequest { request.toCommand() }
     }
 
+    // 아래 네 건은 PWN의 공개 규칙을 확인한다
+    // 런타임은 PWN에 gVisor와 NodePort를 쓰는 실행 대상을 요구해서 공개 면적을 하나로 묶는다
+    // 여기서 거르지 않으면 접수는 202로 받아 놓고 브로커 예약까지 쓴 뒤 런타임이 거절한다
+
+    @Test
+    fun `rejects pwn with two exposed containers`() {
+        val request = newRequest(
+            listOf(
+                container(name = "web", expose = true),
+                container(name = "admin", expose = true),
+            ),
+            isolationProfile = IsolationProfile.PWN,
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `rejects pwn with multiple ports on the exposed container`() {
+        val request = newRequest(
+            listOf(container(ports = listOf(8080, 9090), expose = true)),
+            isolationProfile = IsolationProfile.PWN,
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // PWN 규칙은 비공개 보조 컨테이너를 묶지 않는다, 묶는 것은 공개하는 쪽뿐이다
+    @Test
+    fun `accepts pwn with private helper containers`() {
+        val request = newRequest(
+            listOf(
+                container(name = "challenge", ports = listOf(31337), expose = true),
+                container(name = "db", ports = listOf(5432, 5433), expose = false),
+            ),
+            isolationProfile = IsolationProfile.PWN,
+        )
+
+        val command = request.toCommand()
+
+        assertEquals(listOf(true, false), command.containers.map { it.expose })
+        assertEquals(listOf(5432, 5433), command.containers.last().ports)
+    }
+
+    // WEB은 PWN의 공개 1개, 포트 1개 제약을 받지 않는다, PWN 규칙이 새는지 확인한다
+    // 공개 포트 총합 상한 8은 WEB에도 그대로 걸린다
+    @Test
+    fun `keeps web exposure rules unchanged`() {
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = listOf(8080, 9090), expose = true),
+                container(name = "admin", ports = listOf(9000), expose = true),
+            ),
+            isolationProfile = IsolationProfile.WEB,
+        )
+
+        assertEquals(3, request.toCommand().containers.sumOf { it.ports.size })
+    }
+
     // 문제 이미지는 전부 GHCR로 배포되므로 다른 저장소 주소는 받지 않는다
     @Test
     fun `rejects image from another registry`() {
