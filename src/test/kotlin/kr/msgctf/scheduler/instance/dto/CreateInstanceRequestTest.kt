@@ -8,6 +8,7 @@ import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.runtime.ConnectionProtocol
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testUuid
@@ -121,6 +122,72 @@ class CreateInstanceRequestTest {
         val request = newRequest(listOf(container(image = "ghcr.io/example/web:latest")))
 
         assertInvalidRequest { request.toCommand() }
+    }
+
+    // 런타임이 이미지 이름을 소문자로만 받는다
+    @Test
+    fun `rejects image name with uppercase`() {
+        val request = newRequest(listOf(container(image = "ghcr.io/Example/web@sha256:${"a".repeat(64)}")))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // 태그와 digest를 함께 쓴 주소도 런타임이 거절한다
+    // 위의 태그 테스트는 digest가 아예 없는 경우만 봐서 이 조합을 못 잡았다
+    @Test
+    fun `rejects image carrying both tag and digest`() {
+        val request = newRequest(
+            listOf(container(image = "ghcr.io/example/web:latest@sha256:${"a".repeat(64)}")),
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // digest는 소문자 16진수 64자리여야 한다
+    @Test
+    fun `rejects image digest with uppercase hex`() {
+        val request = newRequest(listOf(container(image = "ghcr.io/example/web@sha256:${"A".repeat(64)}")))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // 아래 셋은 자원 값이 컨테이너 수에 걸리는 규칙을 확인한다
+    // 런타임이 자원 값을 컨테이너 수로 나눠 쓰므로 컨테이너 수보다 작은 값을 거절한다
+    @Test
+    fun `rejects resource value below container count`() {
+        val request = newRequest(twoContainers(), resourceProfile = resources(cpuMillicores = 1))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // 딱 맞는 값은 통과해야 한다, 런타임도 모자랄 때만 거절한다
+    @Test
+    fun `accepts resource value exactly equal to container count`() {
+        val request = newRequest(twoContainers(), resourceProfile = resources(cpuMillicores = 2))
+
+        assertEquals(2, request.toCommand().containers.size)
+    }
+
+    // 컨테이너마다 붙는 쓰기 경로가 ephemeral storage 몫 안에 들어가야 한다
+    @Test
+    fun `rejects ephemeral storage below writable path share`() {
+        val request = newRequest(
+            twoContainers(),
+            resourceProfile = resources(ephemeralStorageMib = ContainerSpecRules.WRITABLE_MIB_PER_CONTAINER * 2 - 1),
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // 딱 맞는 값은 통과해야 한다, 런타임이 몫을 넘을 때만 거절하기 때문이다
+    @Test
+    fun `accepts ephemeral storage exactly matching writable path share`() {
+        val request = newRequest(
+            twoContainers(),
+            resourceProfile = resources(ephemeralStorageMib = ContainerSpecRules.WRITABLE_MIB_PER_CONTAINER * 2),
+        )
+
+        assertEquals(2, request.toCommand().containers.size)
     }
 
     @Test
@@ -413,6 +480,17 @@ class CreateInstanceRequestTest {
             port = port,
         )
 
+    private fun resources(
+        cpuMillicores: Int = 500,
+        memoryMib: Int = 512,
+        ephemeralStorageMib: Int = 1024,
+    ): ResourceProfileRequest =
+        ResourceProfileRequest(
+            cpuMillicores = cpuMillicores,
+            memoryMib = memoryMib,
+            ephemeralStorageMib = ephemeralStorageMib,
+        )
+
     private fun container(
         name: String = "challenge",
         image: String = TEST_DIGEST_IMAGE,
@@ -461,6 +539,7 @@ class CreateInstanceRequestTest {
         containers: List<ContainerSpecRequest>,
         isolationProfile: IsolationProfile = IsolationProfile.WEB,
         internalConnections: List<InternalConnectionRequest> = emptyList(),
+        resourceProfile: ResourceProfileRequest = resources(),
     ): CreateInstanceRequest =
         CreateInstanceRequest(
             teamId = testUuid(1),
@@ -471,11 +550,7 @@ class CreateInstanceRequestTest {
             registryRevision = 3,
             isolationProfile = isolationProfile,
             architecture = Architecture.AMD64,
-            resourceProfile = ResourceProfileRequest(
-                cpuMillicores = 500,
-                memoryMib = 512,
-                ephemeralStorageMib = 1024,
-            ),
+            resourceProfile = resourceProfile,
             ttlMinutes = 120,
             hardTimeoutMinutes = 180,
         )

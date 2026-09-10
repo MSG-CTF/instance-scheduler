@@ -5,6 +5,7 @@ import java.time.DateTimeException
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.UUID
+import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
@@ -219,7 +220,17 @@ class InstanceSchedulerService(
                 cause = exception,
             )
         }
-        ContainerSpecRules.violation(storedContainers, previous.isolationProfile, storedConnections)
+        val storedResources = ResourceProfile(
+            cpuMillicores = cpuMillicores,
+            memoryMib = memoryMib,
+            ephemeralStorageMib = ephemeralStorageMib,
+        )
+        ContainerSpecRules.violation(
+            storedContainers,
+            previous.isolationProfile,
+            storedConnections,
+            storedResources,
+        )
             ?.let { reason ->
                 throw SchedulerException(
                     errorCode = SchedulerErrorCode.INTERNAL_ERROR,

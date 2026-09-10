@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.domain
 
+import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.runtime.IsolationProfile
 
 // 컨테이너 실행 스펙의 값 규칙
@@ -21,6 +22,13 @@ object ContainerSpecRules {
     const val PWN_EXPOSED_CONTAINERS = 1
     const val PWN_EXPOSED_PORTS = 1
 
+    // 런타임이 읽기 전용 rootfs를 강제해서 컨테이너마다 쓰기 경로를 붙여 보낸다
+    // 검증과 요청 조립이 같은 목록을 봐야 한다, 크기만 나눠 쓰면 경로가 늘 때 검증이 안 따라온다
+    val CONTAINER_WRITABLE_PATHS: List<Pair<String, Int>> = listOf("/tmp" to 64)
+
+    // 컨테이너 하나가 쓰는 총량, 자원 검증이 이 값을 본다
+    val WRITABLE_MIB_PER_CONTAINER: Int = CONTAINER_WRITABLE_PATHS.sumOf { it.second }
+
     // TCP 포트 범위
     const val MIN_PORT = 1
     const val MAX_PORT = 65_535
@@ -30,7 +38,11 @@ object ContainerSpecRules {
     private val DNS_LABEL = Regex("[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 
     // 태그는 나중에 다른 이미지를 가리킬 수 있어 digest만 받는다
-    private val DIGEST_IMAGE = Regex("[^@\\s]+@sha256:[0-9a-f]{64}")
+    private const val DIGEST_MARKER = "@sha256:"
+    private const val DIGEST_LENGTH = 64
+
+    // 런타임이 이름에서 막는 공백 문자, 유니코드 공백까지 넓히면 런타임보다 엄해진다
+    private val IMAGE_NAME_BLANKS = charArrayOf(' ', '\t', '\r', '\n')
 
     // 문제 이미지는 전부 GHCR로 배포되므로 다른 저장소 주소는 받지 않는다
     private const val IMAGE_REGISTRY_PREFIX = "ghcr.io/"
@@ -38,10 +50,12 @@ object ContainerSpecRules {
     // 위반이 없으면 null, 있으면 원인 설명을 돌려준다
     // 공개 규칙이 격리 정책마다 달라 정책을 함께 받는다
     // 연결 검증에는 컨테이너 이름과 포트가 필요해 컨테이너 목록과 같은 함수에서 받는다
+    // 자원 규칙은 컨테이너 수에 걸려 있어 자원 프로필도 함께 받는다
     fun violation(
         containers: List<ContainerSpec>,
         isolationProfile: IsolationProfile,
         internalConnections: List<InternalConnection>,
+        resourceProfile: ResourceProfile,
     ): String? {
         if (containers.isEmpty()) {
             return "containers is empty"
@@ -49,6 +63,7 @@ object ContainerSpecRules {
         if (containers.size > MAX_CONTAINERS) {
             return "containers=${containers.size}, max=$MAX_CONTAINERS"
         }
+        resourceViolation(containers.size, resourceProfile)?.let { return it }
         val duplicatedNames = containers.groupingBy { it.name }.eachCount().filterValues { it > 1 }.keys
         if (duplicatedNames.isNotEmpty()) {
             return "duplicated container names=$duplicatedNames"
@@ -57,8 +72,8 @@ object ContainerSpecRules {
             if (container.name.length > MAX_NAME_LENGTH || !DNS_LABEL.matches(container.name)) {
                 return "container name=${container.name}, reason=must be a DNS label"
             }
-            if (!DIGEST_IMAGE.matches(container.image)) {
-                return "container=${container.name}, reason=image must be digest pinned"
+            imageViolation(container.image)?.let { reason ->
+                return "container=${container.name}, $reason"
             }
             if (!container.image.startsWith(IMAGE_REGISTRY_PREFIX)) {
                 return "container=${container.name}, reason=image must be on $IMAGE_REGISTRY_PREFIX"
@@ -92,6 +107,57 @@ object ContainerSpecRules {
             return exposureViolation
         }
         return connectionViolation(containers, internalConnections)
+    }
+
+    // 런타임 validImmutableImageReference와 같은 조건을 본다
+    // 정규식 하나에 담으면 읽기 어렵고 런타임이 규칙을 바꿀 때 대조하기도 어려워 조건을 나눈다
+    private fun imageViolation(image: String): String? {
+        val marker = image.indexOf(DIGEST_MARKER)
+        if (marker < 0) {
+            return "reason=image must be digest pinned"
+        }
+        val name = image.substring(0, marker)
+        val digest = image.substring(marker + DIGEST_MARKER.length)
+        // 이름 쪽에 @가 또 있으면 digest 자리가 하나로 정해지지 않는다
+        if (name.isEmpty() || '@' in name || name.any { it in IMAGE_NAME_BLANKS }) {
+            return "reason=image must be digest pinned"
+        }
+        if (digest.length != DIGEST_LENGTH || !digest.all { it in '0'..'9' || it in 'a'..'f' }) {
+            return "reason=image digest must be $DIGEST_LENGTH lowercase hex characters"
+        }
+        // 런타임이 이름을 소문자로만 받는다
+        if (name != name.lowercase()) {
+            return "reason=image name must be lowercase"
+        }
+        // 마지막 경로 조각의 콜론은 태그다, digest와 함께 쓸 수 없다
+        if (':' in name.substringAfterLast('/')) {
+            return "reason=image must not carry a tag with the digest"
+        }
+        return null
+    }
+
+    // 런타임은 자원 값을 컨테이너 수로 나눠 쓴다, 그래서 컨테이너 수보다 작은 값을 거절한다
+    // 쓰기 경로도 그 몫 안에 들어가야 해서 컨테이너마다 붙이는 크기와 함께 본다
+    // 두 조건 다 접수 뒤에 걸린다, 하나는 런타임 요청 검증이고 하나는 자원을 만드는 단계다
+    private fun resourceViolation(containerCount: Int, resourceProfile: ResourceProfile): String? {
+        val perContainer = listOf(
+            "cpuMillicores" to resourceProfile.cpuMillicores,
+            "memoryMib" to resourceProfile.memoryMib,
+            "ephemeralStorageMib" to resourceProfile.ephemeralStorageMib,
+        )
+        perContainer.forEach { (name, value) ->
+            if (value < containerCount) {
+                return "$name=$value, containers=$containerCount, reason=need at least one unit per container"
+            }
+        }
+        // 나머지는 앞쪽 컨테이너가 하나씩 더 가져가므로 가장 적게 받는 몫으로 본다
+        val smallestShare = resourceProfile.ephemeralStorageMib / containerCount
+        if (smallestShare < WRITABLE_MIB_PER_CONTAINER) {
+            return "ephemeralStorageMib=${resourceProfile.ephemeralStorageMib}, " +
+                "containers=$containerCount, share=$smallestShare, " +
+                "reason=writable path needs $WRITABLE_MIB_PER_CONTAINER per container"
+        }
+        return null
     }
 
     private fun webViolation(exposed: List<ContainerSpec>): String? {

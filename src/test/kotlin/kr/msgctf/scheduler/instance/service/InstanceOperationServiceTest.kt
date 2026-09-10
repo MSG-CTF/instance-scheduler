@@ -28,6 +28,7 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
@@ -222,6 +223,26 @@ class InstanceOperationServiceTest {
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
         val instance = repository.save(newRequested().apply { internalConnections = "not-json" })
+        val service = newService(repository, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+        assertNull(instance.runtimeOperationId)
+    }
+
+    // 저장된 자원 값이 규칙에 어긋나면 진행하지 않고 FAILED로 보내는지 확인
+    @Test
+    fun `fails requested instance when stored resources cannot hold writable paths`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(
+            newRequested().apply { ephemeralStorageMib = ContainerSpecRules.WRITABLE_MIB_PER_CONTAINER - 1 },
+        )
         val service = newService(repository, events = events)
 
         // when
@@ -1384,6 +1405,14 @@ class InstanceOperationServiceTest {
         assertEquals(multiContainers.map { it.ports }, sent.map { it.ports })
         assertEquals(multiContainers.map { it.expose }, sent.map { it.expose })
         assertEquals(listOf(10001L, 10001L), sent.map { it.runAsUser })
+        // 요청에 실리는 쓰기 용량이 자원 검증이 보는 값과 같아야 한다
+        // 둘이 갈라지면 검증을 통과한 요청을 런타임이 거절한다
+        sent.forEach { container ->
+            assertEquals(
+                ContainerSpecRules.WRITABLE_MIB_PER_CONTAINER,
+                container.writablePaths?.sumOf { it.sizeMib },
+            )
+        }
     }
 
     // 저장된 격리 정책이 runtime 요청에 그대로 실리는지 확인
