@@ -79,6 +79,11 @@ class Instance(
     @Column(name = "containers", columnDefinition = "text")
     var containers: String? = null,
 
+    // 컨테이너 사이 통신을 허용할 목록, InternalConnection 배열의 JSON 문자열
+    // 이 컬럼이 생기기 전 행은 null이고, 그때는 이 값을 안 받아 통신이 전부 막혀 있었다
+    @Column(name = "internal_connections", columnDefinition = "text")
+    var internalConnections: String? = null,
+
     // 이 인스턴스를 만들 때 쓴 릴리스 번호, Registry가 매기는 revision 값이다
     // 이 컬럼이 생기기 전 행은 값을 알 수 없어 null로 남는다
     @Column(name = "registry_revision")
