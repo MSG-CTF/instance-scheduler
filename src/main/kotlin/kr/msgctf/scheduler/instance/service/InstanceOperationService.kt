@@ -264,7 +264,10 @@ class InstanceOperationService(
                                 // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
                                 // PWN은 쓰기 경로가 /tmp 아래여야 해서 요청에서 받게 되면 정책별로 갈라야 한다
                                 runAsUser = DEFAULT_RUN_AS_USER,
-                                writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
+                                writablePaths = ContainerSpecRules.CONTAINER_WRITABLE_PATHS
+                                    .map { (path, sizeMib) ->
+                                        RuntimeWritablePath(path = path, sizeMib = sizeMib)
+                                    },
                             )
                         },
                         internalConnections = spec.internalConnections.map { connection ->
@@ -965,11 +968,17 @@ class InstanceOperationService(
             log.warn("stored internal connections unreadable: instanceId={}", instance.instanceId, exception)
             return null
         }
+        val resourceProfile = ResourceProfile(
+            cpuMillicores = instance.cpuMillicores ?: return null,
+            memoryMib = instance.memoryMib ?: return null,
+            ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
+        )
         // 규칙에 어긋난 스펙을 그대로 보내면 브로커 예약까지 쓰고 런타임에서야 거절된다
-        ContainerSpecRules.violation(containers, instance.isolationProfile, connections)?.let { reason ->
-            log.warn("stored spec invalid: instanceId={}, {}", instance.instanceId, reason)
-            return null
-        }
+        ContainerSpecRules.violation(containers, instance.isolationProfile, connections, resourceProfile)
+            ?.let { reason ->
+                log.warn("stored spec invalid: instanceId={}, {}", instance.instanceId, reason)
+                return null
+            }
         return WorkloadSpec(
             teamId = instance.teamId,
             challengeId = instance.challengeId,
@@ -977,11 +986,7 @@ class InstanceOperationService(
             internalConnections = connections,
             isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
-            resourceProfile = ResourceProfile(
-                cpuMillicores = instance.cpuMillicores ?: return null,
-                memoryMib = instance.memoryMib ?: return null,
-                ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
-            ),
+            resourceProfile = resourceProfile,
         )
     }
 

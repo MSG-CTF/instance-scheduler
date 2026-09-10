@@ -17,6 +17,7 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
+import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -602,6 +603,27 @@ class InstanceSchedulerServiceTest {
                     listOf(webToDbConnection().copy(destinationContainer = "cache")),
                 )
             },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 저장된 자원 값도 재검증한다, 컨테이너마다 붙는 쓰기 경로가 몫을 넘으면 런타임이 거절한다
+    @Test
+    fun `rejects reset when stored resources cannot hold writable paths`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { ephemeralStorageMib = ContainerSpecRules.WRITABLE_MIB_PER_CONTAINER - 1 },
         )
         val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
 
