@@ -106,9 +106,8 @@ class FakeRuntimeClient(
             EndpointProtocol.TCP -> "tcp"
         }
         return request.workload.containers
-            .filter { it.expose }
             .flatMap { container ->
-                container.ports.map { port ->
+                container.publicPorts().map { port ->
                     RuntimeEndpoint(
                         containerName = container.name,
                         port = port,
@@ -132,3 +131,8 @@ enum class FakeRuntimeMode {
     OPERATION_FAIL,
     DELETE_TARGET_MISSING,
 }
+
+// 참가자에게 열리는 포트, 실제 런타임이 endpoints[]를 이 기준으로 채운다
+// 런타임 DTO에는 선언만 두고 판단은 여기서 한다
+private fun RuntimeContainer.publicPorts(): List<Int> =
+    exposedPorts ?: if (expose == true) ports else emptyList()

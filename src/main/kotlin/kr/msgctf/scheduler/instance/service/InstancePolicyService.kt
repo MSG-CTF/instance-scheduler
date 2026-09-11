@@ -4,6 +4,7 @@ import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
+import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import org.springframework.stereotype.Service
 
 // 인스턴스 생성 전에 적용할 정책을 검사한다
@@ -29,6 +30,21 @@ class InstancePolicyService(
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.HARD_TIMEOUT_LIMIT_EXCEEDED,
                 adminDetail = "hardTimeoutMinutes=$hardTimeoutMinutes, maxHardTimeoutMinutes=$maxHardTimeout",
+            )
+        }
+    }
+
+    // 런타임이 exposed_ports를 받는 버전으로 배포되기 전에는 이 필드가 온 요청을 접수에서 거절한다
+    // 초기화도 같은 검사를 거친다, 런타임을 되돌린 뒤 초기화하면 실행 중인 인스턴스만 잃기 때문이다
+    fun validateExposedPorts(containers: List<ContainerSpec>) {
+        if (policyProperties.exposedPortsEnabled) {
+            return
+        }
+        val offending = containers.filter { it.exposedPorts != null }.map { it.name }
+        if (offending.isNotEmpty()) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.EXPOSED_PORTS_NOT_SUPPORTED,
+                adminDetail = "containers=$offending, reason=exposed_ports disabled",
             )
         }
     }

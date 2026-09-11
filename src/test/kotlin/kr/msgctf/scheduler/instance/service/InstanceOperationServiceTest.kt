@@ -12,6 +12,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
+import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
@@ -156,6 +157,36 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.FAILED, instance.status)
         assertEquals(1, events.saved.size)
         assertNull(instance.runtimeOperationId)
+    }
+
+    // 저장된 exposedPorts가 런타임 요청에 그대로 실리는지 확인
+    // 빈 목록도 null이 아니라 빈 배열로 나가야 한다, null이 실리면 런타임이 거절한다
+    @Test
+    fun `sends stored exposed ports to runtime`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newRequested().apply { containers = ContainerSpecCodec().encode(exposedPortsContainers()) },
+        )
+        var captured: RuntimeCreateRequest? = null
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return delegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        val sent = captured!!.workload.containers
+        assertEquals(listOf(8080), sent.first().exposedPorts)
+        assertNull(sent.first().expose)
+        assertEquals(emptyList(), sent.last().exposedPorts)
+        assertNull(sent.last().expose)
     }
 
     // 저장된 자원 값이 규칙에 어긋나면 진행하지 않고 FAILED로 보내는지 확인

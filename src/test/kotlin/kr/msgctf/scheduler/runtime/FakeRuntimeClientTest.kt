@@ -52,6 +52,18 @@ class FakeRuntimeClientTest {
         assertEquals(endpoints?.first()?.serviceUrl, client.getOperation(accepted.operationId).result?.serviceUrl)
     }
 
+    // exposed_ports로 고른 포트에만 주소를 만드는지 확인, 실 계약이 비공개 포트를 endpoints[]에서 뺀다
+    @Test
+    fun `returns endpoints only for exposed ports`() {
+        val client = FakeRuntimeClient()
+        val instanceId = UUID.randomUUID()
+        val request = createRequest(instanceId, ports = listOf(8080, 9090), expose = null, exposedPorts = listOf(9090))
+
+        val accepted = assertIs<RuntimeSubmitResult.Accepted>(client.submitCreate(request))
+
+        assertEquals(listOf(9090), client.getOperation(accepted.operationId).result?.endpoints?.map { it.port })
+    }
+
     // PWN 문제의 주소는 TCP로 표시되는지 확인
     @Test
     fun `marks pwn endpoints as tcp`() {
@@ -108,6 +120,8 @@ class FakeRuntimeClientTest {
         instanceId: UUID,
         ports: List<Int> = listOf(8080),
         isolationProfile: IsolationProfile = IsolationProfile.WEB,
+        expose: Boolean? = true,
+        exposedPorts: List<Int>? = null,
     ): RuntimeCreateRequest =
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
@@ -121,7 +135,8 @@ class FakeRuntimeClientTest {
                         name = "challenge",
                         image = "registry.msgctf.local/challenges/web-01:2026.07.01",
                         ports = ports,
-                        expose = true,
+                        expose = expose,
+                        exposedPorts = exposedPorts,
                         runAsUser = 10001,
                     ),
                 ),

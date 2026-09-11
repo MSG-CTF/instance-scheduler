@@ -157,7 +157,7 @@
           </div>
         </div>
         <div class="span-all">
-          <label for="containers">containers (JSON 배열, image는 digest 고정, expose true는 1개)</label>
+          <label for="containers">containers (JSON 배열, image는 digest 고정, 공개는 expose 또는 exposed_ports 중 하나)</label>
           <textarea id="containers" rows="4" required>[
   { "name": "challenge", "image": "ghcr.io/example/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ports": [8080], "expose": true }
 ]</textarea>

@@ -3,6 +3,9 @@ package kr.msgctf.scheduler.instance.service
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testContainersJson
@@ -26,6 +29,28 @@ class ContainerSpecCodecTest {
     fun `keeps stored json shape stable`() {
         assertEquals(testContainersJson(), codec.encode(testContainers()))
         assertEquals(testContainers(), codec.decode(testContainersJson()))
+    }
+
+    // exposedPorts가 생기기 전 행은 expose만 있다, 그대로 읽히고 exposedPorts는 null이어야 한다
+    @Test
+    fun `reads legacy json without exposed ports`() {
+        val decoded = codec.decode(testContainersJson()).single()
+
+        assertEquals(true, decoded.expose)
+        assertNull(decoded.exposedPorts)
+    }
+
+    // 빈 exposedPorts는 저장을 거쳐도 빈 목록이어야 한다, null이 되면 런타임에 실을 때 거절된다
+    // expose가 null인 컨테이너는 expose 키를 아예 쓰지 않는다
+    @Test
+    fun `keeps empty exposed ports through round trip`() {
+        val containers = exposedPortsContainers()
+
+        val json = codec.encode(containers)
+
+        assertEquals(containers, codec.decode(json))
+        assertEquals(emptyList(), codec.decode(json).last().exposedPorts)
+        assertFalse(json.contains("\"expose\""))
     }
 
     @Test

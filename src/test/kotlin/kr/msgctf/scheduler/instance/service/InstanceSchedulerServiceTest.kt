@@ -8,6 +8,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
@@ -15,6 +16,7 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
+import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
@@ -27,6 +29,7 @@ import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
+import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
@@ -521,6 +524,67 @@ class InstanceSchedulerServiceTest {
         assertEquals(1, instanceRepository.savedInstances.size)
     }
 
+    // 런타임이 exposed_ports를 받기 전에는 접수에서 거절한다, 기본 설정은 꺼져 있다
+    @Test
+    fun `rejects create with exposed ports when disabled`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
+        val command = newCommand(teamId = testUuid(203), containers = exposedPortsContainers())
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(command)
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.EXPOSED_PORTS_NOT_SUPPORTED, exception.errorCode)
+        assertEquals(0, savedInstances.size)
+    }
+
+    // 설정을 켜면 저장까지 간다, 저장 JSON에 exposedPorts가 빈 목록까지 그대로 실리는지 본다
+    @Test
+    fun `stores exposed ports on create when enabled`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val instanceSchedulerService = newService(
+            instanceRepository = instanceRepository,
+            policyProperties = InstancePolicyProperties(exposedPortsEnabled = true),
+        )
+        val command = newCommand(teamId = testUuid(204), containers = exposedPortsContainers())
+
+        // when
+        instanceSchedulerService.createInstance(command)
+
+        // then
+        val stored = ContainerSpecCodec().decode(assertNotNull(savedInstances.single().containers))
+        assertEquals(listOf(8080), stored.first().exposedPorts)
+        assertEquals(emptyList(), stored.last().exposedPorts)
+    }
+
+    // 런타임을 되돌린 뒤 초기화하면 실행 중인 인스턴스만 잃으므로 초기화도 같은 검사를 거친다
+    @Test
+    fun `rejects reset with stored exposed ports when disabled`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { containers = ContainerSpecCodec().encode(exposedPortsContainers()) },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.EXPOSED_PORTS_NOT_SUPPORTED, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
     // 저장된 자원 값도 재검증한다, 컨테이너마다 붙는 쓰기 경로가 몫을 넘으면 런타임이 거절한다
     @Test
     fun `rejects reset when stored resources cannot hold writable paths`() {
@@ -824,12 +888,13 @@ class InstanceSchedulerServiceTest {
         ttlMinutes: Long = 120,
         hardTimeoutMinutes: Long = 180,
         userId: UUID = testUserId,
+        containers: List<ContainerSpec> = testContainers(),
     ): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
             challengeId = testUuid(10),
-            containers = testContainers(),
+            containers = containers,
             registryRevision = 3,
             // 기본값이 아닌 값을 써야 저장 매핑이 실제로 도는지 확인된다
             isolationProfile = IsolationProfile.PWN,

@@ -258,6 +258,7 @@ class InstanceOperationService(
                                 image = container.image,
                                 ports = container.ports,
                                 expose = container.expose,
+                                exposedPorts = container.exposedPorts,
                                 // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
                                 // PWN은 쓰기 경로가 /tmp 아래여야 해서 요청에서 받게 되면 정책별로 갈라야 한다
                                 runAsUser = DEFAULT_RUN_AS_USER,
@@ -935,7 +936,7 @@ class InstanceOperationService(
     private fun exposedPortCount(instance: Instance): Int {
         val containersJson = instance.containers ?: return 0
         return try {
-            containerSpecCodec.decode(containersJson).filter { it.expose }.sumOf { it.ports.size }
+            containerSpecCodec.decode(containersJson).sumOf { it.publicPorts().size }
         } catch (_: Exception) {
             0
         }

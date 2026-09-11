@@ -482,6 +482,25 @@ class InstanceCommandIntegrationTest {
         }
     }
 
+    // 런타임이 exposed_ports를 받기 전에는 접수에서 거절한다, 기본 설정이 꺼져 있다
+    // 실제 mapper의 snake_case 바인딩과 에러 코드 매핑까지 한 번에 본다
+    @Test
+    fun `create api rejects exposed ports while disabled`() {
+        val requestBody = createRequestBody(
+            teamId = testUuid(916),
+            challengeId = testUuid(10),
+            containers = """[ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080, 9090], "exposed_ports": [8080] } ]""",
+        )
+
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("EXPOSED_PORTS_NOT_SUPPORTED") }
+        }
+    }
+
     // 정해진 두 값 밖의 격리 정책은 접수하지 않는다
     @Test
     fun `create api rejects unknown isolation profile`() {

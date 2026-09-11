@@ -82,6 +82,7 @@ data class CreateInstanceRequest(
 }
 
 // 컨테이너 한 개의 요청 값
+// 공개 지정은 expose나 exposed_ports로 한다, 둘 다 없으면 비공개고 둘 다 있으면 거절한다
 data class ContainerSpecRequest(
     @field:NotBlank
     val name: String,
@@ -92,7 +93,11 @@ data class ContainerSpecRequest(
     @field:NotEmpty
     val ports: List<Int>,
 
-    val expose: Boolean,
+    val expose: Boolean? = null,
+
+    // 공개할 포트만 고른 목록, 빈 배열은 전부 비공개다
+    // 명시적 null은 생략과 같다, 런타임은 null을 거절하지만 여기서 걸러져 런타임까지 가지 않는다
+    val exposedPorts: List<Int>? = null,
 ) {
 
     fun toContainerSpec(): ContainerSpec =
@@ -101,6 +106,7 @@ data class ContainerSpecRequest(
             image = image,
             ports = ports,
             expose = expose,
+            exposedPorts = exposedPorts,
         )
 }
 

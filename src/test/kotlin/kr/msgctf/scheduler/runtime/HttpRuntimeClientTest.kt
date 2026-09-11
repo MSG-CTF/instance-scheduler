@@ -9,6 +9,8 @@ import kotlin.test.assertNull
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
+import org.hamcrest.Matchers.hasKey
+import org.hamcrest.Matchers.not
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
@@ -41,6 +43,8 @@ class HttpRuntimeClientTest {
             .andExpect(jsonPath("$.workload.containers[0].name").value("challenge"))
             .andExpect(jsonPath("$.workload.containers[0].ports[0]").value(8080))
             .andExpect(jsonPath("$.workload.containers[0].expose").value(true))
+            // expose를 쓰는 컨테이너에 exposed_ports가 null로라도 실리면 런타임이 거절한다
+            .andExpect(withoutKey("$.workload.containers[0]", "exposed_ports"))
             .andExpect(jsonPath("$.workload.containers[0].run_as_user").value(10001))
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].path").value("/tmp"))
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].size_mib").value(64))
@@ -221,7 +225,45 @@ class HttpRuntimeClientTest {
         assertFailsWith<Exception> { client.getOperation("op-missing") }
     }
 
-    private fun createRequest(instanceId: UUID): RuntimeCreateRequest =
+    // exposed_ports를 쓰는 컨테이너는 expose 키 없이 나가야 한다, 둘이 같이 가면 런타임이 거절한다
+    // 빈 목록은 빈 배열 그대로 나가야 한다, null로 나가면 런타임이 거절한다
+    @Test
+    fun `sends exposed ports without expose in create body`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances"))
+            .andExpect(method(HttpMethod.POST))
+            .andExpect(jsonPath("$.workload.containers[0].exposed_ports[0]").value(8080))
+            .andExpect(withoutKey("$.workload.containers[0]", "expose"))
+            .andExpect(jsonPath("$.workload.containers[1].exposed_ports").isArray())
+            .andExpect(jsonPath("$.workload.containers[1].exposed_ports").isEmpty())
+            .andExpect(withoutKey("$.workload.containers[1]", "expose"))
+            .andRespond(
+                withStatus(HttpStatus.ACCEPTED)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"operation_id":"op-create-123","request_id":"runtime-create-$instanceId","type":"CREATE","status":"QUEUED","attempt":0,"max_attempts":3,"created":true}"""),
+            )
+
+        val submitted = client.submitCreate(
+            createRequest(
+                instanceId,
+                containers = listOf(
+                    runtimeContainer(name = "web", ports = listOf(8080, 9090), expose = null, exposedPorts = listOf(8080)),
+                    runtimeContainer(name = "db", ports = listOf(5432), expose = null, exposedPorts = emptyList()),
+                ),
+            ),
+        )
+
+        assertIs<RuntimeSubmitResult.Accepted>(submitted)
+    }
+
+    // jsonPath의 doesNotExist는 값이 null이어도 통과한다, 런타임은 null이 실린 키도 거절하므로 키 자체가 없는지 본다
+    private fun withoutKey(objectPath: String, key: String) =
+        jsonPath(objectPath).value(not(hasKey(key)))
+
+    private fun createRequest(
+        instanceId: UUID,
+        containers: List<RuntimeContainer> = listOf(runtimeContainer()),
+    ): RuntimeCreateRequest =
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
@@ -229,18 +271,25 @@ class HttpRuntimeClientTest {
             isolationProfile = IsolationProfile.WEB,
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             workload = RuntimeWorkload(
-                containers = listOf(
-                    RuntimeContainer(
-                        name = "challenge",
-                        image = "ghcr.io/example/web:latest",
-                        ports = listOf(8080),
-                        expose = true,
-                        runAsUser = 10001,
-                        writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
-                    ),
-                ),
+                containers = containers,
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
+        )
+
+    private fun runtimeContainer(
+        name: String = "challenge",
+        ports: List<Int> = listOf(8080),
+        expose: Boolean? = true,
+        exposedPorts: List<Int>? = null,
+    ): RuntimeContainer =
+        RuntimeContainer(
+            name = name,
+            image = "ghcr.io/example/web:latest",
+            ports = ports,
+            expose = expose,
+            exposedPorts = exposedPorts,
+            runAsUser = 10001,
+            writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
         )
 
     // 200이면 workload id를 꺼내는지 확인, 나머지 응답 필드는 정리 판단에 쓰지 않는다
