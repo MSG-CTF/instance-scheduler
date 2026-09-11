@@ -39,6 +39,10 @@ enum class SchedulerErrorCode(
         HttpStatus.BAD_REQUEST,
         "요청한 하드타임아웃이 허용 한도를 초과했습니다.",
     ),
+    EXPOSED_PORTS_NOT_SUPPORTED(
+        HttpStatus.BAD_REQUEST,
+        "컨테이너별 공개 포트 지정은 아직 지원하지 않습니다.",
+    ),
     ACTIVE_INSTANCE_EXISTS(
         HttpStatus.CONFLICT,
         "이미 실행 중인 인스턴스가 있습니다.",

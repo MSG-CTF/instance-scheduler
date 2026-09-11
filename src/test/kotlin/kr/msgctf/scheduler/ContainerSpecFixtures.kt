@@ -12,3 +12,11 @@ fun testContainers(): List<ContainerSpec> =
 
 fun testContainersJson(): String =
     """[{"name":"challenge","image":"$TEST_DIGEST_IMAGE","ports":[8080],"expose":true}]"""
+
+// exposedPorts로 공개를 지정한 구성, web은 한 포트를 열고 db는 빈 목록으로 전부 비공개다
+// WEB과 PWN 규칙을 둘 다 통과하는 모양이라 정책 게이트 테스트가 그대로 쓴다
+fun exposedPortsContainers(): List<ContainerSpec> =
+    listOf(
+        ContainerSpec(name = "web", image = TEST_DIGEST_IMAGE, ports = listOf(8080), exposedPorts = listOf(8080)),
+        ContainerSpec(name = "db", image = TEST_DIGEST_IMAGE, ports = listOf(5432), exposedPorts = emptyList()),
+    )

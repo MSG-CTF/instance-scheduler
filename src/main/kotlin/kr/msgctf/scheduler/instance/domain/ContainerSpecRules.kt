@@ -91,11 +91,14 @@ object ContainerSpecRules {
                     return "container=${container.name}, port=$port"
                 }
             }
+            exposureViolation(container)?.let { reason ->
+                return "container=${container.name}, $reason"
+            }
         }
         // 참가자가 접속할 곳이 없으면 문제가 성립하지 않는다
-        val exposed = containers.filter { it.expose }
+        val exposed = containers.filter { it.publicPorts().isNotEmpty() }
         if (exposed.isEmpty()) {
-            return "expose=true count=0, required=at least 1"
+            return "public ports=0, required=at least 1"
         }
         return when (isolationProfile) {
             IsolationProfile.WEB -> webViolation(exposed)
@@ -154,8 +157,26 @@ object ContainerSpecRules {
         return null
     }
 
+    // 런타임 규칙 그대로다, expose와 exposedPorts를 함께 보내면 expose가 false여도 거절한다
+    // 둘 다 없으면 비공개다, 런타임이 생략을 비공개로 읽으므로 여기서 더 엄하게 막지 않는다
+    // exposedPorts는 ports에 선언한 포트만 중복 없이 고른다, 빈 배열은 전부 비공개라 통과한다
+    private fun exposureViolation(container: ContainerSpec): String? {
+        if (container.expose != null && container.exposedPorts != null) {
+            return "reason=expose and exposedPorts cannot be combined"
+        }
+        val exposedPorts = container.exposedPorts ?: return null
+        if (exposedPorts.size != exposedPorts.toSet().size) {
+            return "reason=duplicated exposedPorts"
+        }
+        val declared = container.ports.toSet()
+        exposedPorts.firstOrNull { it !in declared }?.let { port ->
+            return "exposedPort=$port, reason=not declared in ports"
+        }
+        return null
+    }
+
     private fun webViolation(exposed: List<ContainerSpec>): String? {
-        val exposedPorts = exposed.sumOf { it.ports.size }
+        val exposedPorts = exposed.sumOf { it.publicPorts().size }
         if (exposedPorts > MAX_EXPOSED_PORTS) {
             return "exposed ports=$exposedPorts, max=$MAX_EXPOSED_PORTS"
         }
@@ -167,7 +188,7 @@ object ContainerSpecRules {
     // PWN 규칙은 비공개 보조 컨테이너를 묶지 않는다, 묶는 것은 공개하는 쪽뿐이다
     private fun pwnViolation(exposed: List<ContainerSpec>): String? {
         if (exposed.size != PWN_EXPOSED_CONTAINERS) {
-            return "isolationProfile=PWN, expose=true count=${exposed.size}, required=$PWN_EXPOSED_CONTAINERS"
+            return "isolationProfile=PWN, public containers=${exposed.size}, required=$PWN_EXPOSED_CONTAINERS"
         }
         val container = exposed.single()
         if (container.ports.size != PWN_EXPOSED_PORTS) {

@@ -18,4 +18,8 @@ data class InstancePolicyProperties(
     // 0이나 음수면 모든 생성이 거절되므로 양수만 허용해 기동 시점에 걸러낸다
     @field:Positive
     val maxTeamActiveInstances: Long = 2,
+
+    // 컨테이너별 공개 포트(exposed_ports)를 받을지, 런타임이 이 필드를 받는 버전으로 배포된 뒤에 켠다
+    // 꺼진 채로 넘기면 런타임이 모르는 필드로 400을 내고 인스턴스는 FAILED로만 남으므로 접수에서 거절한다
+    val exposedPortsEnabled: Boolean = false,
 )

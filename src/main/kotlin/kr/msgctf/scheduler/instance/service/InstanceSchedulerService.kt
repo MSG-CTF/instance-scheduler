@@ -39,6 +39,7 @@ class InstanceSchedulerService(
     @Transactional
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
+        instancePolicyService.validateExposedPorts(command.containers)
 
         // 팀 잠금을 행 잠금보다 먼저 잡아 같은 팀의 create끼리 잠금 순서를 통일한다
         instanceRepository.lockTeam(command.teamId.toString())
@@ -220,6 +221,7 @@ class InstanceSchedulerService(
                     adminDetail = "instanceId=${command.instanceId}, reason=stored spec invalid, $reason",
                 )
             }
+        instancePolicyService.validateExposedPorts(storedContainers)
 
         val replacedInstanceId = replaceOwnInstance(previous)
 

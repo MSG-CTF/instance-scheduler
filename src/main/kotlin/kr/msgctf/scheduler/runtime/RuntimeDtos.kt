@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.runtime
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.util.UUID
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -48,7 +49,14 @@ data class RuntimeContainer(
     val ports: List<Int>,
 
     // 참가자에게 외부 공개할 포트인지, 컨테이너 중 하나는 반드시 공개해야 한다
-    val expose: Boolean,
+    // exposed_ports와 함께 보내면 런타임이 거절한다, 없는 쪽은 null로 두고 싣지 않는다
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    val expose: Boolean? = null,
+
+    // 공개할 포트만 고른 목록, 빈 배열은 전부 비공개라 그대로 실어야 한다
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("exposed_ports")
+    val exposedPorts: List<Int>? = null,
 
     // 컨테이너 프로세스의 Linux UID, root(0)는 거부된다
     @JsonProperty("run_as_user")

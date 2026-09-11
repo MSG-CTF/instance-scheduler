@@ -7,6 +7,8 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.exposedPortsContainers
+import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 
@@ -134,6 +136,37 @@ class InstancePolicyServiceTest {
             raisedLimitService.validateTeamActiveCount(teamId = testUuid(1), activeCount = 3)
         }
         assertEquals(SchedulerErrorCode.TEAM_INSTANCE_LIMIT_EXCEEDED, exception.errorCode)
+    }
+
+    // 런타임이 exposed_ports를 받기 전에는 접수에서 거절한다, 기본 설정은 꺼져 있다
+    @Test
+    fun `rejects exposed ports when disabled`() {
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateExposedPorts(exposedPortsContainers())
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.EXPOSED_PORTS_NOT_SUPPORTED, exception.errorCode)
+    }
+
+    // expose만 쓰는 기존 요청은 설정과 무관하게 통과한다
+    @Test
+    fun `allows expose when exposed ports are disabled`() {
+        // when & then (예외가 발생하지 않아야 한다)
+        instancePolicyService.validateExposedPorts(testContainers())
+    }
+
+    // 설정을 켜면 통과한다, 런타임 배포를 확인한 뒤 켜는 스위치다
+    @Test
+    fun `allows exposed ports when enabled`() {
+        // given
+        val enabledService = InstancePolicyService(
+            policyProperties = InstancePolicyProperties(exposedPortsEnabled = true),
+        )
+
+        // when & then (예외가 발생하지 않아야 한다)
+        enabledService.validateExposedPorts(exposedPortsContainers())
     }
 
     // inactive 상태는 active 조회 대상에 포함되지 않는지 확인
