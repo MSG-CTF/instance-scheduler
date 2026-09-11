@@ -7,7 +7,6 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.domain.InternalConnection
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
@@ -18,7 +17,6 @@ data class CreateInstanceCommand(
     val userId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
-    val internalConnections: List<InternalConnection>,
     val registryRevision: Long,
     val isolationProfile: IsolationProfile,
     val architecture: Architecture,

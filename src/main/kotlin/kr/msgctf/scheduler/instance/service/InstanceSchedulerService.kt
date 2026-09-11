@@ -31,7 +31,6 @@ class InstanceSchedulerService(
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
     private val containerSpecCodec: ContainerSpecCodec,
-    private val internalConnectionCodec: InternalConnectionCodec,
     private val serviceEndpointCodec: ServiceEndpointCodec,
     private val clock: Clock,
 ) {
@@ -40,6 +39,7 @@ class InstanceSchedulerService(
     @Transactional
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
+        instancePolicyService.validateExposedPorts(command.containers)
 
         // 팀 잠금을 행 잠금보다 먼저 잡아 같은 팀의 create끼리 잠금 순서를 통일한다
         instanceRepository.lockTeam(command.teamId.toString())
@@ -68,7 +68,6 @@ class InstanceSchedulerService(
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
                 containers = containerSpecCodec.encode(command.containers),
-                internalConnections = internalConnectionCodec.encode(command.internalConnections),
                 registryRevision = command.registryRevision,
                 isolationProfile = command.isolationProfile,
                 architecture = command.architecture,
@@ -210,33 +209,19 @@ class InstanceSchedulerService(
                 cause = exception,
             )
         }
-        // 이 컬럼이 생기기 전 행은 null이다, 그때는 컨테이너 사이 통신이 전부 막혀 있었으므로 빈 목록과 같다
-        val storedConnections = try {
-            previous.internalConnections?.let { internalConnectionCodec.decode(it) } ?: emptyList()
-        } catch (exception: Exception) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
-                adminDetail = "instanceId=${command.instanceId}, reason=stored internal connections unreadable",
-                cause = exception,
-            )
-        }
         val storedResources = ResourceProfile(
             cpuMillicores = cpuMillicores,
             memoryMib = memoryMib,
             ephemeralStorageMib = ephemeralStorageMib,
         )
-        ContainerSpecRules.violation(
-            storedContainers,
-            previous.isolationProfile,
-            storedConnections,
-            storedResources,
-        )
+        ContainerSpecRules.violation(storedContainers, previous.isolationProfile, storedResources)
             ?.let { reason ->
                 throw SchedulerException(
                     errorCode = SchedulerErrorCode.INTERNAL_ERROR,
                     adminDetail = "instanceId=${command.instanceId}, reason=stored spec invalid, $reason",
                 )
             }
+        instancePolicyService.validateExposedPorts(storedContainers)
 
         val replacedInstanceId = replaceOwnInstance(previous)
 
@@ -249,7 +234,6 @@ class InstanceSchedulerService(
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
                 containers = containers,
-                internalConnections = previous.internalConnections,
                 registryRevision = previous.registryRevision,
                 isolationProfile = previous.isolationProfile,
                 architecture = architecture,

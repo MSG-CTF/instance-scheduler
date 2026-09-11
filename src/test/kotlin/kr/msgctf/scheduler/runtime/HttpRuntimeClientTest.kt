@@ -9,6 +9,8 @@ import kotlin.test.assertNull
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
+import org.hamcrest.Matchers.hasKey
+import org.hamcrest.Matchers.not
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
@@ -41,10 +43,12 @@ class HttpRuntimeClientTest {
             .andExpect(jsonPath("$.workload.containers[0].name").value("challenge"))
             .andExpect(jsonPath("$.workload.containers[0].ports[0]").value(8080))
             .andExpect(jsonPath("$.workload.containers[0].expose").value(true))
+            // expose를 쓰는 컨테이너에 exposed_ports가 null로라도 실리면 런타임이 거절한다
+            .andExpect(withoutKey("$.workload.containers[0]", "exposed_ports"))
             .andExpect(jsonPath("$.workload.containers[0].run_as_user").value(10001))
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].path").value("/tmp"))
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].size_mib").value(64))
-            // 연결이 없으면 필드를 아예 안 보낸다, 연결을 안 쓰는 문제의 요청을 그대로 두기 위해서다
+            // STANDARD@v2부터 런타임이 이 필드를 거절한다, 빈 배열이나 null이어도 400이다
             .andExpect(jsonPath("$.workload.internal_connections").doesNotExist())
             .andRespond(
                 withStatus(HttpStatus.ACCEPTED)
@@ -221,16 +225,18 @@ class HttpRuntimeClientTest {
         assertFailsWith<Exception> { client.getOperation("op-missing") }
     }
 
-    // 컨테이너 사이 연결이 계약이 정한 필드 이름 그대로 실려 나가는지 확인
+    // exposed_ports를 쓰는 컨테이너는 expose 키 없이 나가야 한다, 둘이 같이 가면 런타임이 거절한다
+    // 빈 목록은 빈 배열 그대로 나가야 한다, null로 나가면 런타임이 거절한다
     @Test
-    fun `sends internal connections in create body`() {
+    fun `sends exposed ports without expose in create body`() {
         val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://runtime.test/internal/v1/instances"))
             .andExpect(method(HttpMethod.POST))
-            .andExpect(jsonPath("$.workload.internal_connections[0].source_container").value("web"))
-            .andExpect(jsonPath("$.workload.internal_connections[0].destination_container").value("db"))
-            .andExpect(jsonPath("$.workload.internal_connections[0].protocol").value("TCP"))
-            .andExpect(jsonPath("$.workload.internal_connections[0].port").value(5432))
+            .andExpect(jsonPath("$.workload.containers[0].exposed_ports[0]").value(8080))
+            .andExpect(withoutKey("$.workload.containers[0]", "expose"))
+            .andExpect(jsonPath("$.workload.containers[1].exposed_ports").isArray())
+            .andExpect(jsonPath("$.workload.containers[1].exposed_ports").isEmpty())
+            .andExpect(withoutKey("$.workload.containers[1]", "expose"))
             .andRespond(
                 withStatus(HttpStatus.ACCEPTED)
                     .contentType(MediaType.APPLICATION_JSON)
@@ -240,13 +246,9 @@ class HttpRuntimeClientTest {
         val submitted = client.submitCreate(
             createRequest(
                 instanceId,
-                listOf(
-                    RuntimeInternalConnection(
-                        sourceContainer = "web",
-                        destinationContainer = "db",
-                        protocol = ConnectionProtocol.TCP,
-                        port = 5432,
-                    ),
+                containers = listOf(
+                    runtimeContainer(name = "web", ports = listOf(8080, 9090), expose = null, exposedPorts = listOf(8080)),
+                    runtimeContainer(name = "db", ports = listOf(5432), expose = null, exposedPorts = emptyList()),
                 ),
             ),
         )
@@ -254,9 +256,13 @@ class HttpRuntimeClientTest {
         assertIs<RuntimeSubmitResult.Accepted>(submitted)
     }
 
+    // jsonPath의 doesNotExist는 값이 null이어도 통과한다, 런타임은 null이 실린 키도 거절하므로 키 자체가 없는지 본다
+    private fun withoutKey(objectPath: String, key: String) =
+        jsonPath(objectPath).value(not(hasKey(key)))
+
     private fun createRequest(
         instanceId: UUID,
-        internalConnections: List<RuntimeInternalConnection> = emptyList(),
+        containers: List<RuntimeContainer> = listOf(runtimeContainer()),
     ): RuntimeCreateRequest =
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
@@ -265,19 +271,25 @@ class HttpRuntimeClientTest {
             isolationProfile = IsolationProfile.WEB,
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             workload = RuntimeWorkload(
-                containers = listOf(
-                    RuntimeContainer(
-                        name = "challenge",
-                        image = "ghcr.io/example/web:latest",
-                        ports = listOf(8080),
-                        expose = true,
-                        runAsUser = 10001,
-                        writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
-                    ),
-                ),
-                internalConnections = internalConnections,
+                containers = containers,
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
+        )
+
+    private fun runtimeContainer(
+        name: String = "challenge",
+        ports: List<Int> = listOf(8080),
+        expose: Boolean? = true,
+        exposedPorts: List<Int>? = null,
+    ): RuntimeContainer =
+        RuntimeContainer(
+            name = name,
+            image = "ghcr.io/example/web:latest",
+            ports = ports,
+            expose = expose,
+            exposedPorts = exposedPorts,
+            runAsUser = 10001,
+            writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
         )
 
     // 200이면 workload id를 꺼내는지 확인, 나머지 응답 필드는 정리 판단에 쓰지 않는다

@@ -1,10 +1,6 @@
 package kr.msgctf.scheduler
 
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
-import kr.msgctf.scheduler.instance.domain.InternalConnection
-import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
-import kr.msgctf.scheduler.instance.service.InternalConnectionCodec
-import kr.msgctf.scheduler.runtime.ConnectionProtocol
 
 // 테스트 공용 digest 고정 이미지, 자릿수만 맞춘 예시 값
 const val TEST_DIGEST_IMAGE: String =
@@ -17,23 +13,10 @@ fun testContainers(): List<ContainerSpec> =
 fun testContainersJson(): String =
     """[{"name":"challenge","image":"$TEST_DIGEST_IMAGE","ports":[8080],"expose":true}]"""
 
-// 공개하는 web과 비공개 db, 컨테이너 사이 연결을 보기에 가장 흔한 구성이다
-fun webAndDbContainers(): List<ContainerSpec> =
+// exposedPorts로 공개를 지정한 구성, web은 한 포트를 열고 db는 빈 목록으로 전부 비공개다
+// WEB과 PWN 규칙을 둘 다 통과하는 모양이라 정책 게이트 테스트가 그대로 쓴다
+fun exposedPortsContainers(): List<ContainerSpec> =
     listOf(
-        ContainerSpec(name = "web", image = TEST_DIGEST_IMAGE, ports = listOf(8080), expose = true),
-        ContainerSpec(name = "db", image = TEST_DIGEST_IMAGE, ports = listOf(5432), expose = false),
+        ContainerSpec(name = "web", image = TEST_DIGEST_IMAGE, ports = listOf(8080), exposedPorts = listOf(8080)),
+        ContainerSpec(name = "db", image = TEST_DIGEST_IMAGE, ports = listOf(5432), exposedPorts = emptyList()),
     )
-
-// web에서 db의 5432로 가는 연결 하나
-fun webToDbConnection(): InternalConnection =
-    InternalConnection(
-        sourceContainer = "web",
-        destinationContainer = "db",
-        protocol = ConnectionProtocol.TCP,
-        port = 5432,
-    )
-
-// 저장 JSON은 손으로 적지 않고 코덱으로 만든다, 필드 이름이 바뀌어도 픽스처가 따라간다
-fun webAndDbContainersJson(): String = ContainerSpecCodec().encode(webAndDbContainers())
-
-fun webToDbConnectionJson(): String = InternalConnectionCodec().encode(listOf(webToDbConnection()))

@@ -49,12 +49,10 @@ object ContainerSpecRules {
 
     // 위반이 없으면 null, 있으면 원인 설명을 돌려준다
     // 공개 규칙이 격리 정책마다 달라 정책을 함께 받는다
-    // 연결 검증에는 컨테이너 이름과 포트가 필요해 컨테이너 목록과 같은 함수에서 받는다
     // 자원 규칙은 컨테이너 수에 걸려 있어 자원 프로필도 함께 받는다
     fun violation(
         containers: List<ContainerSpec>,
         isolationProfile: IsolationProfile,
-        internalConnections: List<InternalConnection>,
         resourceProfile: ResourceProfile,
     ): String? {
         if (containers.isEmpty()) {
@@ -93,20 +91,19 @@ object ContainerSpecRules {
                     return "container=${container.name}, port=$port"
                 }
             }
+            exposureViolation(container)?.let { reason ->
+                return "container=${container.name}, $reason"
+            }
         }
         // 참가자가 접속할 곳이 없으면 문제가 성립하지 않는다
-        val exposed = containers.filter { it.expose }
+        val exposed = containers.filter { it.publicPorts().isNotEmpty() }
         if (exposed.isEmpty()) {
-            return "expose=true count=0, required=at least 1"
+            return "public ports=0, required=at least 1"
         }
-        val exposureViolation = when (isolationProfile) {
+        return when (isolationProfile) {
             IsolationProfile.WEB -> webViolation(exposed)
             IsolationProfile.PWN -> pwnViolation(exposed)
         }
-        if (exposureViolation != null) {
-            return exposureViolation
-        }
-        return connectionViolation(containers, internalConnections)
     }
 
     // 런타임 validImmutableImageReference와 같은 조건을 본다
@@ -160,8 +157,26 @@ object ContainerSpecRules {
         return null
     }
 
+    // 런타임 규칙 그대로다, expose와 exposedPorts를 함께 보내면 expose가 false여도 거절한다
+    // 둘 다 없으면 비공개다, 런타임이 생략을 비공개로 읽으므로 여기서 더 엄하게 막지 않는다
+    // exposedPorts는 ports에 선언한 포트만 중복 없이 고른다, 빈 배열은 전부 비공개라 통과한다
+    private fun exposureViolation(container: ContainerSpec): String? {
+        if (container.expose != null && container.exposedPorts != null) {
+            return "reason=expose and exposedPorts cannot be combined"
+        }
+        val exposedPorts = container.exposedPorts ?: return null
+        if (exposedPorts.size != exposedPorts.toSet().size) {
+            return "reason=duplicated exposedPorts"
+        }
+        val declared = container.ports.toSet()
+        exposedPorts.firstOrNull { it !in declared }?.let { port ->
+            return "exposedPort=$port, reason=not declared in ports"
+        }
+        return null
+    }
+
     private fun webViolation(exposed: List<ContainerSpec>): String? {
-        val exposedPorts = exposed.sumOf { it.ports.size }
+        val exposedPorts = exposed.sumOf { it.publicPorts().size }
         if (exposedPorts > MAX_EXPOSED_PORTS) {
             return "exposed ports=$exposedPorts, max=$MAX_EXPOSED_PORTS"
         }
@@ -173,47 +188,12 @@ object ContainerSpecRules {
     // PWN 규칙은 비공개 보조 컨테이너를 묶지 않는다, 묶는 것은 공개하는 쪽뿐이다
     private fun pwnViolation(exposed: List<ContainerSpec>): String? {
         if (exposed.size != PWN_EXPOSED_CONTAINERS) {
-            return "isolationProfile=PWN, expose=true count=${exposed.size}, required=$PWN_EXPOSED_CONTAINERS"
+            return "isolationProfile=PWN, public containers=${exposed.size}, required=$PWN_EXPOSED_CONTAINERS"
         }
         val container = exposed.single()
         if (container.ports.size != PWN_EXPOSED_PORTS) {
             return "isolationProfile=PWN, container=${container.name}, " +
                 "ports=${container.ports.size}, required=$PWN_EXPOSED_PORTS"
-        }
-        return null
-    }
-
-    // 이 목록은 허용 목록이다-> 비어 있으면 컨테이너 사이 통신이 전부 막힌다
-    // 런타임이 거절할 목록을 여기서 걸러야 접수 단계에서 400으로 알려줄 수 있다
-    // 개수 상한은 두지 않는다, 런타임에 상한이 없어 상한을 두면 런타임이 받아 줄 요청까지 거절된다
-    private fun connectionViolation(
-        containers: List<ContainerSpec>,
-        connections: List<InternalConnection>,
-    ): String? {
-        val portsByContainer = containers.associate { it.name to it.ports.toSet() }
-        val seen = mutableSetOf<InternalConnection>()
-        connections.forEach { connection ->
-            if (connection.sourceContainer !in portsByContainer) {
-                return "internalConnection source=${connection.sourceContainer}, " +
-                    "reason=container does not exist"
-            }
-            val destinationPorts = portsByContainer[connection.destinationContainer]
-                ?: return "internalConnection destination=${connection.destinationContainer}, " +
-                    "reason=container does not exist"
-            // 런타임은 목적지 컨테이너가 ports에 선언해 둔 포트로만 통신을 연다
-            // 공개하지 않는 컨테이너도 통신에 쓸 포트는 ports에 선언해야 한다
-            if (connection.port !in destinationPorts) {
-                return "internalConnection destination=${connection.destinationContainer}, " +
-                    "port=${connection.port}, reason=port not declared on destination"
-            }
-            // 출발, 목적지, 규약, 포트가 모두 같은 연결이 두 번 오면 런타임이 거절한다
-            // 그 거절은 요청 검증이 아니라 통신 규칙을 만드는 단계에서 일어난다
-            // 그래서 중복이 실린 요청은 접수를 통과한 뒤에 실패한다
-            if (!seen.add(connection)) {
-                return "internalConnection source=${connection.sourceContainer}, " +
-                    "destination=${connection.destinationContainer}, port=${connection.port}, " +
-                    "reason=duplicated connection"
-            }
         }
         return null
     }

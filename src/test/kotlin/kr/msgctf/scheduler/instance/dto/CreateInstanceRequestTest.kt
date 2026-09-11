@@ -4,12 +4,12 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
-import kr.msgctf.scheduler.runtime.ConnectionProtocol
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testUuid
 import tools.jackson.databind.ObjectMapper
@@ -29,7 +29,7 @@ class CreateInstanceRequestTest {
         assertEquals(IsolationProfile.PWN, request.toCommand().isolationProfile)
     }
 
-    // 아래 세 건은 요청 body를 읽는 단계를 직접 확인한다
+    // 아래 네 건은 요청 body를 읽는 단계를 직접 확인한다
     // 400 응답까지 확인하는 통합 테스트는 Docker가 있어야 돌아서, 읽기 실패 자체는 여기서 고정한다
     @Test
     fun `reads documented request body`() {
@@ -52,37 +52,20 @@ class CreateInstanceRequestTest {
         }
     }
 
-    // 목록을 생략한 요청은 연결이 없는 것으로 읽는다, 빈 배열을 보낸 것과 같다
+    // STANDARD@v2부터 이 필드를 받지 않는다, 아직 보내는 백엔드가 있어도 읽기에서 막지 않고 버린다
+    // 런타임 요청에 실리지 않는 것은 HttpRuntimeClientTest가 본다
     @Test
-    fun `reads request body without internal connections as empty`() {
-        val json = requestJson(""""isolation_profile": "WEB",""")
+    fun `reads request body with internal connections and drops them`() {
+        val json = requestJson(
+            """"isolation_profile": "WEB",
+            "internal_connections": [{ "source_container": "web", "destination_container": "db", "protocol": "TCP", "port": 5432 }],""",
+        )
 
         val request = requestMapper.readValue<CreateInstanceRequest>(json)
 
-        assertEquals(emptyList(), request.internalConnections)
-    }
-
-    // 백엔드가 보낼 필드 이름을 그대로 읽는지 확인한다, 계약이 어긋나면 여기서 드러난다
-    @Test
-    fun `reads internal connections from request body`() {
-        val json = requestJson(""""isolation_profile": "WEB",""", connectionsJson("TCP"))
-
-        val connection = requestMapper.readValue<CreateInstanceRequest>(json).internalConnections.single()
-
-        assertEquals("web", connection.sourceContainer)
-        assertEquals("db", connection.destinationContainer)
-        assertEquals(ConnectionProtocol.TCP, connection.protocol)
-        assertEquals(5432, connection.port)
-    }
-
-    // 런타임이 TCP만 받으므로 다른 규약은 읽는 단계에서 걸린다, 검증까지 오지 않는다
-    @Test
-    fun `fails to read request body with non tcp internal connection`() {
-        val json = requestJson(""""isolation_profile": "WEB",""", connectionsJson("UDP"))
-
-        assertFailsWith<MismatchedInputException> {
-            requestMapper.readValue<CreateInstanceRequest>(json)
-        }
+        // 모르는 필드 뒤에 오는 값까지 읽혔는지 본다
+        assertEquals(IsolationProfile.WEB, request.isolationProfile)
+        assertEquals(Architecture.AMD64, request.architecture)
     }
 
     @Test
@@ -380,80 +363,144 @@ class CreateInstanceRequestTest {
         assertInvalidRequest { request.toCommand() }
     }
 
-    // 아래 네 건은 컨테이너 사이 연결 규칙을 확인한다
-    // 런타임이 거절할 목록을 접수에서 걸러야 브로커 예약을 쓰기 전에 400으로 알려줄 수 있다
+    // 아래는 컨테이너별 공개 포트(exposed_ports) 규칙을 확인한다
+    // 런타임이 거절하는 조건을 그대로 옮겼다, 여기서 거르지 않으면 접수 뒤 런타임에서야 400이 난다
+
+    // 백엔드가 보낼 필드 이름을 그대로 읽는지 확인한다, expose 없이 exposed_ports만 온다
     @Test
-    fun `rejects internal connection from unknown source container`() {
-        val request = newRequest(
-            twoContainers(),
-            internalConnections = listOf(connection(sourceContainer = "api")),
+    fun `reads exposed ports from request body`() {
+        val json = requestJson(
+            """"isolation_profile": "WEB",""",
+            containersJson = """{ "name": "web", "image": "$TEST_DIGEST_IMAGE", "ports": [8080, 9090], "exposed_ports": [8080] }""",
         )
+
+        val container = requestMapper.readValue<CreateInstanceRequest>(json).toCommand().containers.single()
+
+        assertEquals(listOf(8080), container.exposedPorts)
+        assertNull(container.expose)
+    }
+
+    // 런타임은 expose가 false여도 둘이 같이 오면 거절한다
+    @Test
+    fun `rejects container with both expose and exposed ports`() {
+        val request = newRequest(listOf(container(expose = false, exposedPorts = listOf(8080))))
 
         assertInvalidRequest { request.toCommand() }
     }
 
+    // 둘 다 없으면 비공개다, 런타임이 생략을 비공개로 읽으므로 여기서 더 엄하게 막지 않는다
     @Test
-    fun `rejects internal connection to unknown destination container`() {
-        val request = newRequest(
-            twoContainers(),
-            internalConnections = listOf(connection(destinationContainer = "cache")),
-        )
-
-        assertInvalidRequest { request.toCommand() }
-    }
-
-    // 런타임은 목적지가 ports에 선언해 둔 포트로만 통신을 연다
-    // db처럼 공개하지 않는 컨테이너가 ports를 비워 두면 여기서 걸린다
-    @Test
-    fun `rejects internal connection to port not declared on destination`() {
+    fun `treats container with neither expose nor exposed ports as private`() {
         val request = newRequest(
             listOf(
-                container(name = "web", ports = listOf(8080), expose = true),
-                container(name = "db", ports = listOf(3306), expose = false),
+                container(name = "web", expose = true),
+                container(name = "db", ports = listOf(5432), expose = null),
             ),
-            internalConnections = listOf(connection(port = 5432)),
         )
+
+        val db = request.toCommand().containers.last()
+
+        assertNull(db.expose)
+        assertNull(db.exposedPorts)
+        assertEquals(emptyList(), db.publicPorts())
+    }
+
+    @Test
+    fun `rejects exposed port not declared in ports`() {
+        val request = newRequest(listOf(container(ports = listOf(8080), expose = null, exposedPorts = listOf(9090))))
 
         assertInvalidRequest { request.toCommand() }
     }
 
-    // 출발, 목적지, 규약, 포트가 모두 같은 연결이 두 번 오면 런타임이 거절한다
-    // 그 거절이 요청 검증이 아니라 통신 규칙을 만드는 단계에서 일어나 접수 뒤에 죽으므로 여기서 막는다
     @Test
-    fun `rejects duplicated internal connection`() {
+    fun `rejects duplicated exposed ports`() {
         val request = newRequest(
-            twoContainers(),
-            internalConnections = listOf(connection(), connection()),
+            listOf(container(ports = listOf(8080, 9090), expose = null, exposedPorts = listOf(8080, 8080))),
         )
 
         assertInvalidRequest { request.toCommand() }
     }
 
-    // 목적지나 포트가 다르면 서로 다른 연결이므로 중복이 아니다
+    // 빈 목록은 전부 비공개라는 뜻이라 통과한다, 데브옵스가 비공개 컨테이너를 이 모양으로 보낸다
+    // 한 요청 안에서 expose와 exposed_ports를 컨테이너마다 다르게 써도 각각 그대로 실린다
     @Test
-    fun `accepts two connections to different ports on the same container`() {
+    fun `accepts empty exposed ports as private container`() {
         val request = newRequest(
             listOf(
-                container(name = "web", ports = listOf(8080), expose = true),
-                container(name = "db", ports = listOf(5432, 5433), expose = false),
+                container(name = "web", expose = true),
+                container(name = "db", ports = listOf(5432), expose = null, exposedPorts = emptyList()),
             ),
-            internalConnections = listOf(connection(port = 5432), connection(port = 5433)),
         )
 
-        assertEquals(2, request.toCommand().internalConnections.size)
+        val containers = request.toCommand().containers
+
+        assertEquals(true, containers.first().expose)
+        assertNull(containers.first().exposedPorts)
+        assertNull(containers.last().expose)
+        assertEquals(emptyList(), containers.last().exposedPorts)
     }
 
-    // 목적지가 포트를 선언해 두면 통과하고 값이 그대로 command에 실린다
+    // 참가자가 접속할 곳이 없으면 문제가 성립하지 않는다, exposed_ports로도 마찬가지다
     @Test
-    fun `accepts internal connection to declared port on private container`() {
-        val request = newRequest(twoContainers(), internalConnections = listOf(connection()))
+    fun `rejects when exposed ports leave no public port`() {
+        val request = newRequest(listOf(container(expose = null, exposedPorts = emptyList())))
 
-        val connection = request.toCommand().internalConnections.single()
+        assertInvalidRequest { request.toCommand() }
+    }
 
-        assertEquals("web", connection.sourceContainer)
-        assertEquals("db", connection.destinationContainer)
-        assertEquals(ConnectionProtocol.TCP, connection.protocol)
-        assertEquals(5432, connection.port)
+    // 공개 포트 상한은 선언한 포트가 아니라 실제로 여는 포트를 센다
+    // 선언은 상한의 두 배를 넘기고 공개는 딱 상한만큼 열어 경계에 둔다
+    @Test
+    fun `counts public ports not declared ports against web limit`() {
+        val half = ContainerSpecRules.MAX_EXPOSED_PORTS / 2
+        val perContainer = ContainerSpecRules.MAX_PORTS_PER_CONTAINER
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = (8080 until 8080 + perContainer).toList(), expose = null, exposedPorts = (8080 until 8080 + half).toList()),
+                container(name = "admin", ports = (9000 until 9000 + perContainer).toList(), expose = null, exposedPorts = (9000 until 9000 + half).toList()),
+            ),
+        )
+
+        val containers = request.toCommand().containers
+
+        assertEquals(ContainerSpecRules.MAX_EXPOSED_PORTS, containers.sumOf { it.publicPorts().size })
+        assertEquals(perContainer * 2, containers.sumOf { it.ports.size })
+    }
+
+    @Test
+    fun `rejects too many public ports via exposed ports`() {
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = (8080..8087).toList(), expose = null, exposedPorts = (8080..8084).toList()),
+                container(name = "admin", ports = (9000..9007).toList(), expose = null, exposedPorts = (9000..9003).toList()),
+            ),
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    // PWN은 공개 컨테이너가 선언한 포트 자체가 하나여야 한다, 하나만 골라 열어도 안 된다
+    @Test
+    fun `rejects pwn public container with two declared ports via exposed ports`() {
+        val request = newRequest(
+            listOf(container(ports = listOf(8080, 9090), expose = null, exposedPorts = listOf(8080))),
+            isolationProfile = IsolationProfile.PWN,
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `accepts pwn with exposed ports on single port container`() {
+        val request = newRequest(
+            listOf(
+                container(name = "challenge", ports = listOf(31337), expose = null, exposedPorts = listOf(31337)),
+                container(name = "db", ports = listOf(5432), expose = null, exposedPorts = emptyList()),
+            ),
+            isolationProfile = IsolationProfile.PWN,
+        )
+
+        assertEquals(listOf(listOf(31337), emptyList()), request.toCommand().containers.map { it.exposedPorts })
     }
 
     private fun assertInvalidRequest(block: () -> Unit) {
@@ -461,23 +508,11 @@ class CreateInstanceRequestTest {
         assertEquals(SchedulerErrorCode.INVALID_REQUEST, exception.errorCode)
     }
 
-    // 공개하는 web과 비공개 db, 컨테이너 사이 연결을 보기에 가장 흔한 구성이다
+    // 공개하는 web과 비공개 db, 컨테이너가 둘인 흔한 구성이다
     private fun twoContainers(): List<ContainerSpecRequest> =
         listOf(
             container(name = "web", ports = listOf(8080), expose = true),
             container(name = "db", ports = listOf(5432), expose = false),
-        )
-
-    private fun connection(
-        sourceContainer: String = "web",
-        destinationContainer: String = "db",
-        port: Int = 5432,
-    ): InternalConnectionRequest =
-        InternalConnectionRequest(
-            sourceContainer = sourceContainer,
-            destinationContainer = destinationContainer,
-            protocol = ConnectionProtocol.TCP,
-            port = port,
         )
 
     private fun resources(
@@ -491,13 +526,15 @@ class CreateInstanceRequestTest {
             ephemeralStorageMib = ephemeralStorageMib,
         )
 
+    // exposedPorts를 쓰는 컨테이너는 expose를 null로 넘긴다, 둘이 같이 있으면 규칙에 걸린다
     private fun container(
         name: String = "challenge",
         image: String = TEST_DIGEST_IMAGE,
         ports: List<Int> = listOf(8080),
-        expose: Boolean = true,
+        expose: Boolean? = true,
+        exposedPorts: List<Int>? = null,
     ): ContainerSpecRequest =
-        ContainerSpecRequest(name = name, image = image, ports = ports, expose = expose)
+        ContainerSpecRequest(name = name, image = image, ports = ports, expose = expose, exposedPorts = exposedPorts)
 
     // 앱과 같은 snake_case 규칙으로 읽어야 실제 요청과 같은 조건이 된다
     private val requestMapper: ObjectMapper = JsonMapper.builder()
@@ -506,24 +543,20 @@ class CreateInstanceRequestTest {
         .build()
 
     // 격리 정책 줄만 갈아 끼워 읽기 성공과 실패를 같은 body로 비교한다
-    private fun connectionsJson(protocol: String): String =
-        """"internal_connections": [
-             { "source_container": "web", "destination_container": "db",
-               "protocol": "$protocol", "port": 5432 }
-           ],"""
-
-    private fun requestJson(isolationProfileLine: String, connectionsLine: String = ""): String =
+    private fun requestJson(
+        isolationProfileLine: String,
+        containersJson: String = """{ "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true }""",
+    ): String =
         """
             {
               "team_id": "${testUuid(1)}",
               "user_id": "${testUuid(2)}",
               "challenge_id": "${testUuid(10)}",
               "containers": [
-                { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true }
+                $containersJson
               ],
               "registry_revision": 3,
               $isolationProfileLine
-              $connectionsLine
               "architecture": "AMD64",
               "resource_profile": {
                 "cpu_millicores": 500,
@@ -538,7 +571,6 @@ class CreateInstanceRequestTest {
     private fun newRequest(
         containers: List<ContainerSpecRequest>,
         isolationProfile: IsolationProfile = IsolationProfile.WEB,
-        internalConnections: List<InternalConnectionRequest> = emptyList(),
         resourceProfile: ResourceProfileRequest = resources(),
     ): CreateInstanceRequest =
         CreateInstanceRequest(
@@ -546,7 +578,6 @@ class CreateInstanceRequestTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             containers = containers,
-            internalConnections = internalConnections,
             registryRevision = 3,
             isolationProfile = isolationProfile,
             architecture = Architecture.AMD64,

@@ -25,7 +25,6 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.domain.InternalConnection
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
@@ -36,7 +35,6 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeEndpoint
-import kr.msgctf.scheduler.runtime.RuntimeInternalConnection
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeOperationType
@@ -61,7 +59,6 @@ class InstanceOperationService(
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
     private val containerSpecCodec: ContainerSpecCodec,
-    private val internalConnectionCodec: InternalConnectionCodec,
     private val serviceEndpointCodec: ServiceEndpointCodec,
     private val cleanupProperties: CleanupProperties,
     private val operationProperties: OperationProperties,
@@ -261,6 +258,7 @@ class InstanceOperationService(
                                 image = container.image,
                                 ports = container.ports,
                                 expose = container.expose,
+                                exposedPorts = container.exposedPorts,
                                 // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
                                 // PWN은 쓰기 경로가 /tmp 아래여야 해서 요청에서 받게 되면 정책별로 갈라야 한다
                                 runAsUser = DEFAULT_RUN_AS_USER,
@@ -268,14 +266,6 @@ class InstanceOperationService(
                                     .map { (path, sizeMib) ->
                                         RuntimeWritablePath(path = path, sizeMib = sizeMib)
                                     },
-                            )
-                        },
-                        internalConnections = spec.internalConnections.map { connection ->
-                            RuntimeInternalConnection(
-                                sourceContainer = connection.sourceContainer,
-                                destinationContainer = connection.destinationContainer,
-                                protocol = connection.protocol,
-                                port = connection.port,
                             )
                         },
                         resourceLimits = RuntimeResourceLimits(
@@ -946,7 +936,7 @@ class InstanceOperationService(
     private fun exposedPortCount(instance: Instance): Int {
         val containersJson = instance.containers ?: return 0
         return try {
-            containerSpecCodec.decode(containersJson).filter { it.expose }.sumOf { it.ports.size }
+            containerSpecCodec.decode(containersJson).sumOf { it.publicPorts().size }
         } catch (_: Exception) {
             0
         }
@@ -961,20 +951,13 @@ class InstanceOperationService(
             log.warn("stored containers unreadable: instanceId={}", instance.instanceId, exception)
             return null
         }
-        // 이 컬럼이 생기기 전 행은 null이다, 그때는 컨테이너 사이 통신이 전부 막혀 있었으므로 빈 목록과 같다
-        val connections = try {
-            instance.internalConnections?.let { internalConnectionCodec.decode(it) } ?: emptyList()
-        } catch (exception: Exception) {
-            log.warn("stored internal connections unreadable: instanceId={}", instance.instanceId, exception)
-            return null
-        }
         val resourceProfile = ResourceProfile(
             cpuMillicores = instance.cpuMillicores ?: return null,
             memoryMib = instance.memoryMib ?: return null,
             ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
         )
         // 규칙에 어긋난 스펙을 그대로 보내면 브로커 예약까지 쓰고 런타임에서야 거절된다
-        ContainerSpecRules.violation(containers, instance.isolationProfile, connections, resourceProfile)
+        ContainerSpecRules.violation(containers, instance.isolationProfile, resourceProfile)
             ?.let { reason ->
                 log.warn("stored spec invalid: instanceId={}, {}", instance.instanceId, reason)
                 return null
@@ -983,7 +966,6 @@ class InstanceOperationService(
             teamId = instance.teamId,
             challengeId = instance.challengeId,
             containers = containers,
-            internalConnections = connections,
             isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
             resourceProfile = resourceProfile,
@@ -1001,7 +983,6 @@ private data class WorkloadSpec(
     val teamId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
-    val internalConnections: List<InternalConnection>,
     val isolationProfile: IsolationProfile,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,

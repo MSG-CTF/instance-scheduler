@@ -5,7 +5,6 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
@@ -14,10 +13,7 @@ import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.service.InternalConnectionCodec
 import kr.msgctf.scheduler.testUuid
-import kr.msgctf.scheduler.webToDbConnection
-import kr.msgctf.scheduler.webToDbConnectionJson
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
@@ -166,39 +162,6 @@ class InstanceRepositoryTest {
         // then
         assertNotNull(found)
         assertEquals(1, found.cleanupRetryCount)
-    }
-
-    @Test
-    fun `persists internal connections`() {
-        // V14로 더한 컬럼에 값이 저장되고 다시 읽히는지 확인
-        // given
-        val saved = instanceRepository.saveAndFlush(
-            newInstance(teamId = testUuid(6), challengeId = testUuid(10)).apply {
-                internalConnections = webToDbConnectionJson()
-            },
-        )
-
-        // when
-        val found = instanceRepository.findById(saved.instanceId).orElse(null)
-
-        // then
-        assertNotNull(found)
-        val stored = assertNotNull(found.internalConnections)
-        assertEquals(listOf(webToDbConnection()), InternalConnectionCodec().decode(stored))
-    }
-
-    // 이 컬럼이 생기기 전 행을 흉내 낸다, 값이 없어도 저장과 조회가 되어야 한다
-    @Test
-    fun `allows instance without internal connections`() {
-        // given
-        val saved = instanceRepository.saveAndFlush(newInstance(teamId = testUuid(7), challengeId = testUuid(10)))
-
-        // when
-        val found = instanceRepository.findById(saved.instanceId).orElse(null)
-
-        // then
-        assertNotNull(found)
-        assertNull(found.internalConnections)
     }
 
     @Test

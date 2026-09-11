@@ -16,9 +16,7 @@ import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.domain.InternalConnection
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
-import kr.msgctf.scheduler.runtime.ConnectionProtocol
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
@@ -33,12 +31,6 @@ data class CreateInstanceRequest(
     @field:Valid
     @field:NotEmpty
     val containers: List<ContainerSpecRequest>,
-
-    // 컨테이너 사이 통신을 허용할 목록
-    // 런타임이 컨테이너를 각각 다른 Pod에 띄우고 기본 정책이 Pod 사이 통신을 막는다
-    // 생략하면 빈 목록과 같고, 그때는 컨테이너끼리 통신하지 못한다
-    @field:Valid
-    val internalConnections: List<InternalConnectionRequest> = emptyList(),
 
     // 백엔드가 Registry에서 고른 릴리스 번호(revision)
     // 스케줄러는 Registry를 직접 조회하지 않고 받은 값을 저장만 한다
@@ -64,17 +56,15 @@ data class CreateInstanceRequest(
 
     fun toCommand(): CreateInstanceCommand {
         val containerSpecs = containers.map { it.toContainerSpec() }
-        val connections = internalConnections.map { it.toInternalConnection() }
         val resources = resourceProfile.toResourceProfile()
         // 접수(202) 뒤에 걸리면 400이 아니라 FAILED 상태로만 보이므로 여기서 거른다
-        ContainerSpecRules.violation(containerSpecs, isolationProfile, connections, resources)
+        ContainerSpecRules.violation(containerSpecs, isolationProfile, resources)
             ?.let { reject(it) }
         return CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
             challengeId = challengeId,
             containers = containerSpecs,
-            internalConnections = connections,
             registryRevision = registryRevision,
             isolationProfile = isolationProfile,
             architecture = architecture,
@@ -91,31 +81,8 @@ data class CreateInstanceRequest(
         )
 }
 
-// 컨테이너 사이 연결 한 개의 요청 값
-data class InternalConnectionRequest(
-    @field:NotBlank
-    val sourceContainer: String,
-
-    @field:NotBlank
-    val destinationContainer: String,
-
-    // 런타임이 TCP만 받으므로 다른 값은 역직렬화에서 걸린다
-    val protocol: ConnectionProtocol,
-
-    @field:Positive
-    val port: Int,
-) {
-
-    fun toInternalConnection(): InternalConnection =
-        InternalConnection(
-            sourceContainer = sourceContainer,
-            destinationContainer = destinationContainer,
-            protocol = protocol,
-            port = port,
-        )
-}
-
 // 컨테이너 한 개의 요청 값
+// 공개 지정은 expose나 exposed_ports로 한다, 둘 다 없으면 비공개고 둘 다 있으면 거절한다
 data class ContainerSpecRequest(
     @field:NotBlank
     val name: String,
@@ -126,7 +93,11 @@ data class ContainerSpecRequest(
     @field:NotEmpty
     val ports: List<Int>,
 
-    val expose: Boolean,
+    val expose: Boolean? = null,
+
+    // 공개할 포트만 고른 목록, 빈 배열은 전부 비공개다
+    // 명시적 null은 생략과 같다, 런타임은 null을 거절하지만 여기서 걸러져 런타임까지 가지 않는다
+    val exposedPorts: List<Int>? = null,
 ) {
 
     fun toContainerSpec(): ContainerSpec =
@@ -135,6 +106,7 @@ data class ContainerSpecRequest(
             image = image,
             ports = ports,
             expose = expose,
+            exposedPorts = exposedPorts,
         )
 }
 

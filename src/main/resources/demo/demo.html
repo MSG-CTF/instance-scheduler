@@ -157,14 +157,10 @@
           </div>
         </div>
         <div class="span-all">
-          <label for="containers">containers (JSON 배열, image는 digest 고정, expose true는 1개)</label>
+          <label for="containers">containers (JSON 배열, image는 digest 고정, 공개는 expose 또는 exposed_ports 중 하나)</label>
           <textarea id="containers" rows="4" required>[
   { "name": "challenge", "image": "ghcr.io/example/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "ports": [8080], "expose": true }
 ]</textarea>
-        </div>
-        <div class="span-all">
-          <label for="internal_connections">internal_connections (JSON 배열, 비우면 컨테이너끼리 못 붙음)</label>
-          <textarea id="internal_connections" rows="3">[]</textarea>
         </div>
         <div>
           <label for="registry_revision">registry_revision</label>
@@ -386,7 +382,6 @@ function buildRequestBody() {
     team_id: el("team_id").value.trim(),
     challenge_id: el("challenge_id").value.trim(),
     containers: JSON.parse(el("containers").value),
-    internal_connections: JSON.parse(el("internal_connections").value),
     registry_revision: Number(el("registry_revision").value),
     isolation_profile: el("isolation_profile").value,
     architecture: el("architecture").value,
@@ -406,7 +401,7 @@ async function createInstance() {
   try {
     body = buildRequestBody();
   } catch (e) {
-    log("client", "containers 또는 internal_connections JSON을 읽을 수 없음", String(e));
+    log("client", "containers JSON을 읽을 수 없음", String(e));
     return;
   }
   el("btn-create").disabled = true;
