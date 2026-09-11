@@ -44,7 +44,7 @@ class HttpRuntimeClientTest {
             .andExpect(jsonPath("$.workload.containers[0].run_as_user").value(10001))
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].path").value("/tmp"))
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].size_mib").value(64))
-            // 연결이 없으면 필드를 아예 안 보낸다, 연결을 안 쓰는 문제의 요청을 그대로 두기 위해서다
+            // STANDARD@v2부터 런타임이 이 필드를 거절한다, 빈 배열이나 null이어도 400이다
             .andExpect(jsonPath("$.workload.internal_connections").doesNotExist())
             .andRespond(
                 withStatus(HttpStatus.ACCEPTED)
@@ -221,43 +221,7 @@ class HttpRuntimeClientTest {
         assertFailsWith<Exception> { client.getOperation("op-missing") }
     }
 
-    // 컨테이너 사이 연결이 계약이 정한 필드 이름 그대로 실려 나가는지 확인
-    @Test
-    fun `sends internal connections in create body`() {
-        val instanceId = UUID.randomUUID()
-        server.expect(requestTo("http://runtime.test/internal/v1/instances"))
-            .andExpect(method(HttpMethod.POST))
-            .andExpect(jsonPath("$.workload.internal_connections[0].source_container").value("web"))
-            .andExpect(jsonPath("$.workload.internal_connections[0].destination_container").value("db"))
-            .andExpect(jsonPath("$.workload.internal_connections[0].protocol").value("TCP"))
-            .andExpect(jsonPath("$.workload.internal_connections[0].port").value(5432))
-            .andRespond(
-                withStatus(HttpStatus.ACCEPTED)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body("""{"operation_id":"op-create-123","request_id":"runtime-create-$instanceId","type":"CREATE","status":"QUEUED","attempt":0,"max_attempts":3,"created":true}"""),
-            )
-
-        val submitted = client.submitCreate(
-            createRequest(
-                instanceId,
-                listOf(
-                    RuntimeInternalConnection(
-                        sourceContainer = "web",
-                        destinationContainer = "db",
-                        protocol = ConnectionProtocol.TCP,
-                        port = 5432,
-                    ),
-                ),
-            ),
-        )
-
-        assertIs<RuntimeSubmitResult.Accepted>(submitted)
-    }
-
-    private fun createRequest(
-        instanceId: UUID,
-        internalConnections: List<RuntimeInternalConnection> = emptyList(),
-    ): RuntimeCreateRequest =
+    private fun createRequest(instanceId: UUID): RuntimeCreateRequest =
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
             instanceId = instanceId,
@@ -275,7 +239,6 @@ class HttpRuntimeClientTest {
                         writablePaths = listOf(RuntimeWritablePath(path = "/tmp", sizeMib = 64)),
                     ),
                 ),
-                internalConnections = internalConnections,
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
         )

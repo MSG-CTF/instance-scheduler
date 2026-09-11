@@ -8,7 +8,6 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
@@ -16,12 +15,10 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
-import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
-import kr.msgctf.scheduler.instance.domain.InternalConnection
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
@@ -32,10 +29,6 @@ import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testContainersJson
-import kr.msgctf.scheduler.webAndDbContainers
-import kr.msgctf.scheduler.webAndDbContainersJson
-import kr.msgctf.scheduler.webToDbConnection
-import kr.msgctf.scheduler.webToDbConnectionJson
 import kr.msgctf.scheduler.testUuid
 import org.hibernate.exception.ConstraintViolationException
 import org.mockito.Mockito
@@ -528,95 +521,6 @@ class InstanceSchedulerServiceTest {
         assertEquals(1, instanceRepository.savedInstances.size)
     }
 
-    // 컨테이너 사이 연결이 행에 저장되는지 확인, 저장이 안 되면 워커가 런타임에 실을 값이 없다
-    @Test
-    fun `stores internal connections on create`() {
-        // given
-        val savedInstances = mutableListOf<Instance>()
-        val instanceRepository = newInstanceRepository(savedInstances)
-        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
-        val command = newCommand(
-            teamId = testUuid(202),
-            containers = webAndDbContainers(),
-            internalConnections = listOf(webToDbConnection()),
-        )
-
-        // when
-        instanceSchedulerService.createInstance(command)
-
-        // then
-        val stored = assertNotNull(savedInstances.single().internalConnections)
-        assertEquals(command.internalConnections, InternalConnectionCodec().decode(stored))
-    }
-
-    // 초기화가 연결까지 물려주는지 확인, 빠지면 새 인스턴스가 db와 통신하지 못한다
-    @Test
-    fun `copies internal connections on reset`() {
-        // given
-        val instanceRepository = TestInstanceRepository()
-        val previous = instanceRepository.save(
-            newRunningInstance().apply {
-                containers = webAndDbContainersJson()
-                internalConnections = webToDbConnectionJson()
-            },
-        )
-        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
-
-        // when
-        instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = previous.instanceId))
-
-        // then
-        val fresh = instanceRepository.savedInstances.single { it.status == InstanceStatus.REQUESTED }
-        assertEquals(webToDbConnectionJson(), fresh.internalConnections)
-    }
-
-    // 저장된 연결 JSON을 못 읽으면 교체 전에 거절해 기존 인스턴스를 지킨다
-    @Test
-    fun `rejects reset when stored internal connections are unreadable`() {
-        // given
-        val instanceRepository = TestInstanceRepository()
-        val instance = instanceRepository.save(
-            newRunningInstance().apply { internalConnections = "not-json" },
-        )
-        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
-        }
-
-        // then
-        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
-        assertEquals(InstanceStatus.RUNNING, instance.status)
-        assertEquals(1, instanceRepository.savedInstances.size)
-    }
-
-    // 저장된 연결이 없는 컨테이너를 가리키면 런타임이 거절하므로 교체 전에 접는다
-    @Test
-    fun `rejects reset when stored internal connections violate rules`() {
-        // given
-        val instanceRepository = TestInstanceRepository()
-        val instance = instanceRepository.save(
-            newRunningInstance().apply {
-                containers = webAndDbContainersJson()
-                internalConnections = InternalConnectionCodec().encode(
-                    listOf(webToDbConnection().copy(destinationContainer = "cache")),
-                )
-            },
-        )
-        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
-
-        // when
-        val exception = assertFailsWith<SchedulerException> {
-            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
-        }
-
-        // then
-        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
-        assertEquals(InstanceStatus.RUNNING, instance.status)
-        assertEquals(1, instanceRepository.savedInstances.size)
-    }
-
     // 저장된 자원 값도 재검증한다, 컨테이너마다 붙는 쓰기 경로가 몫을 넘으면 런타임이 거절한다
     @Test
     fun `rejects reset when stored resources cannot hold writable paths`() {
@@ -911,7 +815,6 @@ class InstanceSchedulerServiceTest {
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
             containerSpecCodec = ContainerSpecCodec(),
-            internalConnectionCodec = InternalConnectionCodec(),
             serviceEndpointCodec = ServiceEndpointCodec(),
             clock = fixedClock(),
         )
@@ -921,15 +824,12 @@ class InstanceSchedulerServiceTest {
         ttlMinutes: Long = 120,
         hardTimeoutMinutes: Long = 180,
         userId: UUID = testUserId,
-        containers: List<ContainerSpec> = testContainers(),
-        internalConnections: List<InternalConnection> = emptyList(),
     ): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
             challengeId = testUuid(10),
-            containers = containers,
-            internalConnections = internalConnections,
+            containers = testContainers(),
             registryRevision = 3,
             // 기본값이 아닌 값을 써야 저장 매핑이 실제로 도는지 확인된다
             isolationProfile = IsolationProfile.PWN,

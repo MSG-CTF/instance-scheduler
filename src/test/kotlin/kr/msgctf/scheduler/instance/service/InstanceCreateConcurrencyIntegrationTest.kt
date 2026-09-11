@@ -96,7 +96,6 @@ class InstanceCreateConcurrencyIntegrationTest {
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             containers = testContainers(),
-            internalConnections = emptyList(),
             registryRevision = 3,
             isolationProfile = IsolationProfile.WEB,
             architecture = Architecture.AMD64,

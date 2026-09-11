@@ -1,7 +1,6 @@
 package kr.msgctf.scheduler.runtime
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.util.UUID
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -38,28 +37,8 @@ data class RuntimeTarget(
 data class RuntimeWorkload(
     val containers: List<RuntimeContainer>,
 
-    // 컨테이너 사이 통신을 허용할 목록, 비어 있으면 컨테이너끼리 통신하지 못한다
-    // 생략과 빈 배열의 뜻이 같다
-    // 목록이 비어 있으면 이 필드를 통째로 빼서, 연결을 안 쓰는 문제의 요청 형태를 바꾸지 않는다
-    @JsonInclude(JsonInclude.Include.NON_EMPTY)
-    @JsonProperty("internal_connections")
-    val internalConnections: List<RuntimeInternalConnection>,
-
     @JsonProperty("resource_limits")
     val resourceLimits: RuntimeResourceLimits,
-)
-
-// 컨테이너 하나에서 다른 컨테이너의 포트 하나로 가는 통신을 허용한다
-data class RuntimeInternalConnection(
-    @JsonProperty("source_container")
-    val sourceContainer: String,
-
-    @JsonProperty("destination_container")
-    val destinationContainer: String,
-
-    val protocol: ConnectionProtocol,
-
-    val port: Int,
 )
 
 // 컨테이너 하나의 실행과 격리 선언
@@ -243,12 +222,6 @@ data class RuntimeEndpoint(
 // 공개 주소로 주고받는 통신 규약, WEB 문제는 HTTP고 PWN 문제는 TCP다
 enum class EndpointProtocol {
     HTTP,
-    TCP,
-}
-
-// 컨테이너 사이 통신에 쓰는 규약, 런타임이 TCP만 받는다
-// 값을 하나만 두면 다른 값이 실린 요청은 역직렬화에서 걸려 검증까지 오지 않는다
-enum class ConnectionProtocol {
     TCP,
 }
 

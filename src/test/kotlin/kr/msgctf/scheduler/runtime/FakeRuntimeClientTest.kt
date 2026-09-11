@@ -125,7 +125,6 @@ class FakeRuntimeClientTest {
                         runAsUser = 10001,
                     ),
                 ),
-                internalConnections = emptyList(),
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
         )
