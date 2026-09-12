@@ -7,7 +7,7 @@ interface BrokerClient {
 
     fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse
 
-    fun commitReservation(reservationId: String): BrokerReservationResponse
+    fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse
 
-    fun releaseReservation(reservationId: String): BrokerReservationResponse
+    fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse
 }

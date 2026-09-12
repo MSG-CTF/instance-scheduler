@@ -10,6 +10,8 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
+import org.hamcrest.Matchers.hasKey
+import org.hamcrest.Matchers.not
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
@@ -38,8 +40,9 @@ class HttpBrokerClientTest {
             .andExpect(jsonPath("$.request_id").value("broker-$instanceId"))
             .andExpect(jsonPath("$.team_id").value(testUuid(7).toString()))
             .andExpect(jsonPath("$.instance_id").value(instanceId.toString()))
-            .andExpect(jsonPath("$.architecture").doesNotExist())
-            .andExpect(jsonPath("$.resource_profile.architecture").value("AMD64"))
+            // 2026-09-07 계약부터 architecture는 최상위다, 자원 프로필 안에 있으면 extra=forbid로 422다
+            .andExpect(jsonPath("$.architecture").value("AMD64"))
+            .andExpect(withoutKey("$.resource_profile", "architecture"))
             .andExpect(jsonPath("$.resource_profile.cpu_millicores").value(500))
             .andRespond(
                 withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
@@ -185,31 +188,45 @@ class HttpBrokerClientTest {
         assertEquals(true, exception.adminDetail?.contains("validation error"))
     }
 
-    // 실서버가 보낸 예약 응답(2026-08-21 실측)이 그대로 읽히는지 확인
+    // 2026-09-07 계약이다, idempotency_key가 사라지고 request_id가 그 자리를 맡는다
+    // 응답은 실서버가 보낸 것(2026-08-21 실측)에 새 필드가 더해진 모양이다
     @Test
-    fun `creates reservation with idempotency key and token`() {
+    fun `creates reservation with request id as idempotency key`() {
         val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://broker.test/v1/reservations"))
             .andExpect(method(HttpMethod.POST))
             .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
-            .andExpect(jsonPath("$.idempotency_key").value("reserve-$instanceId-cand-01"))
+            .andExpect(jsonPath("$.request_id").value("resv-$instanceId-cand-01"))
+            .andExpect(jsonPath("$.requested_at").value("2026-07-06T04:30:00Z"))
+            .andExpect(withoutKey("$", "idempotency_key"))
             .andExpect(jsonPath("$.candidate_id").value("cand-01"))
             .andExpect(jsonPath("$.team_id").value(testUuid(7).toString()))
             .andExpect(jsonPath("$.instance_id").value(instanceId.toString()))
+            .andExpect(jsonPath("$.architecture").value("AMD64"))
             .andExpect(jsonPath("$.resource_profile.cpu_millicores").value(500))
-            .andExpect(jsonPath("$.resource_profile.architecture").value("AMD64"))
+            .andExpect(withoutKey("$.resource_profile", "architecture"))
             .andRespond(
                 withStatus(HttpStatus.CREATED).contentType(MediaType.APPLICATION_JSON)
                     .body(
                         """
                         {
                           "reservation_id": "8f0e1362-3339-4a3f-9dc7-c60966f72487",
-                          "request_id": "resv-$instanceId",
+                          "request_id": "resv-$instanceId-cand-01",
                           "candidate_id": "cand-01",
                           "target_id": "cd33055d-9467-4498-8f17-4c4fee6344df",
+                          "team_id": "${testUuid(7)}",
+                          "challenge_id": "${testUuid(100)}",
+                          "instance_id": "$instanceId",
+                          "resource_profile": { "cpu_millicores": 500, "memory_mib": 512, "ephemeral_storage_mib": 1024, "architecture": "AMD64" },
                           "status": "HELD",
                           "expires_at": "2026-08-21T11:33:54.710162Z",
-                          "created_at": "2026-08-21T11:31:54.720941Z"
+                          "created_at": "2026-08-21T11:31:54.720941Z",
+                          "committed_at": null,
+                          "released_at": null,
+                          "runtime_workload_id": null,
+                          "deployed_resource_profile": null,
+                          "release_reason": null,
+                          "updated_at": "2026-08-21T11:31:54.720941Z"
                         }
                         """.trimIndent(),
                     ),
@@ -222,30 +239,64 @@ class HttpBrokerClientTest {
         assertEquals(Instant.parse("2026-08-21T11:33:54.710162Z"), response.expiresAt)
     }
 
-    // 확정과 반납은 body 없이 동작 경로로 부르는지 확인
+    // 2026-09-07 계약부터 확정과 반납은 본문이 필수다, 경로의 id와 본문의 reservation_id가 같아야 한다
     @Test
-    fun `commits and releases reservation by action path`() {
+    fun `commits and releases reservation with body`() {
+        val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://broker.test/v1/reservations/resv-01/commit"))
             .andExpect(method(HttpMethod.POST))
             .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
+            .andExpect(jsonPath("$.request_id").value("commit-resv-01"))
+            .andExpect(jsonPath("$.requested_at").value("2026-07-06T04:30:05Z"))
+            .andExpect(jsonPath("$.instance_id").value(instanceId.toString()))
+            .andExpect(jsonPath("$.reservation_id").value("resv-01"))
+            .andExpect(jsonPath("$.runtime_workload_id").value("workload-01"))
+            .andExpect(jsonPath("$.resource_profile.cpu_millicores").value(500))
+            .andExpect(jsonPath("$.resource_profile.memory_mib").value(512))
+            .andExpect(jsonPath("$.resource_profile.ephemeral_storage_mib").value(1024))
+            .andExpect(withoutKey("$.resource_profile", "architecture"))
             .andRespond(
                 withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
-                    .body("""{"reservation_id":"resv-01","request_id":"r","status":"COMMITTED","expires_at":null}"""),
+                    .body("""{"reservation_id":"resv-01","request_id":"commit-resv-01","status":"COMMITTED","expires_at":null}"""),
             )
         server.expect(requestTo("http://broker.test/v1/reservations/resv-02/release"))
             .andExpect(method(HttpMethod.POST))
             .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
+            .andExpect(jsonPath("$.request_id").value("release-resv-02-RUNTIME_CREATE_FAILED"))
+            .andExpect(jsonPath("$.requested_at").value("2026-07-06T04:30:06Z"))
+            .andExpect(jsonPath("$.instance_id").value(instanceId.toString()))
+            .andExpect(jsonPath("$.reservation_id").value("resv-02"))
+            .andExpect(jsonPath("$.release_reason").value("RUNTIME_CREATE_FAILED"))
             .andRespond(
                 withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON)
-                    .body("""{"reservation_id":"resv-02","request_id":"r","status":"RELEASED","expires_at":null}"""),
+                    .body("""{"reservation_id":"resv-02","request_id":"release-resv-02-RUNTIME_CREATE_FAILED","status":"RELEASED","expires_at":null}"""),
             )
 
-        val committed = client.commitReservation("resv-01")
-        val released = client.releaseReservation("resv-02")
+        val committed = client.commitReservation(commitRequest(instanceId, "resv-01"))
+        val released = client.releaseReservation(releaseRequest(instanceId, "resv-02", ReleaseReason.RUNTIME_CREATE_FAILED))
 
         assertEquals(BrokerReservationStatus.COMMITTED, committed.status)
         assertNull(committed.expiresAt)
         assertEquals(BrokerReservationStatus.RELEASED, released.status)
+    }
+
+    // 브로커 거절 body의 code를 예외에 실어 호출자가 코드로 다음 행동을 고를 수 있게 한다
+    // DEPLOYED_SPEC_MISMATCH는 예약이 HELD로 남는 거절이라 호출자가 그 사유로 반납해야 한다
+    @Test
+    fun `maps commit rejection to exception carrying broker code`() {
+        server.expect(requestTo("http://broker.test/v1/reservations/resv-01/commit"))
+            .andRespond(
+                withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"DEPLOYED_SPEC_MISMATCH","message":"deployed profile differs"}}"""),
+            )
+
+        val exception = assertFailsWith<BrokerRejectedException> {
+            client.commitReservation(commitRequest(UUID.randomUUID(), "resv-01"))
+        }
+
+        assertEquals("DEPLOYED_SPEC_MISMATCH", exception.brokerCode)
+        assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, exception.errorCode)
+        assertEquals(true, exception.adminDetail?.contains("code=DEPLOYED_SPEC_MISMATCH"))
     }
 
     // 예약 실패가 상태와 응답 body를 담은 스케줄러 예외로 바뀌는지 확인
@@ -266,20 +317,46 @@ class HttpBrokerClientTest {
         assertEquals(true, exception.adminDetail?.contains("capacity exhausted"))
     }
 
+    // jsonPath의 doesNotExist는 값이 null이어도 통과한다, 브로커는 모르는 키가 있으면 422라 키 자체가 없는지 본다
+    private fun withoutKey(objectPath: String, key: String) =
+        jsonPath(objectPath).value(not(hasKey(key)))
+
+    private fun resourceProfile(): ResourceProfile =
+        ResourceProfile(cpuMillicores = 500, memoryMib = 512, ephemeralStorageMib = 1024)
+
     private fun reservationRequest(instanceId: UUID): BrokerReservationRequest =
         BrokerReservationRequest(
-            idempotencyKey = "reserve-$instanceId-cand-01",
-            requestId = "resv-$instanceId",
+            requestId = "resv-$instanceId-cand-01",
+            requestedAt = Instant.parse("2026-07-06T04:30:00Z"),
+            instanceId = instanceId,
             candidateId = "cand-01",
             teamId = testUuid(7),
             challengeId = testUuid(100),
+            architecture = Architecture.AMD64,
+            resourceProfile = resourceProfile(),
+        )
+
+    private fun commitRequest(instanceId: UUID, reservationId: String): BrokerReservationCommitRequest =
+        BrokerReservationCommitRequest(
+            requestId = "commit-$reservationId",
+            requestedAt = Instant.parse("2026-07-06T04:30:05Z"),
             instanceId = instanceId,
-            resourceProfile = BrokerResourceProfile(
-                cpuMillicores = 500,
-                memoryMib = 512,
-                ephemeralStorageMib = 1024,
-                architecture = Architecture.AMD64,
-            ),
+            reservationId = reservationId,
+            runtimeWorkloadId = "workload-01",
+            resourceProfile = resourceProfile(),
+        )
+
+    private fun releaseRequest(
+        instanceId: UUID,
+        reservationId: String,
+        reason: ReleaseReason,
+    ): BrokerReservationReleaseRequest =
+        BrokerReservationReleaseRequest(
+            requestId = "release-$reservationId-$reason",
+            requestedAt = Instant.parse("2026-07-06T04:30:06Z"),
+            instanceId = instanceId,
+            reservationId = reservationId,
+            releaseReason = reason,
         )
 
     private fun candidateRequest(instanceId: UUID): BrokerCandidateRequest =
@@ -289,11 +366,7 @@ class HttpBrokerClientTest {
             teamId = testUuid(7),
             challengeId = testUuid(100),
             instanceId = instanceId,
-            resourceProfile = BrokerResourceProfile(
-                cpuMillicores = 500,
-                memoryMib = 512,
-                ephemeralStorageMib = 1024,
-                architecture = Architecture.AMD64,
-            ),
+            architecture = Architecture.AMD64,
+            resourceProfile = resourceProfile(),
         )
 }

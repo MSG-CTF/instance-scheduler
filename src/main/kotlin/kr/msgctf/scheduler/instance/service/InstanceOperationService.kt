@@ -8,9 +8,12 @@ import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
 import kr.msgctf.scheduler.broker.BrokerClient
+import kr.msgctf.scheduler.broker.BrokerRejectedException
+import kr.msgctf.scheduler.broker.BrokerReservationCommitRequest
+import kr.msgctf.scheduler.broker.BrokerReservationReleaseRequest
 import kr.msgctf.scheduler.broker.BrokerReservationRequest
 import kr.msgctf.scheduler.broker.BrokerReservationStatus
-import kr.msgctf.scheduler.broker.BrokerResourceProfile
+import kr.msgctf.scheduler.broker.ReleaseReason
 import kr.msgctf.scheduler.broker.ResourceCandidate
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.broker.ResourceProfile
@@ -97,7 +100,8 @@ class InstanceOperationService(
                     teamId = spec.teamId,
                     challengeId = spec.challengeId,
                     instanceId = instanceId,
-                    resourceProfile = BrokerResourceProfile.from(spec.resourceProfile, spec.architecture),
+                    architecture = spec.architecture,
+                    resourceProfile = spec.resourceProfile,
                 ),
             )
             val selected = resourceCandidateSelector.select(response, spec.architecture)
@@ -117,17 +121,21 @@ class InstanceOperationService(
         )
 
         // 선택한 후보의 용량을 runtime 생성 전에 선점한다
-        // 재시도가 같은 후보를 고르면 같은 키로 기존 예약을 돌려받고, 다른 후보면 새 예약을 잡는다
+        // 브로커가 request_id로 같은 요청인지 가리므로 후보를 넣어 만든다, requested_at까지 같아야 같은 요청으로 본다
+        // 그래서 시각은 행이 만들어진 때로 고정한다, 재시도마다 현재 시각을 넣으면 매번 409 REQUEST_ID_REUSED다
+        // 재시도가 같은 후보를 고르면 기존 예약을 돌려받고, 다른 후보면 다른 id로 새 예약을 잡는다
+        // 다른 후보를 잡을 때 이전 예약이 아직 HELD면 409 INSTANCE_ALREADY_RESERVED라 다음 주기에 다시 온다
         val reservation = try {
             brokerClient.createReservation(
                 BrokerReservationRequest(
-                    idempotencyKey = "reserve-$instanceId-${candidate.candidateId}",
-                    requestId = "resv-$instanceId",
+                    requestId = "resv-$instanceId-${candidate.candidateId}",
+                    requestedAt = spec.requestedAt,
+                    instanceId = instanceId,
                     candidateId = candidate.candidateId,
                     teamId = spec.teamId,
                     challengeId = spec.challengeId,
-                    instanceId = instanceId,
-                    resourceProfile = BrokerResourceProfile.from(spec.resourceProfile, spec.architecture),
+                    architecture = spec.architecture,
+                    resourceProfile = spec.resourceProfile,
                 ),
             )
         } catch (exception: Exception) {
@@ -174,7 +182,9 @@ class InstanceOperationService(
         }
         // 행이 사라져 저장하지 못한 예약은 고아가 되므로 바로 반납한다
         if (target == null) {
-            releaseReservationQuietly(reservation.reservationId)
+            releaseReservationQuietly(
+                PendingRelease(reservation.reservationId, instanceId, ReleaseReason.SCHEDULER_CANCELLED),
+            )
             return
         }
 
@@ -294,7 +304,7 @@ class InstanceOperationService(
     }
 
     fun submitDelete(instanceId: UUID) {
-        var reservationToRelease: String? = null
+        var reservationToRelease: PendingRelease? = null
         var workloadUnknown = false
         val request = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
@@ -349,7 +359,7 @@ class InstanceOperationService(
                 request.requestId,
                 failureDetail(exception),
             )
-            var failedReservation: String? = null
+            var failedReservation: PendingRelease? = null
             tx.executeWithoutResult {
                 val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
                 instance.cleanupRetryCount += 1
@@ -365,7 +375,7 @@ class InstanceOperationService(
             return
         }
 
-        var missingReservation: String? = null
+        var missingReservation: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             when (submitted) {
@@ -389,7 +399,7 @@ class InstanceOperationService(
             return
         }
 
-        var reservationToRelease: String? = null
+        var reservationToRelease: PendingRelease? = null
         var waitStarted = false
         var alerted = false
         tx.executeWithoutResult {
@@ -493,7 +503,7 @@ class InstanceOperationService(
     }
 
     fun pollOperation(instanceId: UUID) {
-        var reservationToRelease: String? = null
+        var reservationToRelease: PendingRelease? = null
         val operationId = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             val operationId = instance.runtimeOperationId ?: return@execute null
@@ -554,8 +564,8 @@ class InstanceOperationService(
     }
 
     private fun applySucceeded(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
-        var reservationToCommit: String? = null
-        var reservationToRelease: String? = null
+        var reservationToCommit: PendingCommit? = null
+        var reservationToRelease: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 조회하는 사이 operation이 바뀌었거나 지워졌으면 낡은 결과라 반영하지 않는다
@@ -571,7 +581,9 @@ class InstanceOperationService(
                     move(instance, InstanceStatus.RUNNING)
                     instance.action = null
                     clearOperation(instance)
-                    reservationToCommit = takeReservation(instance)
+                    // 확정한 예약은 만료되지 않는다, 정리가 끝날 때 반납해야 하므로 id를 비우지 않는다
+                    // 브로커는 Pod가 노드에 보인 뒤 확정하라고 한다, 접수 202가 아니라 operation SUCCEEDED에 묶는다
+                    reservationToCommit = pendingCommit(instance, result.runtimeWorkloadId)
                 }
                 // 정리로 넘어온 뒤에 끝난 생성이다, 그 결과로 만들어진 workload를 지워야 한다
                 // 여기서 삭제 성공으로 읽으면 방금 생긴 자원을 남긴 채 정리를 끝내게 된다
@@ -606,7 +618,7 @@ class InstanceOperationService(
     }
 
     private fun applyFailed(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
-        var reservationToRelease: String? = null
+        var reservationToRelease: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             if (instance.runtimeOperationId != snapshot.operationId) return@executeWithoutResult
@@ -650,7 +662,7 @@ class InstanceOperationService(
     }
 
     // 반납할 예약 id를 돌려주고, 호출자가 잠금 밖에서 반납한다
-    private fun giveUpPolling(instance: Instance, operationId: String): String? {
+    private fun giveUpPolling(instance: Instance, operationId: String): PendingRelease? {
         log.warn("operation poll deadline passed: instanceId={}, operationId={}", instance.instanceId, operationId)
         val detail = "operationId=$operationId, reason=poll timeout"
         return when (instance.status) {
@@ -708,7 +720,7 @@ class InstanceOperationService(
     // 5xx와 전송 실패는 그대로 전파되며, 접수가 런타임에 닿았는지 알 수 없는 경우다
     private fun handleSubmitFailure(instanceId: UUID, exception: Exception, firstSubmit: Boolean) {
         val rejected = exception is SchedulerException
-        var rejectedReservation: String? = null
+        var rejectedReservation: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // 기다리는 사이 정리 경로로 넘어갔으면 그쪽 판단을 덮지 않는다
@@ -794,29 +806,78 @@ class InstanceOperationService(
     }
 
     // 예약 처리는 잠금 밖에서 하도록 tx 안에서는 id 회수만 한다
-    private fun takeReservation(instance: Instance): String? {
-        val reservationId = instance.reservationId
+    // 반납 사유는 행의 삭제 사유에서 정한다, 생성이 실패해 정리로 넘어온 행만 생성 실패로 알린다
+    private fun takeReservation(instance: Instance): PendingRelease? {
+        val reservationId = instance.reservationId ?: return null
         instance.reservationId = null
-        return reservationId
+        val reason = when (instance.deleteReason) {
+            RuntimeDeleteReason.CREATE_FAILED_CLEANUP -> ReleaseReason.RUNTIME_CREATE_FAILED
+            else -> ReleaseReason.SCHEDULER_CANCELLED
+        }
+        return PendingRelease(reservationId, instance.instanceId, reason)
+    }
+
+    // 확정에 필요한 값을 tx 안에서 모아 둔다, 자원 값이 비어 있는 옛 행은 확정하지 않는다
+    private fun pendingCommit(instance: Instance, runtimeWorkloadId: String): PendingCommit? {
+        val reservationId = instance.reservationId ?: return null
+        val resourceProfile = ResourceProfile(
+            cpuMillicores = instance.cpuMillicores ?: return null,
+            memoryMib = instance.memoryMib ?: return null,
+            ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
+        )
+        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile)
     }
 
     // 확정 실패는 인스턴스 상태를 바꾸지 않고 기록만 남긴다
-    private fun commitReservationQuietly(reservationId: String?) {
-        if (reservationId == null) return
+    // 자원 값이 안 맞아 거절되면 예약이 HELD로 남아 만료까지 용량을 잡으므로 그 사유로 바로 반납한다
+    private fun commitReservationQuietly(commit: PendingCommit?) {
+        if (commit == null) return
         try {
-            brokerClient.commitReservation(reservationId)
+            brokerClient.commitReservation(
+                BrokerReservationCommitRequest(
+                    requestId = "commit-${commit.reservationId}",
+                    requestedAt = clock.instant(),
+                    instanceId = commit.instanceId,
+                    reservationId = commit.reservationId,
+                    runtimeWorkloadId = commit.runtimeWorkloadId,
+                    resourceProfile = commit.resourceProfile,
+                ),
+            )
         } catch (exception: Exception) {
-            log.warn("reservation commit failed: reservationId={}, reason={}", reservationId, failureDetail(exception))
+            log.warn(
+                "reservation commit failed: reservationId={}, reason={}",
+                commit.reservationId,
+                failureDetail(exception),
+            )
+            if (exception is BrokerRejectedException && exception.brokerCode == DEPLOYED_SPEC_MISMATCH_CODE) {
+                releaseReservationQuietly(
+                    PendingRelease(commit.reservationId, commit.instanceId, ReleaseReason.DEPLOYED_SPEC_MISMATCH),
+                )
+            }
         }
     }
 
     // 반납 실패는 만료로 회수되므로 기록만 남긴다
-    private fun releaseReservationQuietly(reservationId: String?) {
-        if (reservationId == null) return
+    // request_id에 사유를 넣는다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청으로 보이게 하기 위해서다
+    private fun releaseReservationQuietly(release: PendingRelease?) {
+        if (release == null) return
         try {
-            brokerClient.releaseReservation(reservationId)
+            brokerClient.releaseReservation(
+                BrokerReservationReleaseRequest(
+                    requestId = "release-${release.reservationId}-${release.reason}",
+                    requestedAt = clock.instant(),
+                    instanceId = release.instanceId,
+                    reservationId = release.reservationId,
+                    releaseReason = release.reason,
+                ),
+            )
         } catch (exception: Exception) {
-            log.warn("reservation release failed: reservationId={}, reason={}", reservationId, failureDetail(exception))
+            log.warn(
+                "reservation release failed: reservationId={}, releaseReason={}, reason={}",
+                release.reservationId,
+                release.reason,
+                failureDetail(exception),
+            )
         }
     }
 
@@ -969,15 +1030,32 @@ class InstanceOperationService(
             isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
             resourceProfile = resourceProfile,
+            // 저장된 행은 항상 값이 있다, 없는 것은 저장을 거치지 않은 테스트 행뿐이다
+            requestedAt = instance.createdAt ?: clock.instant(),
         )
     }
 
     companion object {
         private val DELETE_SUBMIT_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
+        private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
         private const val DEFAULT_RUN_AS_USER = 10001L
     }
 }
+
+// tx 안에서 모아 두었다가 잠금 밖에서 브로커에 보내는 값
+private data class PendingRelease(
+    val reservationId: String,
+    val instanceId: UUID,
+    val reason: ReleaseReason,
+)
+
+private data class PendingCommit(
+    val reservationId: String,
+    val instanceId: UUID,
+    val runtimeWorkloadId: String,
+    val resourceProfile: ResourceProfile,
+)
 
 private data class WorkloadSpec(
     val teamId: UUID,
@@ -986,4 +1064,6 @@ private data class WorkloadSpec(
     val isolationProfile: IsolationProfile,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,
+    // 브로커 예약의 requested_at, 재시도마다 같아야 새 예약 대신 기존 예약을 돌려받는다
+    val requestedAt: Instant,
 )
