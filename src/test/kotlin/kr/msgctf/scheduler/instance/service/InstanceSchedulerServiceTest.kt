@@ -8,8 +8,10 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -20,6 +22,7 @@ import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
@@ -357,6 +360,66 @@ class InstanceSchedulerServiceTest {
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
 
+    // 요청한 사람이 소유자면 초기화가 접수되는지 확인
+    @Test
+    fun `accepts reset from the owner`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.resetInstance(
+            ResetInstanceCommand(instanceId = previous.instanceId, userId = testUserId),
+        )
+
+        // then
+        assertEquals(InstanceStatus.REQUESTED, result.status)
+        assertEquals(previous.instanceId, result.replacedInstanceId)
+    }
+
+    // 남의 인스턴스는 초기화할 수 없고 이전 행도 그대로인지 확인
+    @Test
+    fun `rejects reset from another user`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(
+                ResetInstanceCommand(instanceId = instance.instanceId, userId = testUuid(999)),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 소유자 검사가 상태 검사보다 앞이라 남의 인스턴스면 상태와 무관하게 소유권 오류인지 확인
+    @Test
+    fun `checks reset ownership before state`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(
+                ResetInstanceCommand(instanceId = instance.instanceId, userId = testUuid(999)),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+    }
+
     // 만료 시각이 지난 인스턴스는 새로 만들어도 바로 만료되므로 초기화를 거절하는지 확인
     @Test
     fun `rejects reset when instance is already expired`() {
@@ -681,6 +744,95 @@ class InstanceSchedulerServiceTest {
         assertEquals(RuntimeDeleteReason.TTL_EXPIRED, runningInstance.deleteReason)
     }
 
+    // 요청한 사람이 소유자면 삭제가 접수되는지 확인
+    @Test
+    fun `accepts delete from the owner`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val result = instanceSchedulerService.deleteInstance(
+            DeleteInstanceCommand(instanceId = runningInstance.instanceId, userId = testUserId),
+        )
+
+        // then
+        assertEquals(InstanceStatus.STOPPING, result.status)
+    }
+
+    // 남의 인스턴스는 지울 수 없고 행도 그대로인지 확인
+    @Test
+    fun `rejects delete from another user`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.deleteInstance(
+                DeleteInstanceCommand(instanceId = runningInstance.instanceId, userId = testUuid(999)),
+            )
+        }
+
+        // then: 운영자가 두 저장소의 소유자 어긋남을 바로 볼 수 있어야 한다
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+        assertEquals(
+            "operation=delete, deleteReason=USER_REQUESTED, " +
+                "instanceId=${runningInstance.instanceId}, requestedBy=${testUuid(999)}, ownerId=$testUserId",
+            exception.adminDetail,
+        )
+        assertEquals(InstanceStatus.RUNNING, runningInstance.status)
+        assertNull(runningInstance.deleteReason)
+    }
+
+    // 삭제 사유가 ADMIN_FORCED 여도 user_id 가 다르면 거절한다, 사유는 소유권 검사를 건너뛰는 수단이 아니다
+    // 관리자는 user_id 를 싣지 않는 것이 계약이다
+    @Test
+    fun `rejects admin forced delete with another users id`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val runningInstance = instanceRepository.save(newRunningInstance())
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.deleteInstance(
+                DeleteInstanceCommand(
+                    instanceId = runningInstance.instanceId,
+                    reason = RuntimeDeleteReason.ADMIN_FORCED,
+                    userId = testUuid(999),
+                ),
+            )
+        }
+
+        // then: 운영자가 관리자 경로 오사용을 바로 볼 수 있어야 한다
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+        assertTrue(exception.adminDetail!!.startsWith("operation=delete, deleteReason=ADMIN_FORCED"))
+    }
+
+    // 소유자 검사가 상태 검사보다 앞이라 남의 인스턴스면 상태와 무관하게 소유권 오류인지 확인
+    @Test
+    fun `checks delete ownership before state`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.deleteInstance(
+                DeleteInstanceCommand(instanceId = instance.instanceId, userId = testUuid(999)),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+    }
+
     // 실행 중 인스턴스의 만료 시각이 연장되고 action이 EXTEND로 기록되는지 확인
     @Test
     fun `extends running instance expiry`() {
@@ -789,6 +941,66 @@ class InstanceSchedulerServiceTest {
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
 
+    // 요청한 사람이 소유자면 연장되는지 확인
+    @Test
+    fun `accepts extend from the owner`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance())
+        val expiresAtBefore = instance.expiresAt
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        instanceSchedulerService.extendInstance(
+            ExtendInstanceCommand(instanceId = instance.instanceId, extendMinutes = 10, userId = testUserId),
+        )
+
+        // then
+        assertEquals(expiresAtBefore.plusSeconds(600), instance.expiresAt)
+    }
+
+    // 남의 인스턴스는 연장할 수 없고 만료 시각도 그대로인지 확인
+    @Test
+    fun `rejects extend from another user`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance())
+        val expiresAtBefore = instance.expiresAt
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.extendInstance(
+                ExtendInstanceCommand(instanceId = instance.instanceId, extendMinutes = 10, userId = testUuid(999)),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+        assertEquals(expiresAtBefore, instance.expiresAt)
+    }
+
+    // 소유자 검사가 상태 검사보다 앞이라 남의 인스턴스면 상태와 무관하게 소유권 오류인지 확인
+    @Test
+    fun `checks extend ownership before state`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { status = InstanceStatus.CLEANUP_PENDING },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.extendInstance(
+                ExtendInstanceCommand(instanceId = instance.instanceId, extendMinutes = 10, userId = testUuid(999)),
+            )
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_OWNED, exception.errorCode)
+    }
+
     // 표현할 수 없는 큰 연장은 오버플로 가드로 거절하는지 확인
     @Test
     fun `rejects extend that overflows the timestamp`() {
@@ -868,9 +1080,148 @@ class InstanceSchedulerServiceTest {
         assertEquals(0, savedInstances.size)
     }
 
+    // 생성 접수가 누가 요청했는지와 함께 이벤트로 남는지 확인
+    @Test
+    fun `records create event with requester`() {
+        // given
+        val events = TestInstanceEventRepository()
+        // 빈 저장소라 교체할 이전 인스턴스가 없다
+        val instanceRepository = TestInstanceRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository, events = events)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = testUuid(301)))
+
+        // then
+        val event = events.saved.single()
+        assertEquals(result.instanceId, event.instanceId)
+        assertEquals(InstanceEventType.STATE_CHANGED, event.eventType)
+        assertNull(event.fromStatus)
+        assertEquals(InstanceStatus.REQUESTED, event.toStatus)
+        assertTrue(event.adminDetail!!.contains("requestedBy=$testUserId"))
+        assertFalse(event.adminDetail!!.contains("replacedInstanceId"))
+    }
+
+    // 자기 인스턴스를 교체하는 생성은 이전 행에도 정리 이벤트를 남기는지 확인
+    @Test
+    fun `records replace event on previous row when create replaces own instance`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val events = TestInstanceEventRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository, events = events)
+
+        // when
+        val result = instanceSchedulerService.createInstance(newCommand(teamId = previous.teamId))
+
+        // then
+        val replaced = events.saved.single { it.instanceId == previous.instanceId }
+        assertEquals(InstanceStatus.RUNNING, replaced.fromStatus)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, replaced.toStatus)
+        assertTrue(replaced.adminDetail!!.contains("replacedBy=${result.instanceId}"))
+        val created = events.saved.single { it.instanceId == result.instanceId }
+        assertEquals(InstanceStatus.REQUESTED, created.toStatus)
+        assertTrue(created.adminDetail!!.contains("replacedInstanceId=${previous.instanceId}"))
+    }
+
+    // 삭제 접수가 요청자와 사유를 담아 이벤트로 남는지 확인
+    @Test
+    fun `records delete event with requester and reason`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance())
+        val events = TestInstanceEventRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository, events = events)
+
+        // when
+        instanceSchedulerService.deleteInstance(
+            DeleteInstanceCommand(instanceId = instance.instanceId, userId = testUserId),
+        )
+
+        // then
+        val event = events.saved.single()
+        assertEquals(InstanceEventType.STATE_CHANGED, event.eventType)
+        assertEquals(InstanceStatus.RUNNING, event.fromStatus)
+        assertEquals(InstanceStatus.STOPPING, event.toStatus)
+        assertTrue(event.adminDetail!!.contains("requestedBy=$testUserId"))
+        assertTrue(event.adminDetail!!.contains("deleteReason=USER_REQUESTED"))
+    }
+
+    // 요청자가 없으면 없다고 남기는지 확인, 관리자라고 적으면 참가자 행동이 관리자 행동으로 남는다
+    @Test
+    fun `records delete event without requester when it is absent`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance())
+        val events = TestInstanceEventRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository, events = events)
+
+        // when
+        instanceSchedulerService.deleteInstance(
+            DeleteInstanceCommand(instanceId = instance.instanceId, reason = RuntimeDeleteReason.ADMIN_FORCED),
+        )
+
+        // then
+        val event = events.saved.single()
+        assertTrue(event.adminDetail!!.contains("requestedBy=none"))
+        assertTrue(event.adminDetail!!.contains("deleteReason=ADMIN_FORCED"))
+    }
+
+    // 초기화는 이전 행과 새 행 둘 다에 이벤트를 남기고 서로를 가리키는지 확인
+    @Test
+    fun `records reset events on both rows`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val events = TestInstanceEventRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository, events = events)
+
+        // when
+        val result = instanceSchedulerService.resetInstance(
+            ResetInstanceCommand(instanceId = previous.instanceId, userId = testUserId),
+        )
+
+        // then
+        assertEquals(2, events.saved.size)
+        val old = events.saved.single { it.instanceId == previous.instanceId }
+        assertEquals(InstanceStatus.RUNNING, old.fromStatus)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, old.toStatus)
+        assertTrue(old.adminDetail!!.contains("replacedBy=${result.instanceId}"))
+        assertTrue(old.adminDetail!!.contains("requestedBy=$testUserId"))
+        val fresh = events.saved.single { it.instanceId == result.instanceId }
+        assertNull(fresh.fromStatus)
+        assertEquals(InstanceStatus.REQUESTED, fresh.toStatus)
+        assertTrue(fresh.adminDetail!!.contains("resetFrom=${previous.instanceId}"))
+    }
+
+    // 연장은 상태가 안 바뀌므로 EXTENDED 타입으로 전후 만료 시각을 남기는지 확인
+    @Test
+    fun `records extend event with expiry change`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance())
+        val before = instance.expiresAt
+        val events = TestInstanceEventRepository()
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository, events = events)
+
+        // when
+        instanceSchedulerService.extendInstance(
+            ExtendInstanceCommand(instanceId = instance.instanceId, extendMinutes = 10, userId = testUserId),
+        )
+
+        // then
+        val event = events.saved.single()
+        assertEquals(InstanceEventType.EXTENDED, event.eventType)
+        assertEquals(InstanceStatus.RUNNING, event.toStatus)
+        assertTrue(event.adminDetail!!.contains("requestedBy=$testUserId"))
+        assertTrue(event.adminDetail!!.contains("previousExpiresAt=$before"))
+        assertTrue(event.adminDetail!!.contains("extendedTo=${instance.expiresAt}"))
+    }
+
     private fun newService(
         instanceRepository: InstanceRepository,
         policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
+        events: TestInstanceEventRepository = TestInstanceEventRepository(),
     ): InstanceSchedulerService =
         InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
@@ -878,6 +1229,7 @@ class InstanceSchedulerServiceTest {
             ),
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
+            instanceEventRepository = events.repository,
             containerSpecCodec = ContainerSpecCodec(),
             serviceEndpointCodec = ServiceEndpointCodec(),
             clock = fixedClock(),
