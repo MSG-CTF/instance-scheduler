@@ -852,9 +852,9 @@ class InstanceOperationServiceTest {
         assertEquals(clock.instant(), instance.nextPollAt)
     }
 
-    // 접수가 실패하면 잔여 정리를 위해 CLEANUP_PENDING으로 파킹하는지 확인
+    // 첫 접수가 거부되고 그 사이 재접수가 시작된 적도 없으면 런타임에 아무것도 없다, 확인 없이 바로 끝낸다
     @Test
-    fun `parks requested instance when submit fails`() {
+    fun `cleans requested instance when its first submit is rejected`() {
         // given
         val repository = TestInstanceRepository()
         val instance = repository.save(newRequested())
@@ -867,6 +867,102 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANED, instance.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
         assertNull(instance.runtimeOperationId)
+    }
+
+    // 첫 접수 거부를 처리하기 전에 다른 워커가 같은 행을 재접수한 경우다
+    // 재접수는 런타임을 부르기 전에 시도 횟수를 올려 커밋하므로 그 값으로 알아챌 수 있다
+    // 첫 접수 거부만 보고 끝내면 재접수가 만든 workload가 남는다, 그 접수의 결과가 이 행을 정해야 한다
+    @Test
+    fun `ignores a late first submit rejection when a resubmit has already started`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        // 시계가 고정이라 첫 접수가 써 둔 시각과 겹치지 않게 1초 뒤로 둔다
+        val resubmitDue = clock.instant().plus(OperationProperties().resubmitDelay).plusSeconds(1)
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                // 다른 워커의 resubmitCreate가 런타임을 부르기 전에 커밋해 둔 상태를 만든다
+                instance.attemptCount = 1
+                instance.nextPollAt = resubmitDue
+                throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "rejected late")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 행은 재접수가 써 둔 그대로고 예약도 쥐고 있다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(resubmitDue, instance.nextPollAt)
+        assertNotNull(instance.reservationId)
+        assertEquals(0, broker.releasedReservations.size)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 브로커를 재시도한 행은 SCHEDULING에서 attemptCount가 올라가 있다
+    // PROVISIONING으로 갈 때 0으로 되돌려야 첫 접수 거부가 재접수 시작으로 잘못 읽히지 않는다
+    @Test
+    fun `cleans requested instance when its first submit is rejected after a broker retry`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val broker = FakeBrokerClient()
+        var fail = true
+        val brokerClient = object : BrokerClient by broker {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                if (fail) throw IllegalStateException("temporary outage")
+                return broker.getCandidates(request)
+            }
+        }
+        val service = newService(
+            repository,
+            brokerClient = brokerClient,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+        )
+        service.progressRequested(instance.instanceId)
+        assertEquals(1, instance.attemptCount)
+        fail = false
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 재접수가 시작된 적 없으니 첫 접수 거부로 바로 끝난다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(1, broker.releasedReservations.size)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 결과를 모르는 실패도 같다, 늦게 온 시간 초과 처리가 재접수 예정 시각을 앞당기면
+    // 재접수가 도는 중에 워커가 한 번 더 접수해 재접수 횟수만 헛되이 쓴다
+    @Test
+    fun `ignores a late unanswered first submit when a resubmit has already started`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val resubmitDue = clock.instant().plus(OperationProperties().resubmitDelay).plusSeconds(1)
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                instance.attemptCount = 1
+                instance.nextPollAt = resubmitDue
+                throw IllegalStateException("read timed out")
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 재접수가 밀어 둔 예정 시각을 덮어쓰지 않는다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(resubmitDue, instance.nextPollAt)
     }
 
     // 접수를 기다리는 사이 정리 대상이 되면 operation을 저장하지 않는지 확인
