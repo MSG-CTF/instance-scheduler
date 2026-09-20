@@ -3,6 +3,10 @@ spring:
     name: scheduler
   jackson:
     property-naming-strategy: SNAKE_CASE
+  task:
+    execution:
+      # Executor 빈(operationWorkerExecutor)이 있으면 Boot는 applicationTaskExecutor를 안 만든다, force가 그대로 만들게 한다
+      mode: force
 
 springdoc:
   api-docs:

@@ -849,11 +849,19 @@ class InstanceOperationService(
                 move(instance, InstanceStatus.FAILED)
                 instance.nextPollAt = null
                 recordError(instance, errorCode, "attempts=${instance.attemptCount}, reason=${failureDetail(exception)}")
+                // 접는 순간에도 로그를 남긴다, 이벤트 행만 있으면 재시도 warn 뒤 조용해진 것을 해결로 오해한다
+                log.warn(
+                    "broker step gave up, instance failed: instanceId={}, attempts={}, code={}, reason={}",
+                    instanceId,
+                    instance.attemptCount,
+                    errorCode.name,
+                    failureDetail(exception),
+                )
                 return@executeWithoutResult
             }
             instance.nextPollAt = clock.instant().plus(backoffDelay(instance.attemptCount))
             log.warn(
-                "broker candidate lookup failed: instanceId={}, attempt={}, code={}, reason={}",
+                "broker step failed, will retry: instanceId={}, attempt={}, code={}, reason={}",
                 instanceId,
                 instance.attemptCount,
                 errorCode.name,

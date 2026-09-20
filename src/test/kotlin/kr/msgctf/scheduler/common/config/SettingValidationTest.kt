@@ -1,11 +1,13 @@
 package kr.msgctf.scheduler.common.config
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.broker.BrokerClientProperties
 import kr.msgctf.scheduler.common.auth.ApiAuthProperties
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.runtime.RuntimeClientProperties
 
 // 설정 누락이 기동 단계에서 잡히는지, 로그에 토큰 값이 새지 않는지 확인
@@ -33,6 +35,23 @@ class SettingValidationTest {
     @Test
     fun `allows absent api token`() {
         assertNull(ApiAuthProperties().token)
+    }
+
+    // 0이면 워커 태스크가 영영 안 돌고 음수면 풀 생성이 실패한다, 기동에서 잡는다
+    @Test
+    fun `rejects non positive operation parallelism`() {
+        assertFailsWith<IllegalArgumentException> {
+            OperationProperties(parallelism = 0)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            OperationProperties(parallelism = -1)
+        }
+    }
+
+    // 설정이 없으면 지금처럼 한 건씩 처리한다
+    @Test
+    fun `operation parallelism defaults to one`() {
+        assertEquals(1, OperationProperties().parallelism)
     }
 
     @Test
