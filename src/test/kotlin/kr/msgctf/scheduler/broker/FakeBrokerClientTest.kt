@@ -7,7 +7,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
-import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
 
@@ -65,6 +64,7 @@ class FakeBrokerClientTest {
 
     // 실제 브로커가 VM 행을 잠근 뒤 용량을 다시 세서 모자라면 409 INSUFFICIENT_CAPACITY로 거절하는 것을 흉내낸다
     // 병렬 워커가 같은 후보에 몰릴 때 스케줄러가 어떻게 되는지 보는 테스트가 쓴다
+    // HttpBrokerClient가 만드는 BrokerRejectedException과 같은 모양이어야 운영 경로와 같은 분기를 탄다
     @Test
     fun `rejects reservation when active reservations reach capacity`() {
         // given
@@ -72,13 +72,14 @@ class FakeBrokerClientTest {
         brokerClient.createReservation(newReservationRequest(testUuid(21)))
 
         // when
-        val exception = assertFailsWith<SchedulerException> {
+        val exception = assertFailsWith<BrokerRejectedException> {
             brokerClient.createReservation(newReservationRequest(testUuid(22)))
         }
 
         // then
         assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, exception.errorCode)
-        assertTrue(exception.adminDetail!!.contains("INSUFFICIENT_CAPACITY"), exception.adminDetail)
+        assertEquals("INSUFFICIENT_CAPACITY", exception.brokerCode)
+        assertTrue(exception.adminDetail!!.contains("status=409"), exception.adminDetail)
         assertEquals(1, brokerClient.rejectedReservations.size)
     }
 
@@ -93,10 +94,10 @@ class FakeBrokerClientTest {
         // when & then
         assertEquals(1, brokerClient.getCandidates(newRequest()).candidates[0].remainingCapacity.fitCount)
 
-        brokerClient.commitReservation(held.reservationId)
+        brokerClient.commitReservation(newCommitRequest(held.reservationId, testUuid(21)))
         assertEquals(1, brokerClient.getCandidates(newRequest()).candidates[0].remainingCapacity.fitCount)
 
-        brokerClient.releaseReservation(held.reservationId)
+        brokerClient.releaseReservation(newReleaseRequest(held.reservationId, testUuid(21)))
         assertEquals(2, brokerClient.getCandidates(newRequest()).candidates[0].remainingCapacity.fitCount)
     }
 
@@ -106,10 +107,10 @@ class FakeBrokerClientTest {
         // given
         val brokerClient = FakeBrokerClient(capacity = 1)
         val held = brokerClient.createReservation(newReservationRequest(testUuid(21)))
-        brokerClient.releaseReservation(held.reservationId)
+        brokerClient.releaseReservation(newReleaseRequest(held.reservationId, testUuid(21)))
 
         // when
-        brokerClient.commitReservation(held.reservationId)
+        brokerClient.commitReservation(newCommitRequest(held.reservationId, testUuid(21)))
 
         // then
         assertEquals(1, brokerClient.getCandidates(newRequest()).candidates[0].remainingCapacity.fitCount)
@@ -148,17 +149,40 @@ class FakeBrokerClientTest {
 
     private fun newReservationRequest(instanceId: UUID): BrokerReservationRequest =
         BrokerReservationRequest(
-            idempotencyKey = "resv-$instanceId",
             requestId = "resv-$instanceId",
+            requestedAt = Instant.parse("2026-07-06T13:30:00Z"),
+            instanceId = instanceId,
             candidateId = "candidate-self-hosted-1",
             teamId = testUuid(1),
             challengeId = testUuid(10),
-            instanceId = instanceId,
-            resourceProfile = BrokerResourceProfile(
+            architecture = Architecture.AMD64,
+            resourceProfile = ResourceProfile(
                 cpuMillicores = 500,
                 memoryMib = 512,
                 ephemeralStorageMib = 1024,
-                architecture = Architecture.AMD64,
             ),
+        )
+
+    private fun newCommitRequest(reservationId: String, instanceId: UUID): BrokerReservationCommitRequest =
+        BrokerReservationCommitRequest(
+            requestId = "commit-$reservationId",
+            requestedAt = Instant.parse("2026-07-06T13:31:00Z"),
+            instanceId = instanceId,
+            reservationId = reservationId,
+            runtimeWorkloadId = "workload-$instanceId",
+            resourceProfile = ResourceProfile(
+                cpuMillicores = 500,
+                memoryMib = 512,
+                ephemeralStorageMib = 1024,
+            ),
+        )
+
+    private fun newReleaseRequest(reservationId: String, instanceId: UUID): BrokerReservationReleaseRequest =
+        BrokerReservationReleaseRequest(
+            requestId = "release-$reservationId",
+            requestedAt = Instant.parse("2026-07-06T13:32:00Z"),
+            instanceId = instanceId,
+            reservationId = reservationId,
+            releaseReason = ReleaseReason.SCHEDULER_CANCELLED,
         )
 }

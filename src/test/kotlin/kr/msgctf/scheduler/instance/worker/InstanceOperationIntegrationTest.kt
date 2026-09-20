@@ -15,7 +15,9 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerClient
+import kr.msgctf.scheduler.broker.BrokerReservationReleaseRequest
 import kr.msgctf.scheduler.broker.FakeBrokerClient
+import kr.msgctf.scheduler.broker.ReleaseReason
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
@@ -211,7 +213,17 @@ class InstanceOperationIntegrationTest {
         fakeBroker.capacity = 2
         val saved = (1..4).map { instanceRepository.saveAndFlush(newRequested()) }
         newWorker(executor = pool(4)).progressOperations()
-        instanceRepository.findAll().mapNotNull { it.reservationId }.forEach { fakeBroker.releaseReservation(it) }
+        instanceRepository.findAll().filter { it.reservationId != null }.forEach { instance ->
+            fakeBroker.releaseReservation(
+                BrokerReservationReleaseRequest(
+                    requestId = "release-${instance.reservationId}",
+                    requestedAt = Instant.now(),
+                    instanceId = instance.instanceId,
+                    reservationId = instance.reservationId!!,
+                    releaseReason = ReleaseReason.SCHEDULER_CANCELLED,
+                ),
+            )
+        }
 
         // backoff 2초가 지난 시각으로 한 주기 더 돈다
         newWorker(executor = pool(4), clock = Clock.offset(Clock.systemUTC(), Duration.ofSeconds(5))).progressOperations()
