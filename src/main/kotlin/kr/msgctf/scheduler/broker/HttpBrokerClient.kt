@@ -1,7 +1,5 @@
 package kr.msgctf.scheduler.broker
 
-import kr.msgctf.scheduler.common.error.SchedulerErrorCode
-import kr.msgctf.scheduler.common.error.SchedulerException
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
@@ -37,12 +35,7 @@ class HttpBrokerClient(
             )
             response
         } catch (exception: RestClientResponseException) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
-                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
-                    ", body=${exception.responseBodyAsString.take(200)}",
-                cause = exception,
-            )
+            throw rejected(request.requestId, exception)
         }
 
     override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
@@ -64,36 +57,48 @@ class HttpBrokerClient(
             )
             response
         } catch (exception: RestClientResponseException) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
-                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
-                    ", body=${exception.responseBodyAsString.take(200)}",
-                cause = exception,
-            )
+            throw rejected(request.requestId, exception)
         }
 
-    override fun commitReservation(reservationId: String): BrokerReservationResponse =
-        postReservationAction(reservationId, "commit")
+    override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse =
+        postReservationAction(request, "commit")
 
-    override fun releaseReservation(reservationId: String): BrokerReservationResponse =
-        postReservationAction(reservationId, "release")
+    override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse =
+        postReservationAction(request, "release")
 
-    private fun postReservationAction(reservationId: String, action: String): BrokerReservationResponse =
+    // 확정과 반납은 본문이 필수다, 경로의 id를 본문에서 꺼내 둘이 어긋나지 않게 한다
+    private fun postReservationAction(
+        request: BrokerReservationMutationRequest,
+        action: String,
+    ): BrokerReservationResponse =
         try {
+            val reservationId = request.reservationId
             val body = restClient.post()
                 .uri("/v1/reservations/{reservationId}/$action", reservationId)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
                 .retrieve()
                 .body(BrokerReservationResponse::class.java)
             val response = checkNotNull(body) { "reservation $action response body missing: $reservationId" }
             log.info("reservation {}: reservationId={}, status={}", action, reservationId, response.status)
             response
         } catch (exception: RestClientResponseException) {
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
-                adminDetail = "reservationId=$reservationId, action=$action" +
-                    ", status=${exception.statusCode.value()}, body=${exception.responseBodyAsString.take(200)}",
-                cause = exception,
-            )
+            throw rejected("${request.requestId}, reservationId=${request.reservationId}, action=$action", exception)
         }
+
+    // 거절 body의 code를 꺼내 둔다, DEPLOYED_SPEC_MISMATCH처럼 호출자가 코드로 다음 행동을 고르는 자리가 있다
+    private fun rejected(context: String, exception: RestClientResponseException): BrokerRejectedException {
+        val code = try {
+            exception.getResponseBodyAs(BrokerErrorResponse::class.java)?.error?.code
+        } catch (conversionFailure: Exception) {
+            null
+        }
+        return BrokerRejectedException(
+            brokerCode = code,
+            adminDetail = "requestId=$context, status=${exception.statusCode.value()}, code=$code" +
+                ", body=${exception.responseBodyAsString.take(200)}",
+            cause = exception,
+        )
+    }
 }

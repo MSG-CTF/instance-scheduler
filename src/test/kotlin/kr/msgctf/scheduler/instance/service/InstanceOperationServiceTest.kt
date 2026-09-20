@@ -18,6 +18,9 @@ import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
 import kr.msgctf.scheduler.broker.BrokerClient
+import kr.msgctf.scheduler.broker.BrokerRejectedException
+import kr.msgctf.scheduler.broker.BrokerReservationCommitRequest
+import kr.msgctf.scheduler.broker.ReleaseReason
 import kr.msgctf.scheduler.broker.BrokerReservationRequest
 import kr.msgctf.scheduler.broker.BrokerReservationResponse
 import kr.msgctf.scheduler.broker.BrokerReservationStatus
@@ -393,7 +396,9 @@ class InstanceOperationServiceTest {
         assertNull(instance.reservationId)
     }
 
-    // RUNNING 도달 시 예약이 확정되고 흔적이 지워지는지 확인
+    // RUNNING 도달 시 예약이 확정되는지 확인
+    // 확정한 예약은 만료되지 않아 정리 때 반납해야 하므로 id를 행에 남긴다
+    // 확정 본문에는 인스턴스, workload id, 예약 때와 같은 자원 값이 실린다
     @Test
     fun `commits reservation when instance reaches running`() {
         // given
@@ -410,8 +415,129 @@ class InstanceOperationServiceTest {
         // then
         assertEquals(InstanceStatus.RUNNING, instance.status)
         assertEquals("reservation-${instance.instanceId}", heldReservationId)
-        assertNull(instance.reservationId)
+        assertEquals(heldReservationId, instance.reservationId)
         assertEquals(listOf(heldReservationId), broker.committedReservations)
+        val commit = broker.commitRequests.single()
+        assertEquals(instance.instanceId, commit.instanceId)
+        assertEquals(instance.runtimeWorkloadId, commit.runtimeWorkloadId)
+        assertEquals(instance.cpuMillicores, commit.resourceProfile.cpuMillicores)
+        assertEquals(instance.memoryMib, commit.resourceProfile.memoryMib)
+        assertEquals(instance.ephemeralStorageMib, commit.resourceProfile.ephemeralStorageMib)
+    }
+
+    // 예약의 request_id에 후보가 들어가고 requested_at은 행이 만들어진 때다
+    // 브로커가 둘 다 비교하므로 재시도마다 같아야 기존 예약을 돌려받는다
+    @Test
+    fun `reserves with candidate bound request id and stable requested at`() {
+        // given: 첫 접수는 브로커 응답을 잃고 두 번째가 같은 후보로 다시 잡는다
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        var failFirst = true
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (failFirst) {
+                    failFirst = false
+                    delegate.reservationRequests += request
+                    throw IllegalStateException("connection reset")
+                }
+                return delegate.createReservation(request)
+            }
+        }
+        val createdAt = Instant.parse("2026-07-06T04:00:00Z")
+        val instance = repository.save(newRequested().apply { this.createdAt = createdAt })
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        service.progressRequested(instance.instanceId)
+
+        // then: 본문 전체가 같아야 브로커가 기존 예약을 돌려준다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        val requests = delegate.reservationRequests
+        assertEquals(2, requests.size)
+        assertEquals("resv-${instance.instanceId}-candidate-self-hosted-1", requests.first().requestId)
+        assertEquals(createdAt, requests.first().requestedAt)
+        assertEquals(requests.first(), requests.last())
+    }
+
+    // 확정된 예약은 삭제가 끝날 때 반납한다, 사용자 삭제라 사유는 SCHEDULER_CANCELLED다
+    // 반납 request_id에 사유가 들어간다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청이어야 한다
+    @Test
+    fun `releases committed reservation when delete completes`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-committed" })
+        val service = newService(repository, brokerClient = broker)
+
+        // when: 삭제 접수 뒤 결과 조회에서 SUCCEEDED가 오면 정리가 끝난다
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertNull(instance.reservationId)
+        val release = broker.releaseRequests.single()
+        assertEquals("reservation-committed", release.reservationId)
+        assertEquals(instance.instanceId, release.instanceId)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED, release.releaseReason)
+        assertEquals("release-reservation-committed-SCHEDULER_CANCELLED", release.requestId)
+    }
+
+    // 자원 값 불일치가 아닌 거절은 예약을 건드리지 않는다, HELD가 아닌 예약을 반납해도 소용이 없다
+    @Test
+    fun `does not release reservation when commit is rejected for another reason`() {
+        // given
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun commitReservation(request: BrokerReservationCommitRequest) =
+                throw BrokerRejectedException(
+                    brokerCode = "INVALID_RESERVATION_STATE",
+                    adminDetail = "status=409, code=INVALID_RESERVATION_STATE",
+                    cause = IllegalStateException("expired"),
+                )
+        }
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(emptyList(), delegate.releaseRequests)
+    }
+
+    // 자원 값이 안 맞아 확정이 거절되면 예약이 HELD로 남아 만료까지 용량을 잡는다
+    // 그 사유로 바로 반납하는지 확인, 인스턴스는 RUNNING 그대로다
+    @Test
+    fun `releases reservation with mismatch reason when commit is rejected for spec mismatch`() {
+        // given
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun commitReservation(request: BrokerReservationCommitRequest) =
+                throw BrokerRejectedException(
+                    brokerCode = "DEPLOYED_SPEC_MISMATCH",
+                    adminDetail = "status=409, code=DEPLOYED_SPEC_MISMATCH",
+                    cause = IllegalStateException("mismatch"),
+                )
+        }
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        val release = delegate.releaseRequests.single()
+        assertEquals("reservation-${instance.instanceId}", release.reservationId)
+        assertEquals(ReleaseReason.DEPLOYED_SPEC_MISMATCH, release.releaseReason)
     }
 
     // workload id가 없어도 지울 대상이 있을 수 있다
@@ -847,6 +973,8 @@ class InstanceOperationServiceTest {
         assertNull(instance.reservationId)
         assertEquals(listOf(heldReservationId), broker.releasedReservations)
         assertEquals(emptyList(), broker.committedReservations)
+        // 생성이 실패해 정리로 넘어온 행이라 사유는 생성 실패다
+        assertEquals(ReleaseReason.RUNTIME_CREATE_FAILED, broker.releaseRequests.single().releaseReason)
     }
 
     // 재시도 대기 중이던 SCHEDULING이 성공하면 흔적을 지우고 PROVISIONING으로 가는지 확인
@@ -878,9 +1006,9 @@ class InstanceOperationServiceTest {
         assertEquals(clock.instant(), instance.nextPollAt)
     }
 
-    // 접수가 실패하면 잔여 정리를 위해 CLEANUP_PENDING으로 파킹하는지 확인
+    // 첫 접수가 거부되고 그 사이 재접수가 시작된 적도 없으면 런타임에 아무것도 없다, 확인 없이 바로 끝낸다
     @Test
-    fun `parks requested instance when submit fails`() {
+    fun `cleans requested instance when its first submit is rejected`() {
         // given
         val repository = TestInstanceRepository()
         val instance = repository.save(newRequested())
@@ -893,6 +1021,102 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANED, instance.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, instance.deleteReason)
         assertNull(instance.runtimeOperationId)
+    }
+
+    // 첫 접수 거부를 처리하기 전에 다른 워커가 같은 행을 재접수한 경우다
+    // 재접수는 런타임을 부르기 전에 시도 횟수를 올려 커밋하므로 그 값으로 알아챌 수 있다
+    // 첫 접수 거부만 보고 끝내면 재접수가 만든 workload가 남는다, 그 접수의 결과가 이 행을 정해야 한다
+    @Test
+    fun `ignores a late first submit rejection when a resubmit has already started`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        // 시계가 고정이라 첫 접수가 써 둔 시각과 겹치지 않게 1초 뒤로 둔다
+        val resubmitDue = clock.instant().plus(OperationProperties().resubmitDelay).plusSeconds(1)
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                // 다른 워커의 resubmitCreate가 런타임을 부르기 전에 커밋해 둔 상태를 만든다
+                instance.attemptCount = 1
+                instance.nextPollAt = resubmitDue
+                throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "rejected late")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 행은 재접수가 써 둔 그대로고 예약도 쥐고 있다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(resubmitDue, instance.nextPollAt)
+        assertNotNull(instance.reservationId)
+        assertEquals(0, broker.releasedReservations.size)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 브로커를 재시도한 행은 SCHEDULING에서 attemptCount가 올라가 있다
+    // PROVISIONING으로 갈 때 0으로 되돌려야 첫 접수 거부가 재접수 시작으로 잘못 읽히지 않는다
+    @Test
+    fun `cleans requested instance when its first submit is rejected after a broker retry`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val broker = FakeBrokerClient()
+        var fail = true
+        val brokerClient = object : BrokerClient by broker {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                if (fail) throw IllegalStateException("temporary outage")
+                return broker.getCandidates(request)
+            }
+        }
+        val service = newService(
+            repository,
+            brokerClient = brokerClient,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+        )
+        service.progressRequested(instance.instanceId)
+        assertEquals(1, instance.attemptCount)
+        fail = false
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 재접수가 시작된 적 없으니 첫 접수 거부로 바로 끝난다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(1, broker.releasedReservations.size)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 결과를 모르는 실패도 같다, 늦게 온 시간 초과 처리가 재접수 예정 시각을 앞당기면
+    // 재접수가 도는 중에 워커가 한 번 더 접수해 재접수 횟수만 헛되이 쓴다
+    @Test
+    fun `ignores a late unanswered first submit when a resubmit has already started`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val resubmitDue = clock.instant().plus(OperationProperties().resubmitDelay).plusSeconds(1)
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                instance.attemptCount = 1
+                instance.nextPollAt = resubmitDue
+                throw IllegalStateException("read timed out")
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 재접수가 밀어 둔 예정 시각을 덮어쓰지 않는다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(resubmitDue, instance.nextPollAt)
     }
 
     // 접수를 기다리는 사이 정리 대상이 되면 operation을 저장하지 않는지 확인

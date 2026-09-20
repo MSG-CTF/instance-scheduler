@@ -106,7 +106,8 @@ class Instance(
     @Column(name = "runtime_operation_id")
     var runtimeOperationId: String? = null,
 
-    // broker에 선점한 용량 예약, 확정이나 반납 후에는 비운다
+    // broker에 선점한 용량 예약, 반납 후에 비운다
+    // 확정해도 비우지 않는다, 확정한 예약은 만료되지 않아 정리가 끝날 때 반납해야 한다
     @Column(name = "reservation_id")
     var reservationId: String? = null,
 

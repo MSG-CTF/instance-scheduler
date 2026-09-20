@@ -3,8 +3,6 @@ package kr.msgctf.scheduler.broker
 import java.math.BigDecimal
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
-import kr.msgctf.scheduler.common.error.SchedulerErrorCode
-import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 
 // Broker가 없을 때 Scheduler 흐름을 확인하는 임시 client
@@ -21,6 +19,11 @@ class FakeBrokerClient(
     val committedReservations: MutableList<String> = CopyOnWriteArrayList()
     val releasedReservations: MutableList<String> = CopyOnWriteArrayList()
 
+    // 본문까지 봐야 하는 테스트가 쓴다, 위 두 목록은 id만 담는다
+    val reservationRequests: MutableList<BrokerReservationRequest> = CopyOnWriteArrayList()
+    val commitRequests: MutableList<BrokerReservationCommitRequest> = CopyOnWriteArrayList()
+    val releaseRequests: MutableList<BrokerReservationReleaseRequest> = CopyOnWriteArrayList()
+
     // 용량 부족으로 거절한 예약 요청의 request_id
     val rejectedReservations: MutableList<String> = CopyOnWriteArrayList()
 
@@ -31,6 +34,7 @@ class FakeBrokerClient(
     private val reservationLock = Any()
 
     override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+        reservationRequests += request
         val reservationId = "reservation-${request.instanceId}"
         val status = synchronized(reservationLock) {
             val existing = reservations[reservationId]
@@ -40,12 +44,12 @@ class FakeBrokerClient(
                 val limit = capacity
                 if (limit != null && activeReservationCount() >= limit) {
                     rejectedReservations += request.requestId
-                    // HttpBrokerClient.createReservation이 4xx를 감싸는 모양을 그대로 따른다, 그쪽이 바뀌면 여기도 맞춘다
-                    // handleBrokerFailure가 errorCode와 adminDetail만 읽으므로 둘이 같아야 경합 테스트가 실제 경로를 탄다
-                    throw SchedulerException(
-                        errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
-                        adminDetail = "requestId=${request.requestId}, status=409" +
-                            ", body={\"error\":{\"code\":\"INSUFFICIENT_CAPACITY\"}}",
+                    // HttpBrokerClient.rejected가 만드는 모양을 그대로 따른다, 그쪽이 바뀌면 여기도 맞춘다
+                    // 경합 테스트가 운영 경로와 같은 예외로 handleBrokerFailure를 타야 한다
+                    throw BrokerRejectedException(
+                        brokerCode = INSUFFICIENT_CAPACITY_CODE,
+                        adminDetail = "requestId=${request.requestId}, status=409, code=$INSUFFICIENT_CAPACITY_CODE" +
+                            ", body={\"error\":{\"code\":\"$INSUFFICIENT_CAPACITY_CODE\"}}",
                     )
                 }
                 reservations[reservationId] = BrokerReservationStatus.HELD
@@ -61,25 +65,27 @@ class FakeBrokerClient(
     }
 
     // 실제 브로커는 반납한 예약의 확정을 거절한다, 모형은 상태만 그대로 둔다
-    override fun commitReservation(reservationId: String): BrokerReservationResponse {
-        committedReservations += reservationId
-        reservations.computeIfPresent(reservationId) { _, current ->
+    override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse {
+        committedReservations += request.reservationId
+        commitRequests += request
+        reservations.computeIfPresent(request.reservationId) { _, current ->
             if (current == BrokerReservationStatus.RELEASED) current else BrokerReservationStatus.COMMITTED
         }
         return BrokerReservationResponse(
-            reservationId = reservationId,
-            requestId = reservationId,
+            reservationId = request.reservationId,
+            requestId = request.requestId,
             status = BrokerReservationStatus.COMMITTED,
             expiresAt = null,
         )
     }
 
-    override fun releaseReservation(reservationId: String): BrokerReservationResponse {
-        releasedReservations += reservationId
-        reservations.computeIfPresent(reservationId) { _, _ -> BrokerReservationStatus.RELEASED }
+    override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse {
+        releasedReservations += request.reservationId
+        releaseRequests += request
+        reservations.computeIfPresent(request.reservationId) { _, _ -> BrokerReservationStatus.RELEASED }
         return BrokerReservationResponse(
-            reservationId = reservationId,
-            requestId = reservationId,
+            reservationId = request.reservationId,
+            requestId = request.requestId,
             status = BrokerReservationStatus.RELEASED,
             expiresAt = null,
         )
@@ -112,6 +118,9 @@ class FakeBrokerClient(
             reservations.clear()
             committedReservations.clear()
             releasedReservations.clear()
+            reservationRequests.clear()
+            commitRequests.clear()
+            releaseRequests.clear()
             rejectedReservations.clear()
             capacity = null
         }
@@ -150,7 +159,7 @@ class FakeBrokerClient(
                 type = RuntimeType.KUBERNETES,
                 targetId = "cluster-main",
             ),
-            architecture = request.resourceProfile.architecture,
+            architecture = request.architecture,
             remainingCapacity = CandidateCapacity(
                 cpuMillicores = 4000,
                 memoryMib = 8192,
@@ -171,6 +180,9 @@ class FakeBrokerClient(
 
     companion object {
         private const val UNLIMITED_FIT_COUNT = 8
+
+        // 브로커가 용량 부족으로 예약을 거절할 때 보내는 코드
+        const val INSUFFICIENT_CAPACITY_CODE = "INSUFFICIENT_CAPACITY"
     }
 }
 
