@@ -11,29 +11,38 @@ class FakeBrokerClient(
     val committedReservations = mutableListOf<String>()
     val releasedReservations = mutableListOf<String>()
 
-    override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
-        BrokerReservationResponse(
+    // 본문까지 봐야 하는 테스트가 쓴다, 위 두 목록은 id만 담는다
+    val reservationRequests = mutableListOf<BrokerReservationRequest>()
+    val commitRequests = mutableListOf<BrokerReservationCommitRequest>()
+    val releaseRequests = mutableListOf<BrokerReservationReleaseRequest>()
+
+    override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+        reservationRequests += request
+        return BrokerReservationResponse(
             reservationId = "reservation-${request.instanceId}",
             requestId = request.requestId,
             status = BrokerReservationStatus.HELD,
             expiresAt = null,
         )
+    }
 
-    override fun commitReservation(reservationId: String): BrokerReservationResponse {
-        committedReservations += reservationId
+    override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse {
+        committedReservations += request.reservationId
+        commitRequests += request
         return BrokerReservationResponse(
-            reservationId = reservationId,
-            requestId = reservationId,
+            reservationId = request.reservationId,
+            requestId = request.requestId,
             status = BrokerReservationStatus.COMMITTED,
             expiresAt = null,
         )
     }
 
-    override fun releaseReservation(reservationId: String): BrokerReservationResponse {
-        releasedReservations += reservationId
+    override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse {
+        releasedReservations += request.reservationId
+        releaseRequests += request
         return BrokerReservationResponse(
-            reservationId = reservationId,
-            requestId = reservationId,
+            reservationId = request.reservationId,
+            requestId = request.requestId,
             status = BrokerReservationStatus.RELEASED,
             expiresAt = null,
         )
@@ -85,7 +94,7 @@ class FakeBrokerClient(
                 type = RuntimeType.KUBERNETES,
                 targetId = "cluster-main",
             ),
-            architecture = request.resourceProfile.architecture,
+            architecture = request.architecture,
             remainingCapacity = CandidateCapacity(
                 cpuMillicores = 4000,
                 memoryMib = 8192,

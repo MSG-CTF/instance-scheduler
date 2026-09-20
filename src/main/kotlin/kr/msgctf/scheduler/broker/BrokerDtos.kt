@@ -1,6 +1,7 @@
 package kr.msgctf.scheduler.broker
 
 import com.fasterxml.jackson.annotation.JsonCreator
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.math.BigDecimal
 import java.time.Instant
@@ -29,31 +30,6 @@ data class ResourceProfile(
     val ephemeralStorageMib: Int,
 )
 
-// Broker 후보 요청에 담는 실행 리소스 양과 아키텍처
-data class BrokerResourceProfile(
-    @JsonProperty("cpu_millicores")
-    val cpuMillicores: Int,
-
-    @JsonProperty("memory_mib")
-    val memoryMib: Int,
-
-    @JsonProperty("ephemeral_storage_mib")
-    val ephemeralStorageMib: Int,
-
-    // 문제 이미지가 실행되어야 하는 CPU 아키텍처
-    val architecture: Architecture,
-) {
-    companion object {
-        fun from(profile: ResourceProfile, architecture: Architecture): BrokerResourceProfile =
-            BrokerResourceProfile(
-                cpuMillicores = profile.cpuMillicores,
-                memoryMib = profile.memoryMib,
-                ephemeralStorageMib = profile.ephemeralStorageMib,
-                architecture = architecture,
-            )
-    }
-}
-
 // Scheduler가 Broker에게 사용 가능한 후보 리소스를 요청할 때 보내는 값
 data class BrokerCandidateRequest(
     @JsonProperty("request_id")
@@ -71,8 +47,23 @@ data class BrokerCandidateRequest(
     @JsonProperty("instance_id")
     val instanceId: UUID,
 
+    // 문제 이미지가 실행되어야 하는 CPU 아키텍처, 자원 프로필 안이 아니라 요청 최상위에 둔다
+    // 브로커 스키마가 모르는 필드를 거절하므로 자리가 어긋나면 422다
+    val architecture: Architecture,
+
     @JsonProperty("resource_profile")
-    val resourceProfile: BrokerResourceProfile,
+    val resourceProfile: ResourceProfile,
+)
+
+// 브로커가 거절할 때 보내는 body, 같은 HTTP 상태라도 code가 달라 뜻이 갈리는 자리에서 쓴다
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class BrokerErrorResponse(
+    val error: BrokerErrorBody?,
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class BrokerErrorBody(
+    val code: String?,
 )
 
 // Broker가 후보 조회를 처리한 결과
