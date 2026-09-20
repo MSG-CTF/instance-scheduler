@@ -206,6 +206,7 @@ class InstanceOperationService(
             // 접수 호출이 끝날 때까지 다시 집히지 않게 민다, 실패하면 그쪽에서 backoff로 다시 잡는다
             instance.nextPollAt = clock.instant().plus(operationProperties.resubmitDelay)
             // 런타임을 부르기 전에 커밋한다, 실패 처리로 옮기면 접수 뒤 저장이 끊기는 경우가 안 세어진다
+            // handleSubmitFailure가 늦게 온 첫 접수 실패를 처리할 때도 이 값으로 재접수가 시작됐는지 안다
             instance.attemptCount = attempts + 1
 
             // 여기까지 온 행은 PROVISIONING까지 갔으므로 스펙과 좌표를 이미 읽은 적이 있다
@@ -716,6 +717,21 @@ class InstanceOperationService(
             // 이 호출이 도는 사이 다른 접수가 먼저 202를 받아 저장했으면 늦게 온 실패로 덮지 않는다
             // 재접수 유예가 런타임 읽기 시간보다 짧게 설정되면 생길 수 있다
             if (instance.runtimeOperationId != null) return@executeWithoutResult
+            // 다른 워커가 재접수를 시작만 했어도 같다-> 그 접수의 결과가 이 행을 정한다
+            // resubmitCreate가 런타임을 부르기 전에 attemptCount를 올려 커밋하므로 0보다 크면 시작된 것이다
+            // 첫 접수만 본다 -> 재접수는 attemptCount를 이미 올린 뒤라 조건 없이 보면 재접수 실패가 전부 무시된다
+            if (firstSubmit && instance.attemptCount > 0) {
+                // 정상이면 첫 접수의 실패 처리가 재접수보다 먼저 끝난다
+                // 여기 왔으면 그 처리가 이상하게 느렸던 것이라 경고로 남긴다
+                log.warn(
+                    "ignoring late first submit failure, a resubmit has started: instanceId={}, attempt={}, rejected={}, reason={}",
+                    instanceId,
+                    instance.attemptCount,
+                    rejected,
+                    failureDetail(exception),
+                )
+                return@executeWithoutResult
+            }
 
             if (rejected) {
                 // 런타임이 이번 요청을 거부했으므로 같은 요청을 다시 보내도 같은 답이 온다
