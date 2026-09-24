@@ -11,6 +11,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.broker.Architecture
@@ -51,12 +52,16 @@ import kr.msgctf.scheduler.runtime.RuntimeStatusResult
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
+import org.junit.jupiter.api.extension.ExtendWith
+import org.springframework.boot.test.system.CapturedOutput
+import org.springframework.boot.test.system.OutputCaptureExtension
 import org.springframework.http.HttpStatus
 import org.springframework.transaction.support.TransactionCallback
 import org.springframework.transaction.support.TransactionOperations
 import org.springframework.web.client.HttpClientErrorException
 import org.springframework.web.client.HttpServerErrorException
 
+@ExtendWith(OutputCaptureExtension::class)
 class InstanceOperationServiceTest {
 
     private val clock = Clock.fixed(Instant.parse("2026-08-12T00:00:00Z"), ZoneOffset.UTC)
@@ -249,6 +254,27 @@ class InstanceOperationServiceTest {
         assertNull(instance.nextPollAt)
         assertEquals(1, events.saved.size)
         assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, events.saved.single().errorCode)
+    }
+
+    // 한도에 닿아 FAILED로 접는 순간에도 로그가 남아야 한다, 이벤트 행만 있으면 운영자가 warn 두 줄 뒤 조용해진 것을 해결로 오해한다
+    // 병렬 워커가 같은 후보에 몰리면 예약 거절로 이 분기에 정상 부하에서도 온다
+    @Test
+    fun `logs when broker retry limit reached`(output: CapturedOutput) {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = FakeBrokerClient(FakeBrokerMode.EMPTY))
+
+        // when
+        repeat(3) { service.progressRequested(instance.instanceId) }
+
+        // then
+        val line = output.out.lines().firstOrNull { "gave up" in it }
+        assertTrue(line != null, "give-up line missing in output")
+        assertTrue(" WARN" in line, line)
+        assertTrue("instanceId=${instance.instanceId}" in line, line)
+        assertTrue("attempts=3" in line, line)
+        assertTrue("code=RESOURCE_UNAVAILABLE" in line, line)
     }
 
     // 호출 자체가 안 되는 실패는 BROKER_CALL_FAILED로 남기는지 확인

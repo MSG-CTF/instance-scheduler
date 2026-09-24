@@ -12,6 +12,15 @@ scheduler:
     enabled: true
     fixed-delay: 30s
     retry-limit: 5
+  operation:
+    # 워커가 한 단계의 대상을 동시에 처리하는 스레드 수, 브로커 후보 하나가 받는 자리 수보다 작게 둔다
+    parallelism: 4
+
+spring:
+  datasource:
+    hikari:
+      # 워커 스레드마다 커넥션 하나에 API 몫 10개, 모자라면 connection-timeout 30초를 기다린다
+      maximum-pool-size: 20
 
 springdoc:
   api-docs:

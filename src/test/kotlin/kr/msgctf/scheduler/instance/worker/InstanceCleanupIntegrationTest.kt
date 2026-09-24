@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.worker
 import java.time.Clock
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.Executor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -83,11 +84,13 @@ class InstanceCleanupIntegrationTest {
             clock = Clock.systemUTC(),
         )
 
+    // 같은 스레드에서 돌려 한 건씩 처리하는 흐름을 그대로 확인한다
     private fun newOperationWorker(): InstanceOperationWorker =
         InstanceOperationWorker(
             instanceRepository = instanceRepository,
             operationService = operationService,
             clock = Clock.systemUTC(),
+            executor = Executor { it.run() },
         )
 
     private fun expiredRunning(teamId: UUID): Instance {

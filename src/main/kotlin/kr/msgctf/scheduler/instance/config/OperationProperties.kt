@@ -26,4 +26,12 @@ data class OperationProperties(
     // 접수 뒤 결과를 저장하기 전에 끊기는 일이 거듭될 때다
     // brokerRetryLimit은 "이 횟수째에 포기"라 같은 숫자라도 시도 횟수가 하나 다르다
     val resubmitRetryLimit: Int = 5,
-)
+    // 워커가 한 단계의 대상을 동시에 처리하는 스레드 수
+    // 1이면 한 건씩 처리한다
+    // 브로커 후보 하나가 받는 자리 수보다 크게 두면 예약이 용량 부족으로 거절되기 쉽다
+    val parallelism: Int = 1,
+) {
+    init {
+        require(parallelism >= 1) { "scheduler.operation.parallelism 설정은 1 이상이어야 한다" }
+    }
+}
