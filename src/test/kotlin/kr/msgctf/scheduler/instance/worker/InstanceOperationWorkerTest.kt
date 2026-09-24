@@ -6,6 +6,7 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -204,6 +205,27 @@ class InstanceOperationWorkerTest {
         assertTrue("submitted=2" in line, line)
     }
 
+    // 종료가 시작되면 큐에 남은 작업은 실행도 취소도 안 된 채 버려진다
+    // 그 작업의 결과를 기다리면 주기가 영영 안 끝나고 스레드가 남는다
+    @Test
+    fun `stops the cycle when shutdown drops queued tasks`() {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(requested()) }
+        val service = RecordingOperationService(repo).apply { progressStarted = CountDownLatch(1) }
+        val executor = pool(1)
+        val worker = newWorker(repo.repository, service, executor)
+
+        // when: 한 건이 도는 사이 종료가 시작된다, 나머지 둘은 큐에 남아 있다
+        val cycle = CompletableFuture.runAsync { worker.progressOperations() }
+        assertTrue(service.progressStarted!!.await(5, TimeUnit.SECONDS))
+        executor.shutdownNow()
+
+        // then
+        cycle.get(10, TimeUnit.SECONDS)
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "worker threads still alive")
+    }
+
     // 테스트 서버에서 mock 없이 주기 시간을 볼 수 있게 대상 수와 걸린 시간을 한 줄 남긴다
     @Test
     fun `logs one line per cycle when there were targets`(output: CapturedOutput) {
@@ -331,7 +353,15 @@ class InstanceOperationWorkerTest {
         var failOn: UUID? = null
         var errorOn: UUID? = null
 
+        // 첫 건이 실제로 돌기 시작한 것을 알린다, 종료 시점을 맞추는 테스트가 쓴다
+        var progressStarted: CountDownLatch? = null
+
         override fun progressRequested(instanceId: UUID) {
+            progressStarted?.let {
+                it.countDown()
+                // 종료 신호가 올 때까지 이 스레드를 잡아 둔다, 인터럽트로 깨어난다
+                Thread.sleep(5_000)
+            }
             val gate = progressGate
             gate?.countDown()
             val opened = gate?.await(5, TimeUnit.SECONDS) ?: true
