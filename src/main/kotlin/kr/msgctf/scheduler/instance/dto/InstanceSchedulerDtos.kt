@@ -29,17 +29,20 @@ data class CreateInstanceCommand(
 data class DeleteInstanceCommand(
     val instanceId: UUID,
     val reason: RuntimeDeleteReason = RuntimeDeleteReason.USER_REQUESTED,
+    val userId: UUID? = null,
 )
 
 // extend 서비스에 넘기는 요청 값
 data class ExtendInstanceCommand(
     val instanceId: UUID,
     val extendMinutes: Long,
+    val userId: UUID? = null,
 )
 
 // reset 서비스에 넘기는 요청 값
 data class ResetInstanceCommand(
     val instanceId: UUID,
+    val userId: UUID? = null,
 )
 
 // create/delete/reset/active 조회가 공통으로 돌려주는 결과 값

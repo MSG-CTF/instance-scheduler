@@ -131,25 +131,32 @@ data class ResourceProfileRequest(
 }
 
 // delete API 요청 body
-// public API는 사용자 요청 삭제만 허용한다
-// 관리자 강제 종료나 TTL 만료 정리는 별도 경로에서 처리한다
+// 사용자 요청과 관리자 강제 종료만 받는다, TTL 만료 같은 정리 사유는 워커 안에서만 쓴다
 data class DeleteInstanceRequest(
     val deleteReason: RuntimeDeleteReason = RuntimeDeleteReason.USER_REQUESTED,
+    // 요청한 사람, 백엔드가 토큰에서 뽑아 보낸다
+    // 없으면 검사하지 않는다, 지금 백엔드가 안 보내므로 필수로 잡으면 즉시 깨진다
+    val userId: UUID? = null,
 ) {
 
-    // 허용하지 않는 사유는 명시적으로 거절한다
+    // 허용하지 않는 사유는 조용히 바꾸지 않고 거절한다
     fun toCommand(instanceId: UUID): DeleteInstanceCommand {
-        if (deleteReason != RuntimeDeleteReason.USER_REQUESTED) {
+        if (deleteReason !in API_DELETE_REASONS) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.INVALID_REQUEST,
-                adminDetail = "deleteReason=$deleteReason, allowed=${RuntimeDeleteReason.USER_REQUESTED}",
+                adminDetail = "deleteReason=$deleteReason, allowed=$API_DELETE_REASONS",
             )
         }
 
         return DeleteInstanceCommand(
             instanceId = instanceId,
             reason = deleteReason,
+            userId = userId,
         )
+    }
+
+    companion object {
+        private val API_DELETE_REASONS = setOf(RuntimeDeleteReason.USER_REQUESTED, RuntimeDeleteReason.ADMIN_FORCED)
     }
 }
 
@@ -157,12 +164,27 @@ data class DeleteInstanceRequest(
 data class ExtendInstanceRequest(
     @field:Positive
     val extendMinutes: Long,
+
+    val userId: UUID? = null,
 ) {
 
     fun toCommand(instanceId: UUID): ExtendInstanceCommand =
         ExtendInstanceCommand(
             instanceId = instanceId,
             extendMinutes = extendMinutes,
+            userId = userId,
+        )
+}
+
+// reset API 요청 body, 본문이 없어도 된다
+data class ResetInstanceRequest(
+    val userId: UUID? = null,
+) {
+
+    fun toCommand(instanceId: UUID): ResetInstanceCommand =
+        ResetInstanceCommand(
+            instanceId = instanceId,
+            userId = userId,
         )
 }
 
