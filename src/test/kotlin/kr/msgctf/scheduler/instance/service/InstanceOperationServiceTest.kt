@@ -461,6 +461,82 @@ class InstanceOperationServiceTest {
         assertEquals(requests.first(), requests.last())
     }
 
+    // 예약을 잡는 사이 cleanup 워커의 하드타임아웃이 행을 FAILED로 옮긴 경우다
+    // 두 워커가 스케줄 스레드를 따로 쓰면 이 순서가 생긴다, 잡아 둔 예약은 브로커 만료를 기다리지 않고 바로 돌려준다
+    @Test
+    fun `releases reservation when the instance left scheduling while reserving`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        var heldReservationId: String? = null
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                val response = delegate.createReservation(request)
+                heldReservationId = response.reservationId
+                // 예약 응답을 받은 뒤 다음 트랜잭션 전에 cleanup이 커밋한 상태를 만든다
+                instance.status = InstanceStatus.FAILED
+                return response
+            }
+        }
+        val runtimeDelegate = FakeRuntimeClient()
+        var createSubmits = 0
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                createSubmits++
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: FAILED 그대로고 런타임은 안 불렀고 예약은 돌려줬다
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.reservationId)
+        assertEquals(0, createSubmits)
+        assertEquals(listOf(heldReservationId), delegate.releasedReservations)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED, delegate.releaseRequests.single().releaseReason)
+    }
+
+    // 다른 노드가 같은 행을 같은 후보로 먼저 PROVISIONING까지 옮긴 경우다
+    // 예약 요청이 같아 브로커가 같은 예약을 돌려주므로, 반납하면 그 노드가 쓰는 자리를 빼앗는다
+    @Test
+    fun `keeps reservation when another node already moved on with the same reservation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                val response = delegate.createReservation(request)
+                // 다른 노드가 같은 예약을 받아 PROVISIONING으로 커밋해 둔 상태를 만든다
+                instance.status = InstanceStatus.PROVISIONING
+                instance.reservationId = response.reservationId
+                return response
+            }
+        }
+        val runtimeDelegate = FakeRuntimeClient()
+        var createSubmits = 0
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                createSubmits++
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 앞선 노드의 진행을 건드리지 않는다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNotNull(instance.reservationId)
+        assertEquals(0, createSubmits)
+        assertEquals(emptyList(), delegate.releasedReservations)
+    }
+
     // 확정된 예약은 삭제가 끝날 때 반납한다, 사용자 삭제라 사유는 SCHEDULER_CANCELLED다
     // 반납 request_id에 사유가 들어간다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청이어야 한다
     @Test
