@@ -5,6 +5,7 @@ import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import org.springframework.data.domain.Limit
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Lock
 import org.springframework.data.jpa.repository.Query
@@ -63,17 +64,28 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
 
     // 접수 전 진행/재시도 대상을 조회한다
     // nextPollAt이 미래면 재시도 대기 중이라 건너뛴다
+    // 워커가 상한만큼만 집을 때 먼저 온 요청부터 처리되게 만든 순서로 준다
     @Query(
         "select i from Instance i where i.status in :statuses and i.runtimeOperationId is null" +
-            " and (i.nextPollAt is null or i.nextPollAt <= :now)",
+            " and (i.nextPollAt is null or i.nextPollAt <= :now)" +
+            " order by i.createdAt, i.instanceId",
     )
     fun findDueByStatusInAndRuntimeOperationIdIsNull(
         @Param("statuses") statuses: Collection<InstanceStatus>,
         @Param("now") now: Instant,
+        limit: Limit,
     ): List<Instance>
 
     // 조회 시각이 된 폴링 대상을 조회한다
-    fun findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(nextPollAt: Instant): List<Instance>
+    // 상한만큼만 집을 때 가장 오래 기다린 행부터 묻게 조회 시각 순으로 준다
+    @Query(
+        "select i from Instance i where i.runtimeOperationId is not null and i.nextPollAt <= :now" +
+            " order by i.nextPollAt, i.instanceId",
+    )
+    fun findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(
+        @Param("now") now: Instant,
+        limit: Limit,
+    ): List<Instance>
 
     // 데모 감시 화면이 새 인스턴스를 알아채는 용도라 최근 20개만 조회한다
     fun findTop20ByOrderByCreatedAtDesc(): List<Instance>

@@ -9,6 +9,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -91,6 +92,7 @@ class InstanceCleanupIntegrationTest {
             operationService = operationService,
             clock = Clock.systemUTC(),
             executor = Executor { it.run() },
+            operationProperties = OperationProperties(),
         )
 
     private fun expiredRunning(teamId: UUID): Instance {

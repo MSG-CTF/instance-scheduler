@@ -3,7 +3,9 @@ package kr.msgctf.scheduler.instance.worker
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -36,9 +38,12 @@ import kr.msgctf.scheduler.instance.service.TestInstanceRepository
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testUuid
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.boot.test.system.CapturedOutput
 import org.springframework.boot.test.system.OutputCaptureExtension
+import org.springframework.context.event.ContextClosedEvent
+import org.springframework.context.support.StaticApplicationContext
 import org.springframework.transaction.support.TransactionOperations
 
 @ExtendWith(OutputCaptureExtension::class)
@@ -282,6 +287,256 @@ class InstanceOperationWorkerTest {
         assertFalse("operation cycle:" in output.out, output.out)
     }
 
+    // 진행 단계에서 접수된 행은 주기 시작 뒤의 시각에 조회 대상이 된다
+    // 주기 시작 시각 하나로 고르면 이 행이 같은 주기의 폴링에서 빠져 다음 주기까지 밀린다
+    @Test
+    fun `reads the clock again for each phase`() {
+        // given
+        val repo = TestInstanceRepository()
+        val row = repo.save(requested())
+        val clock = MovableClock(NOW)
+        val service = RecordingOperationService(repo).apply {
+            onProgress = { id ->
+                // 접수에 성공해 1초 뒤 조회할 행이 되고, 그 사이 시계도 1초 간다
+                repo.savedInstances.first { it.instanceId == id }.apply {
+                    status = InstanceStatus.PROVISIONING
+                    runtimeOperationId = "op-create-$id"
+                    nextPollAt = NOW.plusSeconds(1)
+                }
+                clock.now = NOW.plusSeconds(1)
+            }
+        }
+        val worker = newWorker(repo.repository, service, pool(1), clock = clock)
+
+        // when
+        worker.progressOperations()
+
+        // then
+        assertEquals(listOf(row.instanceId), service.calls.filter { it.phase == "poll" }.map { it.instanceId })
+    }
+
+    // 몰릴 때 한 주기가 길어지면 먼저 온 요청도 폴링이 밀린다
+    // 한 번에 상한만큼 오래된 것부터 처리하고, 남은 것이 있으면 기다리지 않고 이어서 돈다
+    @Test
+    fun `takes the oldest rows first up to the batch size and keeps going while rows are left`(output: CapturedOutput) {
+        // given
+        val repo = TestInstanceRepository()
+        val rows = List(5) { repo.save(requested()) }
+        val service = RecordingOperationService(repo).apply { onProgress = markDone(repo) }
+        val worker = newWorker(repo.repository, service, pool(1), properties = batched(2))
+
+        // when
+        worker.progressOperations()
+
+        // then
+        assertEquals(rows.map { it.instanceId }, service.calls.filter { it.phase == "progress" }.map { it.instanceId })
+        val cycleLines = output.out.lines().filter { "operation cycle:" in it }
+        assertEquals(listOf("progress=2", "progress=2", "progress=1"), cycleLines.map { Regex("progress=\\d+").find(it)!!.value })
+    }
+
+    // 예외로 끝난 행은 상태가 안 바뀌어 곧바로 다시 조회된다, 이어서 돌면 같은 행을 계속 집는다
+    @Test
+    fun `stops the burst after a failed task`() {
+        // given
+        val repo = TestInstanceRepository()
+        val failing = repo.save(requested())
+        repeat(2) { repo.save(requested()) }
+        val done = markDone(repo)
+        // 멈춤 조건이 빠지면 같은 행을 계속 집는다, 연속 시간을 짧게 두고 건마다 늦춰 몇십 번에서 끝나게 한다
+        val service = RecordingOperationService(repo).apply {
+            failOn = failing.instanceId
+            onProgress = { id -> if (id != failing.instanceId) done(id) }
+            progressDelayMs = 20
+        }
+        val properties = batched(1, maxBurst = Duration.ofSeconds(1))
+        val worker = newWorker(repo.repository, service, pool(1), properties = properties)
+
+        // when
+        worker.progressOperations()
+
+        // then: 가장 오래된 실패 행 한 건에서 멈추고 나머지는 다음 호출로 넘긴다
+        assertEquals(listOf(failing.instanceId), service.calls.filter { it.phase == "progress" }.map { it.instanceId })
+    }
+
+    // 처리해도 조회에서 빠지지 않는 행이 있으면 끝없이 돈다, 연속으로 도는 시간에 상한을 둔다
+    // 상한이 빠지면 영영 돌아 테스트가 멈추므로 시간 제한으로 실패하게 한다
+    @Test
+    @Timeout(15)
+    fun `stops the burst when the max burst time passes`(output: CapturedOutput) {
+        // given
+        val repo = TestInstanceRepository()
+        repo.save(requested())
+        // 첫 주기에 풀 스레드 생성과 대기가 들어가도 두 번째 주기가 돌 만큼 연속 시간을 넉넉히 준다
+        val service = RecordingOperationService(repo).apply { progressDelayMs = 50 }
+        val properties = batched(1, maxBurst = Duration.ofSeconds(1))
+        val worker = newWorker(repo.repository, service, pool(1), properties = properties)
+
+        // when
+        val startedAt = System.nanoTime()
+        worker.progressOperations()
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        // then
+        val progressCalls = service.calls.count { it.phase == "progress" }
+        assertTrue(progressCalls >= 2, "expected the burst to repeat, got $progressCalls calls")
+        assertTrue(elapsedMs < 5_000, "burst did not stop, ran ${elapsedMs}ms")
+        // 들어오는 일이 처리 능력을 넘었다는 신호라 멈춘 이유가 남아야 한다
+        assertTrue("operation burst stopped with work left: reason=max-burst" in output.out, output.out)
+    }
+
+    // 종료가 시작되면 남은 행은 다음 기동이 이어받는다
+    // 종료를 안 보면 다음 주기가 진행 대상을 한 번 더 조회한다, 그 주기는 태스크를 못 넣어 실패로 세고 멈춘다
+    // 멈추는 것은 실패 조건이 대신 보장하므로 조회 횟수로 확인한다
+    @Test
+    @Timeout(5)
+    fun `stops the burst once shutdown starts`() {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(requested()) }
+        val executor = pool(1)
+        val done = markDone(repo)
+        val service = RecordingOperationService(repo).apply {
+            onProgress = { id ->
+                done(id)
+                executor.shutdown()
+            }
+        }
+        val recording = QueryRecordingRepository(repo.repository)
+        val worker = newWorker(recording.repository, service, executor, properties = batched(1))
+
+        // when
+        worker.progressOperations()
+
+        // then: 종료 뒤에는 다음 주기를 열지 않아 진행 대상을 다시 조회하지 않는다
+        assertEquals(1, service.calls.count { it.phase == "progress" })
+        val progressQueries = recording.queries.count { (statuses, _) -> InstanceStatus.REQUESTED in statuses }
+        assertEquals(1, progressQueries)
+    }
+
+    // 몰릴 때 밀리는 곳은 폴링 단계다, 폴링도 상한만큼 나눠 묻고 남은 것이 있으면 이어서 돈다
+    // 진행 대상이 없으니 남은 일이 있다는 판단은 폴링 단계에서만 나온다
+    @Test
+    fun `limits the poll phase and keeps going while polls are left`(output: CapturedOutput) {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(polling()) }
+        val service = RecordingOperationService(repo).apply {
+            // 진행 중이라 다음 조회를 뒤로 미룬 것처럼 조회 대상에서 뺀다
+            onPoll = { id -> repo.savedInstances.first { it.instanceId == id }.nextPollAt = NOW.plusSeconds(60) }
+        }
+        val worker = newWorker(repo.repository, service, pool(1), properties = batched(2))
+
+        // when
+        worker.progressOperations()
+
+        // then
+        assertEquals(3, service.calls.count { it.phase == "poll" })
+        val cycleLines = output.out.lines().filter { "operation cycle:" in it }
+        assertEquals(listOf("poll=2", "poll=1"), cycleLines.map { Regex("poll=\\d+").find(it)!!.value })
+    }
+
+    // 삭제 접수 단계도 같은 상한과 이어 돌기를 따른다
+    @Test
+    fun `limits the delete phase and keeps going while deletes are left`(output: CapturedOutput) {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(requested().apply { status = InstanceStatus.CLEANUP_PENDING }) }
+        val service = RecordingOperationService(repo).apply {
+            onDelete = { id -> repo.savedInstances.first { it.instanceId == id }.status = InstanceStatus.CLEANED }
+        }
+        val worker = newWorker(repo.repository, service, pool(1), properties = batched(2))
+
+        // when
+        worker.progressOperations()
+
+        // then
+        assertEquals(3, service.calls.count { it.phase == "delete" })
+        val cycleLines = output.out.lines().filter { "operation cycle:" in it }
+        assertEquals(listOf("delete=2", "delete=1"), cycleLines.map { Regex("delete=\\d+").find(it)!!.value })
+    }
+
+    // 예외로 끝난 행은 상태가 안 바뀌어 정렬 맨 앞에 계속 남는다, 상한만큼 쌓이면 뒤 행이 처리되지 않는다
+    // 그래서 뒤로 밀어 두고, 다음 호출은 그 뒤의 행을 집어야 한다
+    @Test
+    fun `moves a failing row back so the rows behind it are processed`() {
+        // given
+        val repo = TestInstanceRepository()
+        val failing = repo.save(requested())
+        val next = repo.save(requested())
+        val service = RecordingOperationService(repo).apply {
+            failOn = failing.instanceId
+            onProgress = { id -> if (id != failing.instanceId) markDone(repo)(id) }
+        }
+        val worker = newWorker(repo.repository, service, pool(1), properties = batched(1))
+
+        // when
+        worker.progressOperations()
+        worker.progressOperations()
+
+        // then
+        assertEquals(
+            listOf(failing.instanceId, next.instanceId),
+            service.calls.filter { it.phase == "progress" }.map { it.instanceId },
+        )
+        assertTrue(failing.nextPollAt!!.isAfter(NOW), "failing row was not moved back: ${failing.nextPollAt}")
+    }
+
+    // 종료가 시작되면 스케줄러는 인터럽트 없이 먼저 멈추고 워커 풀은 나중에 닫힌다
+    // 그 사이 새 일을 시작하지 않아야 한다
+    @Test
+    fun `starts no new work once the context is closing`() {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(requested()) }
+        // 종료를 안 보면 같은 행을 계속 집는다, 연속 시간을 짧게 두고 건마다 늦춰 몇십 번에서 끝나게 한다
+        val service = RecordingOperationService(repo).apply { progressDelayMs = 20 }
+        val worker = newWorker(repo.repository, service, pool(1), properties = batched(1, maxBurst = Duration.ofSeconds(1)))
+        val context = StaticApplicationContext()
+        worker.setApplicationContext(context)
+        worker.onContextClosed(ContextClosedEvent(context))
+
+        // when
+        worker.progressOperations()
+
+        // then
+        assertEquals(0, service.calls.size)
+    }
+
+    // 자식 컨텍스트의 종료 이벤트도 부모 리스너로 온다, 그걸로 멈추면 워커가 영구히 일을 안 한다
+    @Test
+    fun `keeps working when another context closes`() {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(requested()) }
+        val service = RecordingOperationService(repo)
+        val worker = newWorker(repo.repository, service, pool(1))
+        worker.setApplicationContext(StaticApplicationContext())
+        worker.onContextClosed(ContextClosedEvent(StaticApplicationContext()))
+
+        // when
+        worker.progressOperations()
+
+        // then
+        assertEquals(3, service.calls.count { it.phase == "progress" })
+    }
+
+    // 상한을 안 주면 지금처럼 한 주기에 전부 처리하고 끝낸다
+    @Test
+    fun `runs a single cycle without a batch size`(output: CapturedOutput) {
+        // given
+        val repo = TestInstanceRepository()
+        repeat(3) { repo.save(requested()) }
+        val service = RecordingOperationService(repo)
+        val worker = newWorker(repo.repository, service, pool(2))
+
+        // when
+        worker.progressOperations()
+
+        // then: 행이 그대로 남아 있어도 한 주기에서 멈춘다
+        assertEquals(3, service.calls.count { it.phase == "progress" })
+        assertEquals(1, output.out.lines().count { "operation cycle:" in it })
+    }
+
     private fun pool(size: Int): ExecutorService =
         Executors.newFixedThreadPool(size).also { pools += it }
 
@@ -289,13 +544,32 @@ class InstanceOperationWorkerTest {
         repository: InstanceRepository,
         service: InstanceOperationService,
         executor: Executor,
+        properties: OperationProperties = OperationProperties(),
+        clock: Clock = Clock.fixed(NOW, ZoneOffset.UTC),
     ): InstanceOperationWorker =
         InstanceOperationWorker(
             instanceRepository = repository,
             operationService = service,
-            clock = Clock.fixed(NOW, ZoneOffset.UTC),
+            clock = clock,
             executor = executor,
+            operationProperties = properties,
         )
+
+    // 상한을 켜면 폴링 하한도 있어야 기동한다, 이 테스트들은 폴링 간격을 보지 않아 값은 상관없다
+    private fun batched(size: Int, maxBurst: Duration = Duration.ofSeconds(60)): OperationProperties =
+        OperationProperties(batchSize = size, maxBurst = maxBurst, minPollInterval = Duration.ofSeconds(5))
+
+    // 테스트가 시각을 앞으로 옮길 수 있는 시계
+    private class MovableClock(@Volatile var now: Instant) : Clock() {
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
+        override fun instant(): Instant = now
+    }
+
+    // 진행 단계가 행을 처리한 것처럼 조회 대상에서 빼 둔다
+    private fun markDone(repo: TestInstanceRepository): (UUID) -> Unit = { id ->
+        repo.savedInstances.first { it.instanceId == id }.status = InstanceStatus.RUNNING
+    }
 
     // 워커의 목록 조회가 불린 시각을 남기고 나머지는 대역 저장소에 그대로 넘긴다
     private class QueryRecordingRepository(delegate: InstanceRepository) {
@@ -306,6 +580,7 @@ class InstanceOperationWorkerTest {
                 InstanceRepository::class.java.classLoader,
                 arrayOf(InstanceRepository::class.java),
             ) { _, method, args ->
+                // 인자 첫 자리가 상태 목록이다, 뒤의 시각과 상한은 기록하지 않는다
                 if (method.name == "findDueByStatusInAndRuntimeOperationIdIsNull") {
                     @Suppress("UNCHECKED_CAST")
                     queries += (args!![0] as Collection<InstanceStatus>).toList() to System.nanoTime()
@@ -356,7 +631,11 @@ class InstanceOperationWorkerTest {
         // 첫 건이 실제로 돌기 시작한 것을 알린다, 종료 시점을 맞추는 테스트가 쓴다
         var progressStarted: CountDownLatch? = null
 
+        // 진행 처리가 행을 바꾸는 것을 흉내 낸다
+        var onProgress: ((UUID) -> Unit)? = null
+
         override fun progressRequested(instanceId: UUID) {
+            onProgress?.invoke(instanceId)
             progressStarted?.let {
                 it.countDown()
                 // 종료 신호가 올 때까지 이 스레드를 잡아 둔다, 인터럽트로 깨어난다
@@ -371,8 +650,18 @@ class InstanceOperationWorkerTest {
             if (instanceId == errorOn) throw AssertionError("broken")
         }
 
+        // 폴링과 삭제 접수 처리가 행을 바꾸는 것을 흉내 낸다
+        var onPoll: ((UUID) -> Unit)? = null
+        var onDelete: ((UUID) -> Unit)? = null
+
         override fun pollOperation(instanceId: UUID) {
+            onPoll?.invoke(instanceId)
             calls += Call("poll", instanceId, Thread.currentThread().name, System.nanoTime())
+        }
+
+        override fun submitDelete(instanceId: UUID) {
+            onDelete?.invoke(instanceId)
+            calls += Call("delete", instanceId, Thread.currentThread().name, System.nanoTime())
         }
     }
 

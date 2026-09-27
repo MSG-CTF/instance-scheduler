@@ -5,9 +5,11 @@ import java.time.Instant
 import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import org.springframework.data.domain.Limit
 
 // 서비스 테스트에서만 쓰는 repository 대역
 // 워커 테스트가 풀 위에서 돌리므로 여러 스레드가 동시에 읽고 써도 깨지지 않는 목록을 쓴다
@@ -48,20 +50,30 @@ class TestInstanceRepository {
                     val statuses = args?.first() as Collection<InstanceStatus>
                     savedInstances.filter { it.status in statuses }
                 }
+                // 실제 쿼리와 같게 만든 순서로 정렬하고 상한만큼 자른다
                 "findDueByStatusInAndRuntimeOperationIdIsNull" -> {
                     @Suppress("UNCHECKED_CAST")
                     val statuses = args?.get(0) as Collection<InstanceStatus>
                     val now = args[1] as Instant
-                    savedInstances.filter {
-                        it.status in statuses && it.runtimeOperationId == null &&
-                            (it.nextPollAt == null || !it.nextPollAt!!.isAfter(now))
-                    }
+                    val limit = args[2] as Limit
+                    savedInstances
+                        .filter {
+                            it.status in statuses && it.runtimeOperationId == null &&
+                                (it.nextPollAt == null || !it.nextPollAt!!.isAfter(now))
+                        }
+                        .sortedWith(compareBy<Instance>({ it.createdAt }, { it.instanceId }))
+                        .limitTo(limit)
                 }
+                // 실제 쿼리와 같게 조회 시각 순으로 정렬하고 상한만큼 자른다
                 "findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual" -> {
-                    val now = args?.first() as Instant
-                    savedInstances.filter {
-                        it.runtimeOperationId != null && it.nextPollAt != null && !it.nextPollAt!!.isAfter(now)
-                    }
+                    val now = args?.get(0) as Instant
+                    val limit = args[1] as Limit
+                    savedInstances
+                        .filter {
+                            it.runtimeOperationId != null && it.nextPollAt != null && !it.nextPollAt!!.isAfter(now)
+                        }
+                        .sortedWith(compareBy<Instance>({ it.nextPollAt }, { it.instanceId }))
+                        .limitTo(limit)
                 }
                 // 단위 테스트에는 동시성이 없어 잠금 없이 같은 행을 돌려준다
                 "findByUserIdAndStatusInForUpdate" -> {
@@ -84,6 +96,10 @@ class TestInstanceRepository {
         } as InstanceRepository
 
     fun save(instance: Instance): Instance {
+        // 실제로는 JPA auditing이 채운다, 저장한 순서가 만든 순서가 되게 한다
+        if (instance.createdAt == null) {
+            instance.createdAt = CREATED_BASE.plusMillis(createdSequence.incrementAndGet())
+        }
         savedInstances.removeIf { saved -> saved.instanceId == instance.instanceId }
         savedInstances += instance
         return instance
@@ -94,4 +110,12 @@ class TestInstanceRepository {
 
     private fun findByIdOrNull(instanceId: UUID): Instance? =
         savedInstances.firstOrNull { instance -> instance.instanceId == instanceId }
+
+    private fun List<Instance>.limitTo(limit: Limit): List<Instance> =
+        if (limit.isLimited) take(limit.max()) else this
+
+    private companion object {
+        val CREATED_BASE: Instant = Instant.parse("2026-01-01T00:00:00Z")
+        val createdSequence = AtomicLong()
+    }
 }

@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.repository
 
+import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
 import kotlin.test.Test
@@ -20,6 +21,8 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Import
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.data.domain.Limit
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.testcontainers.junit.jupiter.Testcontainers
 
@@ -34,6 +37,9 @@ class InstanceRepositoryTest {
 
     @Autowired
     private lateinit var instanceEventRepository: InstanceEventRepository
+
+    @Autowired
+    private lateinit var jdbcTemplate: JdbcTemplate
 
     // 상태만으로 거르는 조회 테스트가 다른 테스트가 남긴 행과 섞이지 않도록 매 테스트 전 비운다
     // event가 instance를 참조하므로 instance보다 먼저 지운다
@@ -240,6 +246,7 @@ class InstanceRepositoryTest {
         val found = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(
             listOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
             now,
+            Limit.unlimited(),
         )
 
         assertEquals(
@@ -267,6 +274,7 @@ class InstanceRepositoryTest {
         val found = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(
             listOf(InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
             now,
+            Limit.unlimited(),
         )
 
         assertEquals(
@@ -293,9 +301,66 @@ class InstanceRepositoryTest {
         )
         instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.REQUESTED))
 
-        val found = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(now)
+        val found = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(now, Limit.unlimited())
 
         assertEquals(listOf(due.instanceId), found.map { it.instanceId })
+    }
+
+    // 워커가 한 주기에 상한만큼만 집을 때 먼저 만들어진 행부터 집어야 먼저 온 요청이 먼저 처리된다
+    // 정렬이 없어도 저장한 순서대로 나오는 경우가 많아, 저장 순서와 만든 순서를 거꾸로 맞춰 둔다
+    @Test
+    fun `finds due rows oldest first up to the limit`() {
+        val now = Instant.now().plusSeconds(60)
+        val newest = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.REQUESTED))
+        val middle = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.REQUESTED))
+        val oldest = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.REQUESTED))
+        // created_at은 auditing이 저장 시각으로 채우고 엔티티로는 못 바꿔서 직접 고친다
+        // UPDATE는 새 행 버전을 뒤에 붙이므로 저장 순서와 같은 순서로 고쳐야 물리 순서도 만든 순서와 거꾸로 남는다
+        val base = Instant.parse("2026-09-01T00:00:00Z")
+        listOf(newest to 2L, middle to 1L, oldest to 0L).forEach { (instance, minutes) ->
+            jdbcTemplate.update(
+                "update challenge_instance set created_at = ? where instance_id = ?",
+                Timestamp.from(base.plusSeconds(minutes * 60)),
+                instance.instanceId,
+            )
+        }
+
+        val found = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(
+            listOf(InstanceStatus.REQUESTED),
+            now,
+            Limit.of(2),
+        )
+
+        assertEquals(listOf(oldest.instanceId, middle.instanceId), found.map { it.instanceId })
+    }
+
+    // 폴링은 조회 시각이 가장 오래 지난 행부터 집는다
+    @Test
+    fun `finds poll rows earliest next poll at first up to the limit`() {
+        val now = Instant.now()
+        val latest = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.PROVISIONING).apply {
+                runtimeOperationId = "op-latest"
+                nextPollAt = now.minusSeconds(1)
+            },
+        )
+        val earliest = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.PROVISIONING).apply {
+                runtimeOperationId = "op-earliest"
+                nextPollAt = now.minusSeconds(30)
+            },
+        )
+        val middle = instanceRepository.saveAndFlush(
+            newInstance(status = InstanceStatus.PROVISIONING).apply {
+                runtimeOperationId = "op-middle"
+                nextPollAt = now.minusSeconds(10)
+            },
+        )
+
+        val found = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(now, Limit.of(2))
+
+        assertEquals(listOf(earliest.instanceId, middle.instanceId), found.map { it.instanceId })
+        assertEquals(false, found.any { it.instanceId == latest.instanceId })
     }
 
     private fun newInstance(

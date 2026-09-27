@@ -30,8 +30,28 @@ data class OperationProperties(
     // 1이면 한 건씩 처리한다
     // 브로커 후보 하나가 받는 자리 수보다 크게 두면 예약이 용량 부족으로 거절되기 쉽다
     val parallelism: Int = 1,
+    // 한 주기의 단계마다 처리하는 최대 건수, 0이면 제한하지 않는다
+    // 몰릴 때 한 단계가 길어지면 먼저 온 요청도 폴링이 밀리므로 나눠서 처리한다
+    val batchSize: Int = 0,
+    // 상한에 닿아 남은 일이 있으면 기다리지 않고 이어서 도는데, 한 번에 이어서 도는 시간의 상한
+    val maxBurst: Duration = Duration.ofSeconds(60),
+    // 진행 중이라는 답을 받은 operation을 다시 묻기까지 최소 간격, 0이면 다음 주기에 바로 묻는다
+    // 주기를 나누면 끝나지 않은 operation을 주기마다 다시 묻게 되어 그 시간만큼 새 요청이 밀린다
+    val minPollInterval: Duration = Duration.ZERO,
 ) {
     init {
         require(parallelism >= 1) { "scheduler.operation.parallelism 설정은 1 이상이어야 한다" }
+        require(batchSize >= 0) { "scheduler.operation.batch-size 설정은 0 이상이어야 한다" }
+        require(maxBurst.isPositive) { "scheduler.operation.max-burst 설정은 0보다 커야 한다" }
+        require(!minPollInterval.isNegative) { "scheduler.operation.min-poll-interval 설정은 0 이상이어야 한다" }
+        // 하한이 0이면 진행 중인 operation이 곧바로 다시 조회 대상이 된다
+        // 상한을 켠 채 그런 행이 상한만큼 있으면 남은 일이 있다고 보고 쉬지 않고 다시 물어 max-burst 동안 헛돈다
+        require(batchSize == 0 || minPollInterval.isPositive) {
+            "scheduler.operation.batch-size를 켜면 min-poll-interval도 0보다 커야 한다"
+        }
+        // 0이면 실패한 행이 곧바로 다시 조회 대상이 되어 같은 이유로 헛돈다
+        require(backoffBase.isPositive && backoffMax >= backoffBase) {
+            "scheduler.operation.backoff-base는 0보다 크고 backoff-max는 backoff-base 이상이어야 한다"
+        }
     }
 }

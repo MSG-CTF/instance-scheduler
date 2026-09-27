@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.common.config
 
+import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -52,6 +53,34 @@ class SettingValidationTest {
     @Test
     fun `operation parallelism defaults to one`() {
         assertEquals(1, OperationProperties().parallelism)
+    }
+
+    // 상한만 켜고 폴링 하한이 0이면 진행 중인 operation을 쉬지 않고 다시 물어 헛돈다, 기동에서 잡는다
+    @Test
+    fun `rejects batch size without a minimum poll interval`() {
+        assertFailsWith<IllegalArgumentException> {
+            OperationProperties(batchSize = 40)
+        }
+        OperationProperties(batchSize = 40, minPollInterval = Duration.ofSeconds(5))
+    }
+
+    // 재시도 간격이 0이면 실패한 행이 곧바로 다시 조회되어 헛돈다, 기동에서 잡는다
+    @Test
+    fun `rejects a zero or inverted operation backoff`() {
+        assertFailsWith<IllegalArgumentException> {
+            OperationProperties(backoffBase = Duration.ZERO)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            OperationProperties(backoffBase = Duration.ofSeconds(10), backoffMax = Duration.ofSeconds(5))
+        }
+    }
+
+    // 설정이 없으면 지금처럼 한 주기에 대상을 전부 집고 바로 다시 묻는다
+    @Test
+    fun `operation batching is off by default`() {
+        val properties = OperationProperties()
+        assertEquals(0, properties.batchSize)
+        assertEquals(Duration.ZERO, properties.minPollInterval)
     }
 
     @Test
