@@ -4,6 +4,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
@@ -12,6 +13,7 @@ import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Import
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.context.ActiveProfiles
 import org.testcontainers.junit.jupiter.Testcontainers
@@ -53,5 +55,14 @@ class InstanceOperationWorkerWiringTest {
 
         assertTrue("applicationTaskExecutor" in names, names.toString())
         assertTrue("operationWorkerExecutor" in names, names.toString())
+    }
+
+    // 스케줄 스레드가 하나면 operation 워커 주기가 길어질 때 cleanup 워커가 그만큼 밀린다
+    // poolSize는 지금 떠 있는 스레드 수라 첫 주기 전에는 1이다, 설정값인 corePoolSize를 본다
+    @Test
+    fun `keeps one scheduling thread per scheduled worker`() {
+        val scheduler = context.getBean("taskScheduler", ThreadPoolTaskScheduler::class.java)
+
+        assertEquals(2, scheduler.scheduledThreadPoolExecutor.corePoolSize)
     }
 }

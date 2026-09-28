@@ -155,8 +155,16 @@ class InstanceOperationService(
             return
         }
 
+        var reservationTaken = false
         val target = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
+            // 예약을 잡는 사이 행이 SCHEDULING을 떠났으면 진행하지 않는다
+            // cleanup 워커의 하드타임아웃이 FAILED로 옮겼거나, 다른 노드가 먼저 PROVISIONING으로 옮긴 경우다
+            if (instance.status != InstanceStatus.SCHEDULING) {
+                // 같은 후보면 브로커가 같은 예약을 돌려주므로 앞선 노드가 이미 그 예약을 쥐고 있다
+                reservationTaken = instance.reservationId == reservation.reservationId
+                return@execute null
+            }
             instance.provider = candidate.provider
             instance.accountId = candidate.accountId
             instance.region = candidate.region
@@ -180,11 +188,14 @@ class InstanceOperationService(
             )
             RuntimeTarget(runtimeType = candidate.runtime.type, targetId = candidate.runtime.targetId)
         }
-        // 행이 사라져 저장하지 못한 예약은 고아가 되므로 바로 반납한다
+        // 행이 사라졌거나 상태가 바뀌어 저장하지 못한 예약은 고아가 되므로 바로 반납한다
+        // 행이 같은 예약을 이미 쥐고 있으면 그 행의 예약이라 반납하지 않는다
         if (target == null) {
-            releaseReservationQuietly(
-                PendingRelease(reservation.reservationId, instanceId, ReleaseReason.SCHEDULER_CANCELLED),
-            )
+            if (!reservationTaken) {
+                releaseReservationQuietly(
+                    PendingRelease(reservation.reservationId, instanceId, ReleaseReason.SCHEDULER_CANCELLED),
+                )
+            }
             return
         }
 

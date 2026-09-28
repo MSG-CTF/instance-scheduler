@@ -7,6 +7,12 @@ spring:
     execution:
       # Executor 빈(operationWorkerExecutor)이 있으면 Boot는 applicationTaskExecutor를 안 만든다, force가 그대로 만들게 한다
       mode: force
+    scheduling:
+      pool:
+        # 기본은 1이라 operation 워커 한 주기가 끝날 때까지 cleanup 워커가 못 돈다
+        # 워커마다 한 스레드씩 쓰게 한다, 같은 워커는 fixedDelay라 스스로 겹치지 않는다
+        # @Scheduled 워커를 더하면 이 값도 그만큼 늘린다
+        size: 2
 
 springdoc:
   api-docs:
