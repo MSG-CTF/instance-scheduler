@@ -11,12 +11,18 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.context.ApplicationContext
+import org.springframework.context.ApplicationContextAware
+import org.springframework.context.event.ContextClosedEvent
+import org.springframework.context.event.EventListener
+import org.springframework.data.domain.Limit
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 
@@ -28,55 +34,118 @@ class InstanceOperationWorker(
     private val operationService: InstanceOperationService,
     private val clock: Clock,
     @Qualifier("operationWorkerExecutor") private val executor: Executor,
-) {
+    private val operationProperties: OperationProperties,
+) : ApplicationContextAware {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
+    // 종료가 시작되면 스케줄러는 인터럽트 없이 먼저 멈추고 워커 풀은 나중에 닫힌다
+    // 그 사이 연속 주기가 새 일을 시작하지 않게 종료 이벤트를 따로 받아 둔다
+    @Volatile
+    private var closing = false
+
+    @Volatile
+    private var ownContext: ApplicationContext? = null
+
+    override fun setApplicationContext(applicationContext: ApplicationContext) {
+        ownContext = applicationContext
+    }
+
+    // 자식 컨텍스트(관리 포트를 따로 둔 경우 등)의 종료 이벤트도 여기로 온다, 자기 컨텍스트가 닫힐 때만 멈춘다
+    // 한 번 켜지면 되돌리지 않으므로 잘못 켜지면 워커가 영구히 멈춘다
+    @EventListener
+    fun onContextClosed(event: ContextClosedEvent) {
+        if (event.applicationContext !== ownContext) return
+        closing = true
+    }
+
+    // 단계마다 상한만큼만 처리하면, 남긴 일이 있을 때 fixedDelay를 기다리지 않고 이어서 돈다
+    // 스케줄 스레드를 그만큼 오래 쓰지만 cleanup 워커는 다른 스케줄 스레드에서 돈다
     @Scheduled(fixedDelayString = "\${scheduler.operation.fixed-delay:2s}")
     fun progressOperations() {
+        val burstStartedAt = System.nanoTime()
+        var cycles = 0
+        while (true) {
+            val cycle = runCycle()
+            cycles++
+            if (!cycle.leftOver) return
+            // 남긴 일이 있는데도 멈추는 경우다
+            // 실패가 있으면 멈춘다, 예외로 끝난 행은 뒤로 밀지만 그 밀기마저 실패했으면 같은 행을 계속 집는다
+            val stopReason = when {
+                cycle.failed > 0 -> "failed"
+                stopping() -> "stopping"
+                System.nanoTime() - burstStartedAt >= operationProperties.maxBurst.toNanos() -> "max-burst"
+                else -> null
+            } ?: continue
+            logBurstStop(stopReason, cycles, burstStartedAt)
+            return
+        }
+    }
+
+    // 연속 시간을 다 쓰고 멈췄으면 들어오는 일이 처리 능력을 넘은 것이라 warn으로 남긴다
+    private fun logBurstStop(reason: String, cycles: Int, burstStartedAt: Long) {
+        val elapsedMs = (System.nanoTime() - burstStartedAt) / 1_000_000
+        if (reason == "max-burst") {
+            log.warn("operation burst stopped with work left: reason={}, cycles={}, elapsedMs={}", reason, cycles, elapsedMs)
+        } else {
+            log.info("operation burst stopped with work left: reason={}, cycles={}, elapsedMs={}", reason, cycles, elapsedMs)
+        }
+    }
+
+    // 한 주기를 돌고 단계별 건수와 실패, 상한 때문에 남긴 일이 있는지를 돌려준다
+    private fun runCycle(): CycleCounts {
         val startedAt = System.nanoTime()
-        val now = clock.instant()
         val counts = CycleCounts()
         try {
-            val progressTargets = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(PROGRESS_STATES, now)
+            // 단계마다 시각을 새로 읽는다, 앞 단계에서 접수된 행을 같은 주기의 폴링이 집게 한다
+            val progressTargets =
+                instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(PROGRESS_STATES, clock.instant(), limit())
             counts.progress = progressTargets.size
+            counts.leftOver = counts.leftOver || reachedLimit(progressTargets.size)
             counts.failed += runAll("progress", progressTargets.map { it.instanceId }) {
                 operationService.progressRequested(it)
             }
             // 종료가 시작되면 남은 단계는 다음 기동이 이어받는다, 여기서 새 일을 시작하지 않는다
-            if (stopping()) return
+            if (stopping()) return counts
 
             // PROVISIONING인데 operation이 없는 행은 접수 도중 끊긴 것이라 다시 접수한다
             // PROGRESS_STATES에 섞으면 broker부터 다시 돌아 후보와 예약을 새로 잡는다
-            val resubmitTargets = instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(RESUBMIT_STATES, now)
+            val resubmitTargets =
+                instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(RESUBMIT_STATES, clock.instant(), limit())
             counts.resubmit = resubmitTargets.size
+            counts.leftOver = counts.leftOver || reachedLimit(resubmitTargets.size)
             counts.failed += runAll("resubmit", resubmitTargets.map { it.instanceId }) {
                 operationService.resubmitCreate(it)
             }
-            if (stopping()) return
+            if (stopping()) return counts
 
             val submitTargets =
-                instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(DELETE_SUBMIT_STATES, now)
+                instanceRepository.findDueByStatusInAndRuntimeOperationIdIsNull(DELETE_SUBMIT_STATES, clock.instant(), limit())
             counts.delete = submitTargets.size
+            counts.leftOver = counts.leftOver || reachedLimit(submitTargets.size)
             counts.failed += runAll("delete", submitTargets.map { it.instanceId }) {
                 operationService.submitDelete(it)
             }
-            if (stopping()) return
+            if (stopping()) return counts
 
-            val pollTargets = instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(now)
+            val pollTargets =
+                instanceRepository.findByRuntimeOperationIdIsNotNullAndNextPollAtLessThanEqual(clock.instant(), limit())
             counts.poll = pollTargets.size
+            counts.leftOver = counts.leftOver || reachedLimit(pollTargets.size)
             counts.failed += runAll("poll", pollTargets.map { it.instanceId }) { operationService.pollOperation(it) }
+            return counts
         } finally {
             // 주기가 얼마나 걸리는지 배포된 서버에서 그대로 보게 남긴다, 대상이 없는 주기는 남기지 않는다
             // failed는 예외로 끝났거나 종료로 버린 건수다, 서비스 안에서 삼킨 브로커 실패는 세지 않는다
             if (counts.total > 0) {
                 log.info(
-                    "operation cycle: progress={}, resubmit={}, delete={}, poll={}, failed={}, elapsedMs={}",
+                    "operation cycle: progress={}, resubmit={}, delete={}, poll={}, failed={}, leftOver={}, elapsedMs={}",
                     counts.progress,
                     counts.resubmit,
                     counts.delete,
                     counts.poll,
                     counts.failed,
+                    counts.leftOver,
                     (System.nanoTime() - startedAt) / 1_000_000,
                 )
             }
@@ -163,9 +232,19 @@ class InstanceOperationWorker(
         }
     }
 
+    // 0이면 제한하지 않아 한 주기에 대상을 전부 집는다
+    private fun limit(): Limit =
+        if (operationProperties.batchSize > 0) Limit.of(operationProperties.batchSize) else Limit.unlimited()
+
+    // 상한만큼 가져왔으면 조회에서 잘린 행이 더 있을 수 있다
+    private fun reachedLimit(size: Int): Boolean =
+        operationProperties.batchSize in 1..size
+
     // 풀이 닫히면 큐에 남은 작업이 버려지므로 그 결과를 기다리면 안 된다
-    // 테스트가 넘기는 같은 스레드 Executor는 큐가 없어 항상 false다
-    private fun stopping(): Boolean = (executor as? ExecutorService)?.isShutdown == true
+    // 종료 이벤트를 받았거나 스케줄 스레드가 인터럽트되어도 새 일을 시작하지 않는다
+    // 스케줄 스레드에서만 부르므로 인터럽트 확인은 그 스레드의 것이다
+    private fun stopping(): Boolean =
+        closing || Thread.currentThread().isInterrupted || (executor as? ExecutorService)?.isShutdown == true
 
     // 한 건이 실패해도 나머지 대상 처리를 계속하도록 여기서 막는다, 막았으면 false를 돌려준다
     private fun runIsolated(instanceId: UUID, action: (UUID) -> Unit): Boolean =
@@ -179,8 +258,19 @@ class InstanceOperationWorker(
                 (exception as? SchedulerException)?.adminDetail,
                 exception,
             )
+            deferQuietly(instanceId)
             false
         }
+
+    // 예외로 끝난 행이 정렬 맨 앞을 차지해 뒤 행을 밀어내지 않게 다음 조회를 뒤로 민다
+    // 밀기마저 실패하면 그 행은 다음 주기에 다시 집힌다, 연속 주기는 실패가 있으면 멈추므로 헛돌지 않는다
+    private fun deferQuietly(instanceId: UUID) {
+        try {
+            operationService.deferAfterUnexpectedFailure(instanceId)
+        } catch (exception: Exception) {
+            log.error("could not defer failed instance, it will be picked again: instanceId={}", instanceId, exception)
+        }
+    }
 
     private enum class TaskOutcome { DONE, FAILED, STOPPED }
 
@@ -190,6 +280,8 @@ class InstanceOperationWorker(
         var delete = 0
         var poll = 0
         var failed = 0
+        // 어느 단계든 상한만큼 가져왔으면 남긴 일이 있다고 본다
+        var leftOver = false
         val total: Int get() = progress + resubmit + delete + poll
     }
 

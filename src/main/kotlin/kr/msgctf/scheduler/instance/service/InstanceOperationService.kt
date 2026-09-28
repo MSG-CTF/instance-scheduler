@@ -514,6 +514,28 @@ class InstanceOperationService(
         }
     }
 
+    // 워커가 예상 밖 예외로 끝난 행의 다음 조회를 뒤로 민다
+    // 예외로 끝난 행은 상태도 조회 시각도 안 바뀌어 곧바로 다시 조회되고, 정렬 맨 앞을 차지한다
+    // 그런 행이 상한만큼 쌓이면 뒤 행이 처리되지 않으므로 재시도 간격 상한만큼 미룬다
+    // 상태와 시도 횟수는 건드리지 않는다, 다른 판단(재접수 시작 여부 등)이 그 값에 기댄다
+    fun deferAfterUnexpectedFailure(instanceId: UUID) {
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            // 워커가 조회하지 않는 행은 건드리지 않는다, 끝난 행에 조회 시각을 되살리지 않는다
+            if (instance.status !in DEFERRABLE_STATES && instance.runtimeOperationId == null) return@executeWithoutResult
+            val now = clock.instant()
+            val deadline = instance.pollDeadlineAt
+            // 시한이 남아 있으면 넘지 않게 당긴다, 이미 지났으면 당기지 않는다
+            // 지난 시한으로 당기면 과거 시각이 되어 곧바로 다시 조회되고 정렬 맨 앞에 그대로 남는다
+            val deferred = now.plus(operationProperties.backoffMax).let {
+                if (deadline != null && deadline.isAfter(now) && deadline.isBefore(it)) deadline else it
+            }
+            // 이미 더 뒤로 잡혀 있으면 앞당기지 않는다, 재접수 예정 시각 같은 다른 뜻의 값일 수 있다
+            val current = instance.nextPollAt
+            instance.nextPollAt = if (current != null && current.isAfter(deferred)) current else deferred
+        }
+    }
+
     fun pollOperation(instanceId: UUID) {
         var reservationToRelease: PendingRelease? = null
         val operationId = tx.execute {
@@ -565,11 +587,13 @@ class InstanceOperationService(
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             if (instance.runtimeOperationId != operationId) return@executeWithoutResult
             instance.attemptCount = if (lookupFailed) instance.attemptCount + 1 else 0
+            // 진행 중 응답은 하한만큼 미룬다, 하한이 0이면 다음 워커 주기에 바로 다시 조회한다
+            // 조회 오류에는 하한을 쓰지 않는다, 오류는 backoff가 따로 늘린다
+            val minPoll = operationProperties.minPollInterval
             val delay = when {
-                retryAfterSeconds != null -> Duration.ofSeconds(retryAfterSeconds)
+                retryAfterSeconds != null -> maxOf(Duration.ofSeconds(retryAfterSeconds), minPoll)
                 lookupFailed -> backoffDelay(instance.attemptCount)
-                // 진행 중 응답은 다음 워커 주기에 바로 다시 조회한다
-                else -> Duration.ZERO
+                else -> minPoll
             }
             instance.nextPollAt = clampToDeadline(clock.instant().plus(delay), instance.pollDeadlineAt)
         }
@@ -1072,6 +1096,15 @@ class InstanceOperationService(
 
     companion object {
         private val DELETE_SUBMIT_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
+
+        // 워커가 진행, 재접수, 삭제 접수 대상으로 조회하는 상태, 폴링 대상은 operation id로 따로 가린다
+        private val DEFERRABLE_STATES = setOf(
+            InstanceStatus.REQUESTED,
+            InstanceStatus.SCHEDULING,
+            InstanceStatus.PROVISIONING,
+            InstanceStatus.STOPPING,
+            InstanceStatus.CLEANUP_PENDING,
+        )
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
         private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
         private const val DEFAULT_RUN_AS_USER = 10001L

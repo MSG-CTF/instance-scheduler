@@ -20,6 +20,7 @@ import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.ReleaseReason
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -139,14 +140,10 @@ class InstanceOperationIntegrationTest {
 
         worker.progressOperations()
 
-        val resubmitted = instanceRepository.findById(saved.instanceId).orElseThrow()
-        assertNotNull(resubmitted.runtimeOperationId)
-
-        // 이어서 폴링까지 돌면 RUNNING으로 확정된다
-        worker.progressOperations()
-
+        // 재접수한 뒤 같은 주기의 폴링이 단계마다 새로 읽은 시각으로 그 operation을 집어 RUNNING으로 확정한다
         val found = instanceRepository.findById(saved.instanceId).orElseThrow()
         assertEquals(InstanceStatus.RUNNING, found.status)
+        assertNotNull(found.runtimeWorkloadId)
     }
 
     // 재접수 예정 시각 전에는 집지 않는다, 정상 접수 중인 행을 건드리면 안 된다
@@ -178,9 +175,10 @@ class InstanceOperationIntegrationTest {
 
         worker.progressOperations()
 
+        // 가짜 런타임은 접수하자마자 끝나므로 같은 주기의 폴링이 RUNNING까지 올린다
         val found = saved.map { instanceRepository.findById(it.instanceId).orElseThrow() }
-        assertTrue(found.all { it.status == InstanceStatus.PROVISIONING }, found.map { it.status }.toString())
-        assertEquals(8, found.mapNotNull { it.runtimeOperationId }.toSet().size)
+        assertTrue(found.all { it.status == InstanceStatus.RUNNING }, found.map { it.status }.toString())
+        assertEquals(8, found.mapNotNull { it.runtimeWorkloadId }.toSet().size)
         assertEquals(8, found.mapNotNull { it.reservationId }.toSet().size)
         assertTrue(fakeBroker.rejectedReservations.isEmpty(), "unlimited capacity must not reject")
     }
@@ -196,10 +194,11 @@ class InstanceOperationIntegrationTest {
 
         worker.progressOperations()
 
+        // 이긴 둘은 같은 주기의 폴링이 RUNNING까지 올린다, 가짜 런타임은 접수하자마자 끝난다
         val found = saved.map { instanceRepository.findById(it.instanceId).orElseThrow() }
-        val provisioning = found.filter { it.status == InstanceStatus.PROVISIONING }
+        val running = found.filter { it.status == InstanceStatus.RUNNING }
         val scheduling = found.filter { it.status == InstanceStatus.SCHEDULING }
-        assertEquals(2, provisioning.size, found.map { it.status }.toString())
+        assertEquals(2, running.size, found.map { it.status }.toString())
         assertEquals(2, scheduling.size, found.map { it.status }.toString())
         // backoff 첫 값이 2초라 다음 시도는 주기 시작보다 2초 뒤여야 한다
         assertTrue(scheduling.all { it.attemptCount == 1 && !it.nextPollAt!!.isBefore(before.plusSeconds(2)) })
@@ -275,6 +274,7 @@ class InstanceOperationIntegrationTest {
             operationService = operationService,
             clock = clock,
             executor = executor,
+            operationProperties = OperationProperties(),
         )
 
     private fun newRequested(): Instance {

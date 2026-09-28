@@ -1973,6 +1973,176 @@ class InstanceOperationServiceTest {
         assertEquals(clock.instant(), instance.nextPollAt)
     }
 
+    // 워커가 예외로 끝난 행을 뒤로 민다, 상태와 시도 횟수는 다른 판단이 기대므로 그대로 둔다
+    @Test
+    fun `defers a row after an unexpected failure without touching its state`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { attemptCount = 2 })
+        val service = newService(repository)
+
+        // when
+        service.deferAfterUnexpectedFailure(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plus(OperationProperties().backoffMax), instance.nextPollAt)
+        assertEquals(InstanceStatus.REQUESTED, instance.status)
+        assertEquals(2, instance.attemptCount)
+    }
+
+    // 폴링 중인 행은 시한을 넘겨 밀면 시한 처리가 늦어진다
+    @Test
+    fun `defers a polling row no later than its poll deadline`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newRequested().apply {
+                status = InstanceStatus.PROVISIONING
+                runtimeOperationId = "op-1"
+                pollDeadlineAt = clock.instant().plusSeconds(5)
+            },
+        )
+        val service = newService(repository)
+
+        // when
+        service.deferAfterUnexpectedFailure(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(5), instance.nextPollAt)
+    }
+
+    // 시한이 이미 지났으면 당기지 않는다, 당기면 과거 시각이 되어 곧바로 다시 조회되고 맨 앞에 남는다
+    @Test
+    fun `defers a row past its poll deadline instead of leaving it due`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            newRequested().apply {
+                status = InstanceStatus.PROVISIONING
+                runtimeOperationId = "op-1"
+                pollDeadlineAt = clock.instant().minusSeconds(10)
+            },
+        )
+        val service = newService(repository)
+
+        // when
+        service.deferAfterUnexpectedFailure(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plus(OperationProperties().backoffMax), instance.nextPollAt)
+    }
+
+    // 이미 더 뒤로 잡힌 예정 시각은 앞당기지 않는다
+    @Test
+    fun `keeps a later next poll at when deferring`() {
+        // given
+        val repository = TestInstanceRepository()
+        val later = clock.instant().plusSeconds(300)
+        val instance = repository.save(newRequested().apply { nextPollAt = later })
+        val service = newService(repository)
+
+        // when
+        service.deferAfterUnexpectedFailure(instance.instanceId)
+
+        // then
+        assertEquals(later, instance.nextPollAt)
+    }
+
+    // 워커가 조회하지 않는 끝난 행에는 조회 시각을 되살리지 않는다
+    @Test
+    fun `does not defer a finished row`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { status = InstanceStatus.FAILED })
+        val service = newService(repository)
+
+        // when
+        service.deferAfterUnexpectedFailure(instance.instanceId)
+
+        // then
+        assertNull(instance.nextPollAt)
+    }
+
+    // 주기를 쪼개면 끝나지 않은 operation을 주기마다 다시 묻게 된다, 진행 중 응답은 하한만큼 미룬다
+    @Test
+    fun `delays pending poll by the minimum poll interval`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(
+            repository,
+            runtimeClient = pendingRuntime(retryAfterSeconds = 1),
+            operationProperties = OperationProperties(minPollInterval = Duration.ofSeconds(5)),
+        )
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(5), instance.nextPollAt)
+    }
+
+    // runtime이 간격을 안 줘도 하한만큼 미룬다
+    @Test
+    fun `delays pending poll without retry after by the minimum poll interval`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(
+            repository,
+            runtimeClient = pendingRuntime(retryAfterSeconds = null),
+            operationProperties = OperationProperties(minPollInterval = Duration.ofSeconds(5)),
+        )
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(5), instance.nextPollAt)
+    }
+
+    // runtime이 하한보다 긴 간격을 주면 그 간격을 따른다
+    @Test
+    fun `keeps a retry after longer than the minimum poll interval`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(
+            repository,
+            runtimeClient = pendingRuntime(retryAfterSeconds = 9),
+            operationProperties = OperationProperties(minPollInterval = Duration.ofSeconds(5)),
+        )
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(clock.instant().plusSeconds(9), instance.nextPollAt)
+    }
+
+    // 하한은 진행 중 응답에만 쓴다, 조회 오류는 지금처럼 backoff를 따른다
+    @Test
+    fun `keeps lookup failure backoff below the minimum poll interval`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(
+            repository,
+            operationProperties = OperationProperties(minPollInterval = Duration.ofSeconds(5)),
+        )
+        service.progressRequested(instance.instanceId)
+        instance.runtimeOperationId = "op-unknown"
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then: 첫 조회 오류는 backoff 시작값 2초다
+        assertEquals(clock.instant().plusSeconds(2), instance.nextPollAt)
+    }
+
     // 조회 오류 backoff도 폴링 시한을 넘지 않는지 확인
     @Test
     fun `clamps lookup failure backoff to poll deadline`() {
@@ -2311,6 +2481,22 @@ class InstanceOperationServiceTest {
             clock = clock,
             tx = tx,
         )
+
+    // 생성 operation이 계속 진행 중이라고 답하는 runtime
+    private fun pendingRuntime(retryAfterSeconds: Long?): RuntimeClient {
+        val delegate = FakeRuntimeClient()
+        return object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot =
+                RuntimeOperationSnapshot(
+                    operationId = operationId,
+                    type = RuntimeOperationType.CREATE,
+                    status = RuntimeOperationState.RUNNING,
+                    retryAfterSeconds = retryAfterSeconds,
+                    result = null,
+                    lastErrorCode = null,
+                )
+        }
+    }
 
     private fun newStopping(): Instance =
         newRequested().apply {
