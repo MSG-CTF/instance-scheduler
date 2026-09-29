@@ -17,7 +17,8 @@ scheduler:
     # 후보 하나의 자리보다 커도 된다, 예약이 자리 부족으로 거절되면 같은 주기에 다음 후보로 넘어간다
     parallelism: 8
     # 몰릴 때 단계마다 이만큼씩 나눠 처리해 먼저 온 요청이 먼저 RUNNING이 되게 한다
-    batch-size: 40
+    # 폴링 조회에도 걸려서 작으면 끝난 operation 확인이 늦어진다, 대회 규모인 200건은 한 주기에 다 잡는다
+    batch-size: 200
     # 나눠 처리하면 끝나지 않은 operation을 주기마다 다시 묻게 되어 간격의 하한을 둔다
     min-poll-interval: 5s
 
