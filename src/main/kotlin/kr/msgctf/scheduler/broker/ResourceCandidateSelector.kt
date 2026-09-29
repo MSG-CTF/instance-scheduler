@@ -2,12 +2,13 @@ package kr.msgctf.scheduler.broker
 
 import java.time.Clock
 import java.time.Instant
+import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 
-// Broker 후보 중 Scheduler가 실제 사용할 후보 하나를 고름
+// Broker 후보 중 Scheduler가 쓸 수 있는 후보를 시도할 순서대로 고름
 @Service
 class ResourceCandidateSelector(
     private val clock: Clock = Clock.systemUTC(),
@@ -15,10 +16,11 @@ class ResourceCandidateSelector(
 
     private val log = LoggerFactory.getLogger(javaClass)
 
-    fun select(
+    fun rank(
         response: BrokerCandidateResponse,
         requestedArchitecture: Architecture,
-    ): ResourceCandidate {
+        instanceId: UUID,
+    ): List<ResourceCandidate> {
         if (response.status != BrokerCandidateStatus.OK) {
             throw unavailable(
                 response = response,
@@ -30,22 +32,21 @@ class ResourceCandidateSelector(
         val verdicts = response.candidates.map { candidate ->
             candidate to verdict(candidate, requestedArchitecture, now)
         }
-        val selected = verdicts
+        val ranked = verdicts
             .filter { (_, verdict) -> verdict == ELIGIBLE }
             .map { (candidate, _) -> candidate }
-            .sortedWith(compareBy<ResourceCandidate> { riskOrder(it.risk) }.thenBy { it.validUntil })
-            .firstOrNull()
+            .sortedWith(compareBy<ResourceCandidate> { riskOrder(it.risk) }.thenBy { spreadKey(instanceId, it) })
 
         log.info(
-            "candidate screening: requestId={}, requestedArchitecture={}, verdicts=[{}], selected={}",
+            "candidate screening: requestId={}, requestedArchitecture={}, verdicts=[{}], ranked={}",
             response.requestId,
             requestedArchitecture,
             verdicts.joinToString { (candidate, verdict) -> "${candidate.candidateId}=$verdict" },
-            selected?.candidateId,
+            ranked.map { it.candidateId },
         )
 
-        if (selected != null) {
-            return selected
+        if (ranked.isNotEmpty()) {
+            return ranked
         }
 
         // unknownRiskCount가 0이 아니면 위험도 값 계약이 어긋난 것이라 따로 센다
@@ -90,6 +91,12 @@ class ResourceCandidateSelector(
 
     private fun countBlockedCost(candidates: List<ResourceCandidate>): Int =
         candidates.count { candidate -> candidate.costEstimate?.status == CostEstimateStatus.BLOCKED }
+
+    // 같은 위험도 안의 순서를 인스턴스마다 다르게 섞는다, 동시에 온 요청이 한 후보로 몰리지 않게 한다
+    // 무작위가 아니라 인스턴스와 후보로 정해지는 값이다, 예약 응답을 잃고 재시도할 때 같은 후보로 가야 잡아 둔 예약을 돌려받는다
+    // 서버가 여러 대이거나 재시작해도 같은 인스턴스는 같은 순서를 받아야 한다, 그래서 어디서 계산해도 값이 같은 MD5를 쓴다
+    private fun spreadKey(instanceId: UUID, candidate: ResourceCandidate): Long =
+        UUID.nameUUIDFromBytes("$instanceId:${candidate.candidateId}".toByteArray()).mostSignificantBits
 
     // 위험도 값을 늘릴 때는 verdict의 탈락 규칙도 같이 맞춘다
     private fun riskOrder(risk: ResourceRisk?): Int =

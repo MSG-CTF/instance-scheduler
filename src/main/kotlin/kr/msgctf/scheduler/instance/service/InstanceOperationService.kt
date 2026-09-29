@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.broker.BrokerRejectedException
 import kr.msgctf.scheduler.broker.BrokerReservationCommitRequest
 import kr.msgctf.scheduler.broker.BrokerReservationReleaseRequest
 import kr.msgctf.scheduler.broker.BrokerReservationRequest
+import kr.msgctf.scheduler.broker.BrokerReservationResponse
 import kr.msgctf.scheduler.broker.BrokerReservationStatus
 import kr.msgctf.scheduler.broker.ReleaseReason
 import kr.msgctf.scheduler.broker.ResourceCandidate
@@ -92,7 +93,7 @@ class InstanceOperationService(
             spec
         } ?: return
 
-        val (candidate, candidateSummary) = try {
+        val (response, candidates) = try {
             val response = brokerClient.getCandidates(
                 BrokerCandidateRequest(
                     requestId = "broker-$instanceId",
@@ -104,44 +105,13 @@ class InstanceOperationService(
                     resourceProfile = spec.resourceProfile,
                 ),
             )
-            val selected = resourceCandidateSelector.select(response, spec.architecture)
-            selected to candidateSummary(response, selected)
+            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId)
         } catch (exception: Exception) {
             handleBrokerFailure(instanceId, exception)
             return
         }
 
-        log.info(
-            "broker candidate selected: instanceId={}, candidateId={}, provider={}, region={}, target={}",
-            instanceId,
-            candidate.candidateId,
-            candidate.provider,
-            candidate.region,
-            candidate.runtime.targetId,
-        )
-
-        // 선택한 후보의 용량을 runtime 생성 전에 선점한다
-        // 브로커가 request_id로 같은 요청인지 가리므로 후보를 넣어 만든다, requested_at까지 같아야 같은 요청으로 본다
-        // 그래서 시각은 행이 만들어진 때로 고정한다, 재시도마다 현재 시각을 넣으면 매번 409 REQUEST_ID_REUSED다
-        // 재시도가 같은 후보를 고르면 기존 예약을 돌려받고, 다른 후보면 다른 id로 새 예약을 잡는다
-        // 다른 후보를 잡을 때 이전 예약이 아직 HELD면 409 INSTANCE_ALREADY_RESERVED라 다음 주기에 다시 온다
-        val reservation = try {
-            brokerClient.createReservation(
-                BrokerReservationRequest(
-                    requestId = "resv-$instanceId-${candidate.candidateId}",
-                    requestedAt = spec.requestedAt,
-                    instanceId = instanceId,
-                    candidateId = candidate.candidateId,
-                    teamId = spec.teamId,
-                    challengeId = spec.challengeId,
-                    architecture = spec.architecture,
-                    resourceProfile = spec.resourceProfile,
-                ),
-            )
-        } catch (exception: Exception) {
-            handleBrokerFailure(instanceId, exception)
-            return
-        }
+        val (candidate, reservation) = reserveFirstAvailable(instanceId, spec, candidates) ?: return
 
         // 만료나 반납된 예약의 재사용을 막는다, HELD가 아니면 선점된 용량이 없다
         if (reservation.status != BrokerReservationStatus.HELD) {
@@ -154,6 +124,16 @@ class InstanceOperationService(
             )
             return
         }
+
+        val candidateSummary = candidateSummary(response, candidate)
+        log.info(
+            "broker candidate selected: instanceId={}, candidateId={}, provider={}, region={}, target={}",
+            instanceId,
+            candidate.candidateId,
+            candidate.provider,
+            candidate.region,
+            candidate.runtime.targetId,
+        )
 
         var reservationTaken = false
         val target = tx.execute {
@@ -948,6 +928,98 @@ class InstanceOperationService(
         instance.attemptCount = 0
     }
 
+    // 앞 후보부터 예약한다, 자리 부족이나 다른 후보에 쥔 예약으로 거절되면 같은 주기에 다음 후보로 넘어간다
+    // 자리 부족은 동시에 온 요청이 같은 후보를 골라 생긴다, 재시도로 미루면 재시도 한도를 자리 경합에 쓴다
+    // 쥔 예약의 후보가 목록에 없으면 재시도 횟수를 쓰지 않고 만료를 기다린다, 브로커는 마지막 자리를 쥔 후보를 목록에서 뺀다
+    // 그 밖의 거절과 통신 실패는 재시도로 넘긴다, 통신 실패 뒤에는 예약이 이미 잡혔을 수 있어 다음 후보로 가지 않는다
+    // 후보마다 브로커 왕복이 들어 한 주기에 시도하는 후보 수를 제한한다, 실패는 여기서 기록하고 null을 돌려준다
+    private fun reserveFirstAvailable(
+        instanceId: UUID,
+        spec: WorkloadSpec,
+        candidates: List<ResourceCandidate>,
+    ): Pair<ResourceCandidate, BrokerReservationResponse>? {
+        var lastRejection: BrokerRejectedException? = null
+        var heldElsewhere = false
+        for (candidate in candidates.take(MAX_RESERVATION_CANDIDATES)) {
+            try {
+                return candidate to reserve(instanceId, spec, candidate)
+            } catch (exception: BrokerRejectedException) {
+                if (exception.brokerCode !in NEXT_CANDIDATE_CODES) {
+                    handleBrokerFailure(instanceId, exception)
+                    return null
+                }
+                log.info(
+                    "candidate rejected, trying next: instanceId={}, candidateId={}, code={}",
+                    instanceId,
+                    candidate.candidateId,
+                    exception.brokerCode,
+                )
+                lastRejection = exception
+                heldElsewhere = heldElsewhere || exception.brokerCode == INSTANCE_ALREADY_RESERVED_CODE
+            } catch (exception: Exception) {
+                handleBrokerFailure(instanceId, exception)
+                return null
+            }
+        }
+        // 선택기는 빈 목록을 돌려주지 않으므로 여기 오면 시도한 후보가 모두 다음 후보로 넘기는 이유로 거절됐다
+        if (heldElsewhere) {
+            waitForHeldReservation(instanceId, checkNotNull(lastRejection))
+        } else {
+            handleBrokerFailure(instanceId, checkNotNull(lastRejection))
+        }
+        return null
+    }
+
+    // 쥔 예약을 되찾지 못한 행을 재시도 횟수를 쓰지 않고 뒤로 민다
+    // 끝내 풀리지 않으면 하드타임아웃이 행을 끝낸다
+    private fun waitForHeldReservation(instanceId: UUID, rejection: BrokerRejectedException) {
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            if (instance.status != InstanceStatus.SCHEDULING) return@executeWithoutResult
+            instance.nextPollAt = clock.instant().plus(operationProperties.backoffMax)
+            log.warn(
+                "reservation held on a candidate not offered, waiting for it to expire: instanceId={}, reason={}",
+                instanceId,
+                rejection.adminDetail,
+            )
+        }
+    }
+
+    // 브로커가 request_id로 같은 요청인지 가리므로 후보를 넣어 만든다, requested_at까지 같아야 같은 요청으로 본다
+    // 그래서 시각은 행이 만들어진 때로 고정한다, 재시도마다 현재 시각을 넣으면 매번 409 REQUEST_ID_REUSED다
+    // 재시도가 같은 후보를 고르면 기존 예약을 돌려받는다, 선택기가 인스턴스마다 같은 순서를 주는 이유다
+    // 같은 id에 만료된 예약이 오면 번호를 붙인 새 id로 다시 잡는다, 브로커가 만료된 예약을 그대로 돌려주기 때문이다
+    // 번호는 만료를 본 때만 붙인다, 통신 재시도는 같은 id여야 잡혀 있던 예약을 돌려받는다
+    // 상한까지 만료가 이어지면 마지막 응답을 돌려주고 호출자가 HELD가 아니라서 재시도로 넘긴다
+    private fun reserve(
+        instanceId: UUID,
+        spec: WorkloadSpec,
+        candidate: ResourceCandidate,
+    ): BrokerReservationResponse {
+        val baseRequestId = "resv-$instanceId-${candidate.candidateId}"
+        var reservation: BrokerReservationResponse? = null
+        for (generation in 1..MAX_RESERVATION_GENERATIONS) {
+            val requestId = if (generation == 1) baseRequestId else "$baseRequestId-$generation"
+            reservation = brokerClient.createReservation(
+                BrokerReservationRequest(
+                    requestId = requestId,
+                    requestedAt = spec.requestedAt,
+                    instanceId = instanceId,
+                    candidateId = candidate.candidateId,
+                    teamId = spec.teamId,
+                    challengeId = spec.challengeId,
+                    architecture = spec.architecture,
+                    resourceProfile = spec.resourceProfile,
+                ),
+            )
+            if (reservation.status != BrokerReservationStatus.EXPIRED) {
+                return reservation
+            }
+            log.info("reservation expired, reserving again: instanceId={}, requestId={}", instanceId, requestId)
+        }
+        return checkNotNull(reservation)
+    }
+
     // broker 실패는 간격을 늘려 다시 시도하고 한도에 닿으면 FAILED로 확정한다
     // 후보가 없어서 실패하면 RESOURCE_UNAVAILABLE, 호출 자체가 안 되면 BROKER_CALL_FAILED로 기록한다
     private fun handleBrokerFailure(instanceId: UUID, exception: Exception) {
@@ -1107,6 +1179,16 @@ class InstanceOperationService(
         )
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
         private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
+
+        // 예약이 이 이유로 거절되면 같은 주기에 다음 후보로 넘어간다
+        private const val INSTANCE_ALREADY_RESERVED_CODE = "INSTANCE_ALREADY_RESERVED"
+        private val NEXT_CANDIDATE_CODES = setOf("INSUFFICIENT_CAPACITY", INSTANCE_ALREADY_RESERVED_CODE)
+
+        // 한 주기에 예약을 시도하는 후보 수, 후보마다 브로커 왕복이 한 번 들고 만료된 예약을 만나면 세대 수만큼 든다
+        private const val MAX_RESERVATION_CANDIDATES = 3
+
+        // 만료된 예약을 보고 번호를 붙여 다시 잡는 횟수, 첫 id를 포함한다
+        private const val MAX_RESERVATION_GENERATIONS = 3
         private const val DEFAULT_RUN_AS_USER = 10001L
     }
 }
