@@ -111,6 +111,12 @@ class Instance(
     @Column(name = "reservation_id")
     var reservationId: String? = null,
 
+    // 결과를 모르는 예약 요청이다, 요청은 보냈지만 응답을 받지 못해 예약이 만들어졌는지 알 수 없다
+    // 다음 주기에 이 요청을 그대로 다시 보내 결과를 확인한다
+    // 후보를 새로 고르면 안 된다, 브로커는 이 인스턴스의 예약까지 빼고 자리를 세서 그 후보가 목록에서 빠질 수 있다
+    @Column(name = "pending_reservation", columnDefinition = "text")
+    var pendingReservation: String? = null,
+
     // operation 폴링 예정 시각, 접수 전 단계에서는 다음 재시도 시각으로 쓴다
     // PROVISIONING인데 operation을 아직 못 받은 구간에서는 재접수 예정 시각이다
     @Column(name = "next_poll_at")

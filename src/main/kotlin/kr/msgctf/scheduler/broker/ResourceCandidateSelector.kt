@@ -93,7 +93,8 @@ class ResourceCandidateSelector(
         candidates.count { candidate -> candidate.costEstimate?.status == CostEstimateStatus.BLOCKED }
 
     // 같은 위험도 안의 순서를 인스턴스마다 다르게 섞는다, 동시에 온 요청이 한 후보로 몰리지 않게 한다
-    // 무작위가 아니라 인스턴스와 후보로 정해지는 값이다, 예약 응답을 잃고 재시도할 때 같은 후보로 가야 잡아 둔 예약을 돌려받는다
+    // 무작위가 아니라 인스턴스와 후보로 정해지는 값이다
+    // 예약 응답을 받지 못해 재시도할 때 같은 후보로 가야 브로커가 처음 만든 예약을 돌려준다
     // 서버가 여러 대이거나 재시작해도 같은 인스턴스는 같은 순서를 받아야 한다, 그래서 어디서 계산해도 값이 같은 MD5를 쓴다
     private fun spreadKey(instanceId: UUID, candidate: ResourceCandidate): Long =
         UUID.nameUUIDFromBytes("$instanceId:${candidate.candidateId}".toByteArray()).mostSignificantBits

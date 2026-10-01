@@ -16,6 +16,11 @@ class FakeBrokerClient(
     @Volatile var capacity: Int? = null,
 ) : BrokerClient {
 
+    // 테스트에서 "예약은 됐는데 응답이 오지 않은" 상황을 만들 때 쓴다
+    // 값이 0보다 크면 예약을 저장한 뒤 응답 대신 예외를 던지고, 값을 하나 줄인다
+    // 같은 인스턴스가 다시 예약을 요청하면 저장해 둔 예약을 그대로 돌려준다
+    @Volatile var lostReservationResponses: Int = 0
+
     val committedReservations: MutableList<String> = CopyOnWriteArrayList()
     val releasedReservations: MutableList<String> = CopyOnWriteArrayList()
 
@@ -53,6 +58,10 @@ class FakeBrokerClient(
                     )
                 }
                 reservations[reservationId] = BrokerReservationStatus.HELD
+                if (lostReservationResponses > 0) {
+                    lostReservationResponses -= 1
+                    throw IllegalStateException("reservation response lost: requestId=${request.requestId}")
+                }
                 BrokerReservationStatus.HELD
             }
         }
@@ -123,6 +132,7 @@ class FakeBrokerClient(
             releaseRequests.clear()
             rejectedReservations.clear()
             capacity = null
+            lostReservationResponses = 0
         }
     }
 

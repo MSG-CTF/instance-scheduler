@@ -46,7 +46,7 @@ class ResourceCandidateSelectorTest {
     }
 
     // 같은 인스턴스는 후보 목록의 순서와 상관없이 같은 순서를 받는지 확인
-    // 예약 응답을 잃고 재시도할 때 같은 후보로 가야 브로커가 잡아 둔 예약을 돌려준다
+    // 예약 응답을 받지 못해 재시도할 때 같은 후보로 가야 브로커가 처음 만든 예약을 돌려준다
     @Test
     fun `ranks candidates the same way for the same instance`() {
         // given

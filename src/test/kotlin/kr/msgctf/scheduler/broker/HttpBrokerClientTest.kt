@@ -317,6 +317,33 @@ class HttpBrokerClientTest {
         assertEquals(true, exception.adminDetail?.contains("capacity exhausted"))
     }
 
+    // 이유 코드가 있는 4xx만 확실한 거절이다, 호출자는 나머지 응답을 결과를 모르는 것으로 보고 다시 확인한다
+    @Test
+    fun `marks only coded client errors as definite rejections`() {
+        server.expect(requestTo("http://broker.test/v1/reservations"))
+            .andRespond(
+                withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"INSUFFICIENT_CAPACITY","message":"full"}}"""),
+            )
+        server.expect(requestTo("http://broker.test/v1/reservations"))
+            .andRespond(
+                withStatus(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"UPSTREAM_CLOSED","message":"proxy"}}"""),
+            )
+        server.expect(requestTo("http://broker.test/v1/reservations"))
+            .andRespond(withStatus(HttpStatus.CONFLICT).body("conflict"))
+
+        val coded409 = assertFailsWith<BrokerRejectedException> { client.createReservation(reservationRequest(UUID.randomUUID())) }
+        val coded502 = assertFailsWith<BrokerRejectedException> { client.createReservation(reservationRequest(UUID.randomUUID())) }
+        val uncoded409 = assertFailsWith<BrokerRejectedException> { client.createReservation(reservationRequest(UUID.randomUUID())) }
+
+        assertEquals(409, coded409.httpStatus)
+        assertEquals(true, coded409.definite)
+        assertEquals(502, coded502.httpStatus)
+        assertEquals(false, coded502.definite)
+        assertEquals(false, uncoded409.definite)
+    }
+
     // jsonPath의 doesNotExist는 값이 null이어도 통과한다, 브로커는 모르는 키가 있으면 422라 키 자체가 없는지 본다
     private fun withoutKey(objectPath: String, key: String) =
         jsonPath(objectPath).value(not(hasKey(key)))
