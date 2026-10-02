@@ -237,6 +237,7 @@ class HttpBrokerClientTest {
         assertEquals("8f0e1362-3339-4a3f-9dc7-c60966f72487", response.reservationId)
         assertEquals(BrokerReservationStatus.HELD, response.status)
         assertEquals(Instant.parse("2026-08-21T11:33:54.710162Z"), response.expiresAt)
+        assertEquals("cd33055d-9467-4498-8f17-4c4fee6344df", response.targetId)
     }
 
     // 2026-09-07 계약부터 확정과 반납은 본문이 필수다, 경로의 id와 본문의 reservation_id가 같아야 한다
@@ -315,6 +316,33 @@ class HttpBrokerClientTest {
         assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, exception.errorCode)
         assertEquals(true, exception.adminDetail?.contains("status=409"))
         assertEquals(true, exception.adminDetail?.contains("capacity exhausted"))
+    }
+
+    // 이유 코드가 있는 4xx만 확실한 거절이다, 호출자는 나머지 응답을 결과를 모르는 것으로 보고 다시 확인한다
+    @Test
+    fun `marks only coded client errors as definite rejections`() {
+        server.expect(requestTo("http://broker.test/v1/reservations"))
+            .andRespond(
+                withStatus(HttpStatus.CONFLICT).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"INSUFFICIENT_CAPACITY","message":"full"}}"""),
+            )
+        server.expect(requestTo("http://broker.test/v1/reservations"))
+            .andRespond(
+                withStatus(HttpStatus.BAD_GATEWAY).contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"error":{"code":"UPSTREAM_CLOSED","message":"proxy"}}"""),
+            )
+        server.expect(requestTo("http://broker.test/v1/reservations"))
+            .andRespond(withStatus(HttpStatus.CONFLICT).body("conflict"))
+
+        val coded409 = assertFailsWith<BrokerRejectedException> { client.createReservation(reservationRequest(UUID.randomUUID())) }
+        val coded502 = assertFailsWith<BrokerRejectedException> { client.createReservation(reservationRequest(UUID.randomUUID())) }
+        val uncoded409 = assertFailsWith<BrokerRejectedException> { client.createReservation(reservationRequest(UUID.randomUUID())) }
+
+        assertEquals(409, coded409.httpStatus)
+        assertEquals(true, coded409.definite)
+        assertEquals(502, coded502.httpStatus)
+        assertEquals(false, coded502.definite)
+        assertEquals(false, uncoded409.definite)
     }
 
     // jsonPath의 doesNotExist는 값이 null이어도 통과한다, 브로커는 모르는 키가 있으면 422라 키 자체가 없는지 본다

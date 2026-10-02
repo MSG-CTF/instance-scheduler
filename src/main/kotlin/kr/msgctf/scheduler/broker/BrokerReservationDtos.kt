@@ -106,6 +106,11 @@ data class BrokerReservationResponse(
     // 반납이나 확정 후에는 만료가 없다
     @JsonProperty("expires_at")
     val expiresAt: Instant?,
+
+    // 예약한 노드의 현재 주소, 브로커가 응답할 때 노드 정보에서 읽어 준다
+    // 후보를 조회하거나 요청을 저장한 뒤에 바뀌었을 수 있다
+    @JsonProperty("target_id")
+    val targetId: String? = null,
 )
 
 enum class BrokerReservationStatus {

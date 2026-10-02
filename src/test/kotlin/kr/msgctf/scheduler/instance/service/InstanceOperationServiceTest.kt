@@ -17,6 +17,7 @@ import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
 import kr.msgctf.scheduler.broker.BrokerCandidateResponse
+import kr.msgctf.scheduler.broker.BrokerCandidateStatus
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.BrokerRejectedException
 import kr.msgctf.scheduler.broker.BrokerReservationCommitRequest
@@ -391,6 +392,872 @@ class InstanceOperationServiceTest {
         service.progressRequested(instance.instanceId)
 
         // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertNull(instance.reservationId)
+    }
+
+    // 자리가 모자라 거절되면 같은 주기에 다음 후보로 예약하는지 확인
+    // 동시에 온 요청이 같은 후보를 골랐을 때 생긴다, 2초 뒤 재시도로 미루면 재시도 한도를 자리 경합에 쓴다
+    @Test
+    fun `reserves next candidate when first choice is out of capacity`() {
+        // given: 처음 시도한 후보만 자리가 없다
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = candidatesBroker(listOf("candidate-a", "candidate-b")) { request ->
+            requests += request
+            if (requests.size == 1) capacityRejection(request) else null
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(2, requests.size)
+        assertNotEquals(requests[0].candidateId, requests[1].candidateId)
+        assertEquals("resv-${instance.instanceId}-${requests[1].candidateId}", requests[1].requestId)
+    }
+
+    // 시도한 후보가 모두 자리가 없으면 재시도로 넘기고, 한 주기에 시도하는 후보 수에 상한이 있는지 확인
+    // 후보마다 브로커 왕복이 한 번이라 끝없이 돌면 워커 스레드를 오래 잡는다
+    @Test
+    fun `schedules retry after trying a bounded number of full candidates`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = candidatesBroker((1..5).map { "candidate-$it" }) { request ->
+            requests += request
+            capacityRejection(request)
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(3, requests.size)
+        assertEquals(3, requests.map { it.candidateId }.toSet().size)
+    }
+
+    // 두 번째 후보에 보낸 예약 요청의 응답을 받지 못하면, 다음 주기가 후보를 새로 고르지 않고 그 요청을 다시 보내는지 확인
+    // 통신 실패 뒤에는 다음 후보로 가지 않는다, 예약이 이미 만들어졌을 수 있다
+    @Test
+    fun `recovers reservation held on fallback candidate after lost response`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var round = 1
+        val broker = candidatesBroker(listOf("candidate-a", "candidate-b", "candidate-c")) { request ->
+            requests += request
+            when {
+                request.candidateId == requests.first().candidateId -> capacityRejection(request)
+                round == 1 -> IllegalStateException("connection reset")
+                else -> null
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(2, requests.size)
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(3, requests.size)
+        assertEquals(requests[1], requests[2])
+        assertEquals("reservation-${requests[1].candidateId}", instance.reservationId)
+        assertNull(instance.pendingReservation)
+    }
+
+    // 마지막 자리에 만든 예약의 응답을 받지 못하면 다음 후보 조회가 비어서 온다, 브로커가 이 인스턴스의 예약까지 빼고 자리를 센다
+    // 그래도 저장한 요청을 다시 보내 처음 만든 예약을 돌려받는지 확인
+    @Test
+    fun `recovers held reservation when the only candidate disappears after lost response`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                val response = delegate.getCandidates(request)
+                return if (round == 1) {
+                    response.copy(candidates = listOf(response.candidates.single().copy(candidateId = "candidate-a")))
+                } else {
+                    response.copy(status = BrokerCandidateStatus.NO_CANDIDATES, candidates = emptyList())
+                }
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                if (round == 1) throw IllegalStateException("read timed out")
+                return BrokerReservationResponse(
+                    reservationId = "reservation-a",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.HELD,
+                    expiresAt = null,
+                )
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("reservation-a", instance.reservationId)
+        assertEquals("cluster-main", instance.runtimeTargetId)
+        assertEquals(2, requests.size)
+        assertEquals(requests[0], requests[1])
+        assertEquals(1, candidateQueries)
+        assertNull(instance.pendingReservation)
+    }
+
+    // 다시 보낸 요청이 자리 부족으로 거절되면 처음 요청은 예약을 만들지 못한 것이다
+    // 저장한 요청을 지우고 후보를 새로 골라 예약하는지 확인
+    @Test
+    fun `forgets pending reservation when replay shows it was never made`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                val response = delegate.getCandidates(request)
+                val id = if (round == 1) "candidate-a" else "candidate-b"
+                return response.copy(candidates = listOf(response.candidates.single().copy(candidateId = id)))
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                when {
+                    round == 1 -> throw IllegalStateException("read timed out")
+                    request.candidateId == "candidate-a" -> throw capacityRejection(request)
+                }
+                return BrokerReservationResponse(
+                    reservationId = "reservation-${request.candidateId}",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.HELD,
+                    expiresAt = null,
+                )
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(listOf("candidate-a", "candidate-a", "candidate-b"), requests.map { it.candidateId })
+        assertEquals(requests[0], requests[1])
+        assertEquals("reservation-candidate-b", instance.reservationId)
+        assertNull(instance.pendingReservation)
+    }
+
+    // 다시 보낸 요청도 응답을 받지 못하면 저장한 요청을 그대로 두고 재시도로 넘기는지 확인
+    // 재시도 한도에 닿아 FAILED가 되면 저장한 요청을 지운다
+    @Test
+    fun `keeps pending reservation until replay resolves or instance fails`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                return delegate.getCandidates(request)
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                throw IllegalStateException("read timed out")
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 두 번째 주기는 후보를 조회하지 않고 같은 요청만 다시 보냈다
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(2, instance.attemptCount)
+        assertNotNull(instance.pendingReservation)
+        assertEquals(1, candidateQueries)
+        assertEquals(requests[0], requests[1])
+
+        // when: 한도에 닿는다
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.pendingReservation)
+    }
+
+    // 다시 보낸 요청이 브로커 오류나 이유 코드 없는 응답으로 끝나면 여전히 결과를 모른다
+    // 이때 요청을 지우고 후보를 새로 고르면, 마지막 자리를 쓴 경우 후보 목록이 비어 같은 문제가 다시 생긴다
+    @Test
+    fun `keeps pending reservation when replay is rejected for an unknown reason`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                return delegate.getCandidates(request)
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                when (requests.size) {
+                    1 -> throw IllegalStateException("read timed out")
+                    2 -> throw BrokerRejectedException(
+                        brokerCode = "INTERNAL_ERROR",
+                        adminDetail = "status=500",
+                        httpStatus = 500,
+                    )
+                    else -> throw BrokerRejectedException(brokerCode = null, adminDetail = "status=502")
+                }
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(2, instance.attemptCount)
+        assertNotNull(instance.pendingReservation)
+
+        // when: 이유 코드가 없는 응답도 같다
+        service.progressRequested(instance.instanceId)
+
+        // then: 후보는 처음 한 번만 조회했고 같은 요청만 다시 보냈다
+        assertEquals(3, requests.size)
+        assertEquals(1, requests.toSet().size)
+        assertEquals(1, candidateQueries)
+    }
+
+    // 처음 보낸 요청이 브로커 오류로 끝나도 예약이 만들어졌는지 모른다, 브로커가 예약을 저장한 뒤 프록시가 502를 줄 수 있다
+    // 응답을 받지 못한 경우처럼 요청을 저장하고, 다음 주기가 후보 조회 없이 같은 요청을 다시 보내는지 확인
+    @Test
+    fun `remembers first request rejected by a broker error`() {
+        // given: 마지막 자리를 잡았지만 502를 받았고, 다음 후보 조회는 빈다
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                val response = delegate.getCandidates(request)
+                return if (round == 1) response
+                else response.copy(status = BrokerCandidateStatus.NO_CANDIDATES, candidates = emptyList())
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                if (round == 1) {
+                    throw BrokerRejectedException(brokerCode = null, adminDetail = "status=502", httpStatus = 502)
+                }
+                return BrokerReservationResponse(
+                    reservationId = "reservation-held",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.HELD,
+                    expiresAt = null,
+                )
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+        assertNotNull(instance.pendingReservation)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(requests[0], requests[1])
+        assertEquals(1, candidateQueries)
+    }
+
+    // 그사이 다른 서버가 다른 요청을 저장했으면, 이전 요청을 지울 때 그 값까지 지우지 않는지 확인
+    @Test
+    fun `does not clear a pending reservation written by another node`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                if (round == 2) throw IllegalStateException("broker unavailable")
+                return delegate.getCandidates(request)
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (round == 1) throw IllegalStateException("read timed out")
+                // 이 주기가 이전 요청을 다시 보내는 사이 다른 서버가 다른 요청을 저장했다
+                instance.pendingReservation = "written-by-another-node"
+                throw capacityRejection(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals("written-by-another-node", instance.pendingReservation)
+    }
+
+    // 다시 보낸 요청이 예약을 찾은 뒤에 나오는 코드로 거절되면 저장한 요청을 지우고 같은 주기에 후보를 새로 골라 예약하는지 확인
+    // 브로커는 인증과 형식 검사를 지나면 같은 요청에 처음 만든 예약을 먼저 돌려준다, 그래서 이 거절들은 이 요청으로 돌려받을 예약이 없다는 뜻이다
+    @Test
+    fun `forgets pending reservation for every rejection meaning no reservation was made`() {
+        listOf(
+            "INSUFFICIENT_CAPACITY" to 409,
+            "INSTANCE_ALREADY_RESERVED" to 409,
+            "REQUEST_ID_REUSED" to 409,
+            "CANDIDATE_UNAVAILABLE" to 409,
+            "RESERVATION_CONFLICT" to 409,
+            "CANDIDATE_NOT_FOUND" to 404,
+        ).forEach { (code, status) ->
+            // given
+            val repository = TestInstanceRepository()
+            val instance = repository.save(newRequested())
+            var round = 1
+            val delegate = FakeBrokerClient()
+            val broker = object : BrokerClient by delegate {
+                override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                    val response = delegate.getCandidates(request)
+                    val id = if (round == 1) "candidate-a" else "candidate-b"
+                    return response.copy(candidates = listOf(response.candidates.single().copy(candidateId = id)))
+                }
+
+                override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                    when {
+                        round == 1 -> throw IllegalStateException("read timed out")
+                        request.candidateId == "candidate-a" -> throw BrokerRejectedException(
+                            brokerCode = code,
+                            adminDetail = "status=$status, code=$code",
+                            httpStatus = status,
+                        )
+                    }
+                    return BrokerReservationResponse(
+                        reservationId = "reservation-${request.candidateId}",
+                        requestId = request.requestId,
+                        status = BrokerReservationStatus.HELD,
+                        expiresAt = null,
+                    )
+                }
+            }
+            val service = newService(repository, brokerClient = broker)
+            service.progressRequested(instance.instanceId)
+
+            // when
+            round = 2
+            service.progressRequested(instance.instanceId)
+
+            // then
+            assertEquals(InstanceStatus.PROVISIONING, instance.status, "code=$code")
+            assertEquals("reservation-candidate-b", instance.reservationId, "code=$code")
+            assertNull(instance.pendingReservation, "code=$code")
+        }
+    }
+
+    // 브로커는 인증과 요청 형식을 먼저 검사하고 그다음에 같은 request_id의 예약을 찾는다
+    // 그래서 다시 보낸 요청이 401이나 422로 거절돼도 처음 요청의 예약이 없다는 뜻이 아니다
+    // 저장한 요청을 유지하고, 인증이 회복되면 후보 목록이 비어 있어도 그 예약을 돌려받는지 확인
+    @Test
+    fun `keeps pending reservation when replay is rejected before the broker looks it up`() {
+        listOf(
+            "INVALID_SCHEDULER_TOKEN" to 401,
+            "SCHEDULER_TOKEN_REQUIRED" to 401,
+            "VALIDATION_ERROR" to 422,
+            // 브로커가 나중에 예약을 찾기 전 단계에 409를 새로 만들어도 지우지 않는다, 아는 코드만 지운다
+            "UNKNOWN_CONFLICT" to 409,
+        ).forEach { (code, status) ->
+                // given: 마지막 자리에 만든 예약의 응답을 받지 못했고, 다음 후보 조회는 빈다
+                val repository = TestInstanceRepository()
+                val instance = repository.save(newRequested())
+                var round = 1
+                val delegate = FakeBrokerClient()
+                val broker = object : BrokerClient by delegate {
+                    override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                        val response = delegate.getCandidates(request)
+                        return if (round == 1) response
+                        else response.copy(status = BrokerCandidateStatus.NO_CANDIDATES, candidates = emptyList())
+                    }
+
+                    override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                        when (round) {
+                            1 -> throw IllegalStateException("read timed out")
+                            2 -> throw BrokerRejectedException(
+                                brokerCode = code,
+                                adminDetail = "status=$status, code=$code",
+                                httpStatus = status,
+                            )
+                        }
+                        return BrokerReservationResponse(
+                            reservationId = "reservation-held",
+                            requestId = request.requestId,
+                            status = BrokerReservationStatus.HELD,
+                            expiresAt = null,
+                        )
+                    }
+                }
+                val service = newService(repository, brokerClient = broker)
+                service.progressRequested(instance.instanceId)
+
+                // when: 인증이 잠깐 틀어진 주기
+                round = 2
+                service.progressRequested(instance.instanceId)
+
+                // then
+                assertEquals(InstanceStatus.SCHEDULING, instance.status, "code=$code")
+                assertNotNull(instance.pendingReservation, "code=$code")
+
+                // when: 인증이 회복된 주기
+                round = 3
+                service.progressRequested(instance.instanceId)
+
+                // then
+                assertEquals(InstanceStatus.PROVISIONING, instance.status, "code=$code")
+                assertEquals("reservation-held", instance.reservationId, "code=$code")
+            }
+    }
+
+    // 다시 보낸 요청이 HELD로 돌아왔는데 노드 주소가 저장한 값과 다르면, 브로커가 준 새 주소로 생성을 요청하는지 확인
+    // 처음 요청이 브로커에 닿지 않았다면 다시 보낸 요청이 새 예약을 만들고, 그 사이 노드 주소가 바뀌었을 수 있다
+    @Test
+    fun `creates on the target the broker reports when replay returns a moved node`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (round == 1) throw IllegalStateException("connection refused")
+                return BrokerReservationResponse(
+                    reservationId = "reservation-new",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.HELD,
+                    expiresAt = null,
+                    targetId = "cluster-moved",
+                )
+            }
+        }
+        var captured: RuntimeCreateRequest? = null
+        val runtimeDelegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+        assertNull(captured)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("cluster-moved", instance.runtimeTargetId)
+        assertEquals("cluster-moved", captured!!.target.targetId)
+    }
+
+    // 후보를 조회한 뒤 예약하기 전에 노드 주소가 바뀌면, 예약 응답의 새 주소로 생성을 요청하는지 확인
+    @Test
+    fun `creates on the target the broker reports for a fresh reservation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+                delegate.createReservation(request).copy(targetId = "cluster-moved")
+        }
+        var captured: RuntimeCreateRequest? = null
+        val runtimeDelegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals("cluster-moved", instance.runtimeTargetId)
+        assertEquals("cluster-moved", captured!!.target.targetId)
+    }
+
+    // 예약 응답의 노드 주소가 비어 있으면 고른 후보의 주소를 그대로 쓰는지 확인, 빈 주소로 생성을 요청하지 않는다
+    @Test
+    fun `keeps the chosen target when the reservation reports a blank one`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+                delegate.createReservation(request).copy(targetId = " ")
+        }
+        var captured: RuntimeCreateRequest? = null
+        val runtimeDelegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals("cluster-main", instance.runtimeTargetId)
+        assertEquals("cluster-main", captured!!.target.targetId)
+    }
+
+    // 다시 보낸 요청에 HELD가 아닌 예약이 오면 이미 끝난 예약이다, 저장한 요청을 지우고 후보를 새로 고르는지 확인
+    @Test
+    fun `forgets pending reservation when replay returns an expired reservation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var candidateQueries = 0
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                val response = delegate.getCandidates(request)
+                val id = if (round == 1) "candidate-a" else "candidate-b"
+                return response.copy(candidates = listOf(response.candidates.single().copy(candidateId = id)))
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (round == 1) throw IllegalStateException("read timed out")
+                val status =
+                    if (request.candidateId == "candidate-a") BrokerReservationStatus.EXPIRED
+                    else BrokerReservationStatus.HELD
+                return BrokerReservationResponse(
+                    reservationId = "reservation-${request.candidateId}",
+                    requestId = request.requestId,
+                    status = status,
+                    expiresAt = null,
+                )
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("reservation-candidate-b", instance.reservationId)
+        assertEquals(2, candidateQueries)
+        assertNull(instance.pendingReservation)
+    }
+
+    // 저장한 요청을 지운 뒤 같은 주기의 후보 조회가 실패해도 지운 상태가 유지되는지 확인
+    // 남아 있으면 다음 주기가 없는 예약을 다시 보내느라 재시도 횟수를 쓴다
+    @Test
+    fun `stays forgotten when candidate query fails right after forgetting`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                if (round == 2) throw IllegalStateException("broker unavailable")
+                return delegate.getCandidates(request)
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                if (round == 1) throw IllegalStateException("read timed out")
+                throw capacityRejection(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertNull(instance.pendingReservation)
+        assertEquals(2, instance.attemptCount)
+
+        // when: 다음 주기는 다시 보낼 요청이 없어 후보 조회부터 한다
+        round = 3
+        val requestsBefore = requests.size
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(3, candidateQueries)
+        assertEquals(requestsBefore + 1, requests.size)
+    }
+
+    // 저장된 값을 읽지 못하면 저장된 요청이 없는 것으로 보고 후보를 골라 진행하는지 확인
+    @Test
+    fun `ignores unreadable pending reservation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { pendingReservation = "{oops" })
+        val service = newService(repository)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(instance.pendingReservation)
+    }
+
+    // 이 인스턴스의 예약이 다른 후보에 있으면 첫 후보가 거절한다, 다음 후보로 넘어가 그 예약을 돌려받는지 확인
+    // 저장된 요청이 없을 때 생긴다, 예를 들어 다른 서버가 만든 예약이다
+    @Test
+    fun `moves past candidate rejected because instance already holds another reservation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = candidatesBroker(listOf("candidate-a", "candidate-b", "candidate-c")) { request ->
+            requests += request
+            if (requests.size == 1) {
+                BrokerRejectedException(
+                    brokerCode = "INSTANCE_ALREADY_RESERVED",
+                    adminDetail = "requestId=${request.requestId}, status=409, code=INSTANCE_ALREADY_RESERVED",
+                )
+            } else {
+                null
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(2, requests.size)
+        assertEquals("reservation-${requests[1].candidateId}", instance.reservationId)
+    }
+
+    // 이 인스턴스의 예약을 찾지 못하면 재시도 횟수를 쓰지 않고 그 예약이 만료되기를 기다리는지 확인
+    // 저장된 요청이 없고, 시도한 후보가 모두 INSTANCE_ALREADY_RESERVED로 거절할 때다
+    // 재시도 횟수를 쓰면 몇 초 만에 FAILED가 되고, 그 예약의 자리는 만료될 때까지 비지 않는다
+    @Test
+    fun `waits without spending retries when held reservation is not among candidates`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val broker = candidatesBroker(listOf("candidate-a", "candidate-c")) { request ->
+            BrokerRejectedException(
+                brokerCode = "INSTANCE_ALREADY_RESERVED",
+                adminDetail = "requestId=${request.requestId}, status=409, code=INSTANCE_ALREADY_RESERVED",
+            )
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(0, instance.attemptCount)
+        assertEquals(clock.instant().plus(OperationProperties().backoffMax), instance.nextPollAt)
+    }
+
+    // 번호를 붙인 예약 요청의 응답을 받지 못하면, 다음 주기가 번호 붙은 그 요청을 그대로 다시 보내는지 확인
+    @Test
+    fun `recovers numbered reservation after lost response`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val base = "resv-${instance.instanceId}-candidate-self-hosted-1"
+        var loseResponse = true
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (request.requestId == base) {
+                    delegate.reservationRequests += request
+                    return BrokerReservationResponse(
+                        reservationId = "reservation-expired",
+                        requestId = request.requestId,
+                        status = BrokerReservationStatus.EXPIRED,
+                        expiresAt = null,
+                    )
+                }
+                val reservation = delegate.createReservation(request)
+                if (loseResponse) {
+                    loseResponse = false
+                    throw IllegalStateException("read timed out")
+                }
+                return reservation
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        val requests = delegate.reservationRequests
+        assertEquals(listOf(base, "$base-2", "$base-2"), requests.map { it.requestId })
+        assertEquals(requests[1], requests[2])
+        assertEquals("reservation-${instance.instanceId}", instance.reservationId)
+    }
+
+    // 자리 부족과 다른 예약 보유가 아닌 거절은 다음 후보로 넘어가지 않고 재시도로 넘기는지 확인
+    // 후보와 상관없는 원인일 수 있어 후보를 바꿔 가며 브로커 왕복을 더 쓰지 않는다
+    @Test
+    fun `does not try next candidate when rejected for another reason`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = candidatesBroker(listOf("candidate-a", "candidate-b")) { request ->
+            requests += request
+            BrokerRejectedException(
+                brokerCode = "REQUEST_ID_REUSED",
+                adminDetail = "requestId=${request.requestId}, status=409, code=REQUEST_ID_REUSED",
+            )
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(1, instance.attemptCount)
+        assertEquals(1, requests.size)
+    }
+
+    // 만료된 예약이 돌아오면 번호를 붙인 새 id로 다시 예약하는지 확인
+    // 브로커는 같은 request_id에 만료된 예약을 그대로 돌려준다, 통신 재시도가 아닌 새 예약은 id를 바꿔야 한다
+    @Test
+    fun `reserves again with numbered request id when reservation expired`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val base = "resv-${instance.instanceId}-candidate-self-hosted-1"
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (request.requestId == base) {
+                    delegate.reservationRequests += request
+                    return BrokerReservationResponse(
+                        reservationId = "reservation-expired",
+                        requestId = request.requestId,
+                        status = BrokerReservationStatus.EXPIRED,
+                        expiresAt = null,
+                    )
+                }
+                return delegate.createReservation(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 시각은 그대로라 다음 재시도도 같은 번호의 예약을 돌려받는다
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        val requests = delegate.reservationRequests
+        assertEquals(listOf(base, "$base-2"), requests.map { it.requestId })
+        assertEquals(requests[0].requestedAt, requests[1].requestedAt)
+        assertEquals("reservation-${instance.instanceId}", instance.reservationId)
+    }
+
+    // 번호를 붙여도 계속 만료된 예약이 오면 번호 붙이기를 멈추고 재시도로 넘기는지 확인
+    @Test
+    fun `stops renumbering expired reservations after the limit`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = object : BrokerClient by FakeBrokerClient() {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                return BrokerReservationResponse(
+                    reservationId = "reservation-expired-${requests.size}",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.EXPIRED,
+                    expiresAt = null,
+                )
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        val base = "resv-${instance.instanceId}-candidate-self-hosted-1"
+        assertEquals(listOf(base, "$base-2", "$base-3"), requests.map { it.requestId })
         assertEquals(InstanceStatus.SCHEDULING, instance.status)
         assertEquals(1, instance.attemptCount)
         assertNull(instance.reservationId)
@@ -2480,6 +3347,38 @@ class InstanceOperationServiceTest {
             operationProperties = operationProperties,
             clock = clock,
             tx = tx,
+        )
+
+    // 같은 조건의 후보를 여러 개 돌려주는 브로커, reject가 예외를 주면 그 예약을 거절한다
+    private fun candidatesBroker(
+        candidateIds: List<String>,
+        reject: (BrokerReservationRequest) -> Exception?,
+    ): BrokerClient {
+        val delegate = FakeBrokerClient()
+        return object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                val response = delegate.getCandidates(request)
+                val template = response.candidates.single()
+                return response.copy(candidates = candidateIds.map { template.copy(candidateId = it) })
+            }
+
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                reject(request)?.let { throw it }
+                return BrokerReservationResponse(
+                    reservationId = "reservation-${request.candidateId}",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.HELD,
+                    expiresAt = null,
+                )
+            }
+        }
+    }
+
+    // HttpBrokerClient가 409 INSUFFICIENT_CAPACITY로 만드는 예외와 같은 모양이다
+    private fun capacityRejection(request: BrokerReservationRequest): BrokerRejectedException =
+        BrokerRejectedException(
+            brokerCode = FakeBrokerClient.INSUFFICIENT_CAPACITY_CODE,
+            adminDetail = "requestId=${request.requestId}, status=409, code=INSUFFICIENT_CAPACITY",
         )
 
     // 생성 operation이 계속 진행 중이라고 답하는 runtime

@@ -261,6 +261,33 @@ class InstanceOperationIntegrationTest {
         return found.groupingBy { it.status }.eachCount()
     }
 
+    // 마지막 자리에 만든 예약의 응답을 받지 못하면 다음 후보 조회에 그 후보가 없다, 브로커가 이 인스턴스의 예약까지 빼고 자리를 센다
+    // 결과를 모르는 요청이 실제 DB에 저장되고, 다음 주기가 그것을 읽어 같은 예약을 돌려받는지 확인
+    @Test
+    fun `worker recovers reservation on the last seat after lost response`() {
+        fakeBroker.capacity = 1
+        fakeBroker.lostReservationResponses = 1
+        val saved = instanceRepository.saveAndFlush(newRequested())
+        val worker = newWorker()
+
+        worker.progressOperations()
+
+        val afterLost = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.SCHEDULING, afterLost.status)
+        assertNotNull(afterLost.pendingReservation)
+        // 재시도 시각을 기다리지 않게 당긴다
+        afterLost.nextPollAt = Instant.now().minusSeconds(1)
+        instanceRepository.saveAndFlush(afterLost)
+
+        worker.progressOperations()
+
+        val found = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertTrue(found.status in setOf(InstanceStatus.PROVISIONING, InstanceStatus.RUNNING), "status=${found.status}")
+        assertEquals("reservation-${saved.instanceId}", found.reservationId)
+        assertNull(found.pendingReservation)
+        assertTrue(fakeBroker.releasedReservations.isEmpty())
+    }
+
     private fun pool(size: Int): ExecutorService =
         Executors.newFixedThreadPool(size).also { pools += it }
 

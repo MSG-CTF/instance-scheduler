@@ -99,6 +99,7 @@ class HttpBrokerClient(
             adminDetail = "requestId=$context, status=${exception.statusCode.value()}, code=$code" +
                 ", body=${exception.responseBodyAsString.take(200)}",
             cause = exception,
+            httpStatus = exception.statusCode.value(),
         )
     }
 }
