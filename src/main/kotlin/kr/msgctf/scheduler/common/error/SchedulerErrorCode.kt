@@ -75,6 +75,12 @@ enum class SchedulerErrorCode(
         HttpStatus.NOT_FOUND,
         "인스턴스를 찾을 수 없습니다.",
     ),
+    // 백엔드가 소유자를 먼저 확인하므로 정상이면 여기 안 걸린다
+    // 걸렸으면 두 쪽 DB가 다르거나 백엔드가 id를 잘못 보낸 것이다, 찾아야 하니 404로 감추지 않는다
+    INSTANCE_NOT_OWNED(
+        HttpStatus.FORBIDDEN,
+        "본인 인스턴스가 아닙니다.",
+    ),
     CLEANUP_RETRY_EXCEEDED(
         HttpStatus.INTERNAL_SERVER_ERROR,
         "인스턴스 정리 중 문제가 발생했습니다.",

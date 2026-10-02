@@ -11,12 +11,15 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEvent
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceCommand
 import kr.msgctf.scheduler.instance.dto.InstanceResult
 import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import org.hibernate.exception.ConstraintViolationException
@@ -30,6 +33,7 @@ class InstanceSchedulerService(
     private val instancePolicyService: InstancePolicyService,
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
+    private val instanceEventRepository: InstanceEventRepository,
     private val containerSpecCodec: ContainerSpecCodec,
     private val serviceEndpointCodec: ServiceEndpointCodec,
     private val clock: Clock,
@@ -77,6 +81,13 @@ class InstanceSchedulerService(
                 expiresAt = now.plusMinutesOrReject(command.ttlMinutes),
                 hardExpiresAt = now.plusMinutesOrReject(command.hardTimeoutMinutes),
             ),
+        )
+        replacedInstanceId?.let { recordReplaced(it, instance.instanceId, command.userId) }
+        recordEvent(
+            instanceId = instance.instanceId,
+            toStatus = InstanceStatus.REQUESTED,
+            detail = requester(command.userId) +
+                (replacedInstanceId?.let { ", replacedInstanceId=$it" } ?: ""),
         )
 
         return InstanceResult.from(
@@ -146,10 +157,18 @@ class InstanceSchedulerService(
                 errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
                 adminDetail = "instanceId=${command.instanceId}",
             )
+        requireOwner(instance, command.userId, "operation=delete, deleteReason=${command.reason}")
 
+        val previousStatus = instance.status
         instance.action = InstanceAction.DELETE
         instance.deleteReason = command.reason
         move(instance, InstanceStatus.STOPPING)
+        recordEvent(
+            instanceId = instance.instanceId,
+            fromStatus = previousStatus,
+            toStatus = InstanceStatus.STOPPING,
+            detail = "${requester(command.userId)}, deleteReason=${command.reason}",
+        )
 
         return InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
     }
@@ -165,6 +184,7 @@ class InstanceSchedulerService(
                 errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
                 adminDetail = "instanceId=${command.instanceId}",
             )
+        requireOwner(previous, command.userId, "operation=reset")
 
         // 초기화는 실행 중인 인스턴스에만 의미가 있다
         if (previous.status != InstanceStatus.RUNNING) {
@@ -244,6 +264,12 @@ class InstanceSchedulerService(
                 hardExpiresAt = previous.hardExpiresAt,
             ),
         )
+        recordReplaced(replacedInstanceId, instance.instanceId, command.userId)
+        recordEvent(
+            instanceId = instance.instanceId,
+            toStatus = InstanceStatus.REQUESTED,
+            detail = "${requester(command.userId)}, resetFrom=${previous.instanceId}",
+        )
 
         return InstanceResult.from(
             instance = instance,
@@ -261,6 +287,7 @@ class InstanceSchedulerService(
                 errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
                 adminDetail = "instanceId=${command.instanceId}",
             )
+        requireOwner(instance, command.userId, "operation=extend")
 
         // 연장은 실행 중인 인스턴스에만 의미가 있다
         if (instance.status != InstanceStatus.RUNNING) {
@@ -270,6 +297,7 @@ class InstanceSchedulerService(
             )
         }
 
+        val previousExpiresAt = instance.expiresAt
         // 이미 만료 시각이 지난 인스턴스는 현재 시각을 기준으로 잡아 연장 직후 재만료를 막는다
         val base = maxOf(clock.instant(), instance.expiresAt)
         val extended = base.plusMinutesWithinHardTimeout(
@@ -281,8 +309,62 @@ class InstanceSchedulerService(
         // 상태는 그대로 두고 만료 시각과 수행한 작업만 갱신한다
         instance.expiresAt = extended
         instance.action = InstanceAction.EXTEND
+        recordEvent(
+            instanceId = instance.instanceId,
+            toStatus = instance.status,
+            eventType = InstanceEventType.EXTENDED,
+            detail = "${requester(command.userId)}, previousExpiresAt=$previousExpiresAt, extendedTo=$extended",
+        )
 
         return InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
+    }
+
+    // API로 들어온 요청을 이벤트로 남긴다, 워커가 남기는 이벤트는 InstanceOperationService에 따로 있다
+    // 같은 트랜잭션이라 이벤트 저장이 실패하면 삭제나 연장도 같이 되돌린다
+    // 이 이벤트가 소유권 검사를 건너뛴 유일한 기록이라 저장 실패를 삼키지 않는다
+    private fun recordEvent(
+        instanceId: UUID,
+        toStatus: InstanceStatus,
+        detail: String,
+        fromStatus: InstanceStatus? = null,
+        eventType: InstanceEventType = InstanceEventType.STATE_CHANGED,
+    ) {
+        instanceEventRepository.save(
+            InstanceEvent(
+                instanceId = instanceId,
+                eventType = eventType,
+                fromStatus = fromStatus,
+                toStatus = toStatus,
+                adminDetail = detail,
+            ),
+        )
+    }
+
+    // 교체로 정리 대기에 들어간 이전 행에 남긴다, 새 행 id를 알아야 해서 새 행을 저장한 뒤 부른다
+    // replaceOwnInstance가 RUNNING만 받으므로 fromStatus를 RUNNING으로 두었다, 그쪽이 다른 상태도 받게 되면 여기도 바꾼다
+    private fun recordReplaced(previousInstanceId: UUID, newInstanceId: UUID, userId: UUID?) {
+        recordEvent(
+            instanceId = previousInstanceId,
+            fromStatus = InstanceStatus.RUNNING,
+            toStatus = InstanceStatus.CLEANUP_PENDING,
+            detail = "${requester(userId)}, replacedBy=$newInstanceId",
+        )
+    }
+
+    // 이벤트에 남기는 요청자 표기, 백엔드가 안 보냈으면 none으로 남긴다
+    // admin이라 적지 않는다, 지금은 참가자 경로도 안 보내서 그렇게 적으면 참가자 행동이 관리자 행동으로 남는다
+    private fun requester(userId: UUID?): String = "requestedBy=${userId ?: "none"}"
+
+    // 요청한 사람이 있으면 소유자와 대조한다, 없으면 검사하지 않는다
+    // 지금은 백엔드가 참가자 요청에도 관리자 요청에도 user_id를 안 보낸다, 없다고 거절하면 둘 다 막힌다
+    // 상태 검사보다 먼저 부른다, 남의 인스턴스면 상태가 무엇이든 볼 일이 없다
+    // detail은 어느 API에서 걸렸는지 운영자가 바로 보게 앞에 붙인다
+    private fun requireOwner(instance: Instance, userId: UUID?, detail: String) {
+        if (userId == null || userId == instance.userId) return
+        throw SchedulerException(
+            errorCode = SchedulerErrorCode.INSTANCE_NOT_OWNED,
+            adminDetail = "$detail, instanceId=${instance.instanceId}, requestedBy=$userId, ownerId=${instance.userId}",
+        )
     }
 
     // 분을 초로 바꾸는 곱셈은 Long을 넘으면 조용히 음수로 감긴다

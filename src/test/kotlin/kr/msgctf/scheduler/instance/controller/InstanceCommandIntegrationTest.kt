@@ -2,6 +2,7 @@ package kr.msgctf.scheduler.instance.controller
 
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -29,6 +30,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.context.annotation.Import
 import org.springframework.http.MediaType
 import org.springframework.test.context.ActiveProfiles
+import org.hamcrest.Matchers.containsString
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.delete
 import org.springframework.test.web.servlet.get
@@ -688,9 +690,9 @@ class InstanceCommandIntegrationTest {
             }
     }
 
-    // 사용자 요청 외의 삭제 사유는 조용히 바꾸지 않고 거절한다
+    // 관리자 강제 종료 사유는 받아서 행에 남긴다
     @Test
-    fun `delete api rejects delete reason other than user requested`() {
+    fun `delete api accepts admin forced reason`() {
         // given
         val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(500))).instanceId
 
@@ -698,6 +700,28 @@ class InstanceCommandIntegrationTest {
         mockMvc.delete("/api/instances/$instanceId") {
             contentType = MediaType.APPLICATION_JSON
             content = """{ "delete_reason": "ADMIN_FORCED" }"""
+        }.andExpect {
+            status { isAccepted() }
+            jsonPath("$.data.status") { value("STOPPING") }
+        }
+
+        // then
+        val saved = instanceRepository.findById(instanceId).orElse(null)
+
+        assertNotNull(saved)
+        assertEquals(RuntimeDeleteReason.ADMIN_FORCED, saved.deleteReason)
+    }
+
+    // 정리 워커만 쓰는 사유는 조용히 바꾸지 않고 거절한다
+    @Test
+    fun `delete api rejects internal delete reason`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(500))).instanceId
+
+        // when & then
+        mockMvc.delete("/api/instances/$instanceId") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "delete_reason": "TTL_EXPIRED" }"""
         }.andExpect {
             status { isBadRequest() }
             jsonPath("$.code") { value("INVALID_REQUEST") }
@@ -908,6 +932,146 @@ class InstanceCommandIntegrationTest {
     }
 
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
+
+    // 요청 본문의 user_id 가 소유자와 다르면 403 으로 거절하고 행은 그대로인지 확인
+    @Test
+    fun `delete api rejects request from another user`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(510))).instanceId
+
+        // when & then
+        mockMvc.delete("/api/instances/$instanceId") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "user_id": "${UUID.randomUUID()}" }"""
+        }.andExpect {
+            status { isForbidden() }
+            jsonPath("$.code") { value("INSTANCE_NOT_OWNED") }
+        }
+
+        val saved = instanceRepository.findById(instanceId).orElseThrow()
+        assertEquals(InstanceStatus.RUNNING, saved.status)
+    }
+
+    // 소유자의 user_id 를 실으면 접수되는지 확인
+    @Test
+    fun `delete api accepts request from the owner`() {
+        // given
+        val owner = UUID.randomUUID()
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(511), userId = owner)).instanceId
+
+        // when & then
+        mockMvc.delete("/api/instances/$instanceId") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "user_id": "$owner" }"""
+        }.andExpect {
+            status { isAccepted() }
+            jsonPath("$.data.status") { value("STOPPING") }
+        }
+    }
+
+    @Test
+    fun `reset api rejects request from another user`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(512))).instanceId
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/reset") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "user_id": "${UUID.randomUUID()}" }"""
+        }.andExpect {
+            status { isForbidden() }
+            jsonPath("$.code") { value("INSTANCE_NOT_OWNED") }
+        }
+
+        val saved = instanceRepository.findById(instanceId).orElseThrow()
+        assertEquals(InstanceStatus.RUNNING, saved.status)
+    }
+
+    @Test
+    fun `extend api rejects request from another user`() {
+        // given
+        val instance = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(513)))
+
+        // when & then
+        mockMvc.post("/api/instances/${instance.instanceId}/extend") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "extend_minutes": 30, "user_id": "${UUID.randomUUID()}" }"""
+        }.andExpect {
+            status { isForbidden() }
+            jsonPath("$.code") { value("INSTANCE_NOT_OWNED") }
+        }
+
+        // DB 가 마이크로초까지만 저장해 나노초 비교는 어긋난다, 연장되면 30분이 늘어나므로 초 단위면 충분하다
+        val saved = instanceRepository.findById(instance.instanceId).orElseThrow()
+        val seconds = ChronoUnit.SECONDS
+        assertEquals(instance.expiresAt.truncatedTo(seconds), saved.expiresAt.truncatedTo(seconds))
+    }
+
+    // API 로 접수한 삭제가 요청자를 담은 이벤트로 남고 events API 로 보이는지 확인
+    @Test
+    fun `delete api records event with requester`() {
+        // given
+        val owner = UUID.randomUUID()
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(514), userId = owner)).instanceId
+
+        // when
+        mockMvc.delete("/api/instances/$instanceId") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "user_id": "$owner" }"""
+        }.andExpect { status { isAccepted() } }
+
+        // then
+        mockMvc.get("/api/instances/$instanceId/events")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.length()") { value(1) }
+                jsonPath("$.data[0].event_type") { value("STATE_CHANGED") }
+                jsonPath("$.data[0].from_status") { value("RUNNING") }
+                jsonPath("$.data[0].to_status") { value("STOPPING") }
+                jsonPath("$.data[0].admin_detail") { value(containsString("requestedBy=$owner")) }
+            }
+    }
+
+    // 백엔드가 실제로 보내는 빈 객체 본문도 받는지 확인, 필드가 하나뿐인 요청 타입은 Jackson 이 다르게 다룰 수 있다
+    @Test
+    fun `reset api accepts empty json body`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(516))).instanceId
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/reset") {
+            contentType = MediaType.APPLICATION_JSON
+            content = "{}"
+        }.andExpect {
+            status { isAccepted() }
+            jsonPath("$.data.status") { value("REQUESTED") }
+        }
+    }
+
+    // 새 이벤트 타입 EXTENDED 가 DB 저장과 JSON 응답을 그대로 통과하는지 확인
+    @Test
+    fun `extend api records extended event`() {
+        // given
+        val owner = UUID.randomUUID()
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(515), userId = owner)).instanceId
+
+        // when
+        mockMvc.post("/api/instances/$instanceId/extend") {
+            contentType = MediaType.APPLICATION_JSON
+            content = """{ "extend_minutes": 30, "user_id": "$owner" }"""
+        }.andExpect { status { isOk() } }
+
+        // then
+        mockMvc.get("/api/instances/$instanceId/events")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.data.length()") { value(1) }
+                jsonPath("$.data[0].event_type") { value("EXTENDED") }
+                jsonPath("$.data[0].from_status") { value(null as Any?) }
+                jsonPath("$.data[0].to_status") { value("RUNNING") }
+                jsonPath("$.data[0].admin_detail") { value(containsString("extendedTo=")) }
+            }
+    }
 
     private fun runningInstance(
         teamId: UUID,
