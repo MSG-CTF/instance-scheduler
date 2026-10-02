@@ -748,11 +748,18 @@ class InstanceOperationServiceTest {
         assertEquals("written-by-another-node", instance.pendingReservation)
     }
 
-    // 다시 보낸 요청이 이유 코드가 있는 4xx로 거절되면 저장한 요청을 지우고 같은 주기에 후보를 새로 골라 예약하는지 확인
-    // 브로커는 같은 요청이면 다른 검사보다 먼저 처음 만든 예약을 돌려준다, 그래서 거절은 예약이 없다는 뜻이다
+    // 다시 보낸 요청이 예약을 찾은 뒤에 나오는 코드로 거절되면 저장한 요청을 지우고 같은 주기에 후보를 새로 골라 예약하는지 확인
+    // 브로커는 인증과 형식 검사를 지나면 같은 요청에 처음 만든 예약을 먼저 돌려준다, 그래서 이 거절들은 이 요청으로 돌려받을 예약이 없다는 뜻이다
     @Test
     fun `forgets pending reservation for every rejection meaning no reservation was made`() {
-        listOf("INSUFFICIENT_CAPACITY", "INSTANCE_ALREADY_RESERVED", "REQUEST_ID_REUSED", "CANDIDATE_NOT_FOUND").forEach { code ->
+        listOf(
+            "INSUFFICIENT_CAPACITY" to 409,
+            "INSTANCE_ALREADY_RESERVED" to 409,
+            "REQUEST_ID_REUSED" to 409,
+            "CANDIDATE_UNAVAILABLE" to 409,
+            "RESERVATION_CONFLICT" to 409,
+            "CANDIDATE_NOT_FOUND" to 404,
+        ).forEach { (code, status) ->
             // given
             val repository = TestInstanceRepository()
             val instance = repository.save(newRequested())
@@ -770,7 +777,8 @@ class InstanceOperationServiceTest {
                         round == 1 -> throw IllegalStateException("read timed out")
                         request.candidateId == "candidate-a" -> throw BrokerRejectedException(
                             brokerCode = code,
-                            adminDetail = "status=409, code=$code",
+                            adminDetail = "status=$status, code=$code",
+                            httpStatus = status,
                         )
                     }
                     return BrokerReservationResponse(
@@ -793,6 +801,169 @@ class InstanceOperationServiceTest {
             assertEquals("reservation-candidate-b", instance.reservationId, "code=$code")
             assertNull(instance.pendingReservation, "code=$code")
         }
+    }
+
+    // 브로커는 인증과 요청 형식을 먼저 검사하고 그다음에 같은 request_id의 예약을 찾는다
+    // 그래서 다시 보낸 요청이 401이나 422로 거절돼도 처음 요청의 예약이 없다는 뜻이 아니다
+    // 저장한 요청을 유지하고, 인증이 회복되면 후보 목록이 비어 있어도 그 예약을 돌려받는지 확인
+    @Test
+    fun `keeps pending reservation when replay is rejected before the broker looks it up`() {
+        listOf(
+            "INVALID_SCHEDULER_TOKEN" to 401,
+            "SCHEDULER_TOKEN_REQUIRED" to 401,
+            "VALIDATION_ERROR" to 422,
+            // 브로커가 나중에 예약을 찾기 전 단계에 409를 새로 만들어도 지우지 않는다, 아는 코드만 지운다
+            "UNKNOWN_CONFLICT" to 409,
+        ).forEach { (code, status) ->
+                // given: 마지막 자리에 만든 예약의 응답을 받지 못했고, 다음 후보 조회는 빈다
+                val repository = TestInstanceRepository()
+                val instance = repository.save(newRequested())
+                var round = 1
+                val delegate = FakeBrokerClient()
+                val broker = object : BrokerClient by delegate {
+                    override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                        val response = delegate.getCandidates(request)
+                        return if (round == 1) response
+                        else response.copy(status = BrokerCandidateStatus.NO_CANDIDATES, candidates = emptyList())
+                    }
+
+                    override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                        when (round) {
+                            1 -> throw IllegalStateException("read timed out")
+                            2 -> throw BrokerRejectedException(
+                                brokerCode = code,
+                                adminDetail = "status=$status, code=$code",
+                                httpStatus = status,
+                            )
+                        }
+                        return BrokerReservationResponse(
+                            reservationId = "reservation-held",
+                            requestId = request.requestId,
+                            status = BrokerReservationStatus.HELD,
+                            expiresAt = null,
+                        )
+                    }
+                }
+                val service = newService(repository, brokerClient = broker)
+                service.progressRequested(instance.instanceId)
+
+                // when: 인증이 잠깐 틀어진 주기
+                round = 2
+                service.progressRequested(instance.instanceId)
+
+                // then
+                assertEquals(InstanceStatus.SCHEDULING, instance.status, "code=$code")
+                assertNotNull(instance.pendingReservation, "code=$code")
+
+                // when: 인증이 회복된 주기
+                round = 3
+                service.progressRequested(instance.instanceId)
+
+                // then
+                assertEquals(InstanceStatus.PROVISIONING, instance.status, "code=$code")
+                assertEquals("reservation-held", instance.reservationId, "code=$code")
+            }
+    }
+
+    // 다시 보낸 요청이 HELD로 돌아왔는데 노드 주소가 저장한 값과 다르면, 브로커가 준 새 주소로 생성을 요청하는지 확인
+    // 처음 요청이 브로커에 닿지 않았다면 다시 보낸 요청이 새 예약을 만들고, 그 사이 노드 주소가 바뀌었을 수 있다
+    @Test
+    fun `creates on the target the broker reports when replay returns a moved node`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var round = 1
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                if (round == 1) throw IllegalStateException("connection refused")
+                return BrokerReservationResponse(
+                    reservationId = "reservation-new",
+                    requestId = request.requestId,
+                    status = BrokerReservationStatus.HELD,
+                    expiresAt = null,
+                    targetId = "cluster-moved",
+                )
+            }
+        }
+        var captured: RuntimeCreateRequest? = null
+        val runtimeDelegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+        service.progressRequested(instance.instanceId)
+        assertNull(captured)
+
+        // when
+        round = 2
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("cluster-moved", instance.runtimeTargetId)
+        assertEquals("cluster-moved", captured!!.target.targetId)
+    }
+
+    // 후보를 조회한 뒤 예약하기 전에 노드 주소가 바뀌면, 예약 응답의 새 주소로 생성을 요청하는지 확인
+    @Test
+    fun `creates on the target the broker reports for a fresh reservation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+                delegate.createReservation(request).copy(targetId = "cluster-moved")
+        }
+        var captured: RuntimeCreateRequest? = null
+        val runtimeDelegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals("cluster-moved", instance.runtimeTargetId)
+        assertEquals("cluster-moved", captured!!.target.targetId)
+    }
+
+    // 예약 응답의 노드 주소가 비어 있으면 고른 후보의 주소를 그대로 쓰는지 확인, 빈 주소로 생성을 요청하지 않는다
+    @Test
+    fun `keeps the chosen target when the reservation reports a blank one`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+                delegate.createReservation(request).copy(targetId = " ")
+        }
+        var captured: RuntimeCreateRequest? = null
+        val runtimeDelegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by runtimeDelegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                captured = request
+                return runtimeDelegate.submitCreate(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals("cluster-main", instance.runtimeTargetId)
+        assertEquals("cluster-main", captured!!.target.targetId)
     }
 
     // 다시 보낸 요청에 HELD가 아닌 예약이 오면 이미 끝난 예약이다, 저장한 요청을 지우고 후보를 새로 고르는지 확인

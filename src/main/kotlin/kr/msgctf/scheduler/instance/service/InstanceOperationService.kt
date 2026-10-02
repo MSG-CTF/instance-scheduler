@@ -93,7 +93,7 @@ class InstanceOperationService(
             spec
         } ?: return
 
-        val (placement, reservation, candidateSummary) = obtainReservation(instanceId, spec) ?: return
+        val (chosenPlacement, reservation, candidateSummary) = obtainReservation(instanceId, spec) ?: return
 
         // 만료나 반납된 예약의 재사용을 막는다, HELD가 아니면 선점된 용량이 없다
         if (reservation.status != BrokerReservationStatus.HELD) {
@@ -106,6 +106,9 @@ class InstanceOperationService(
             )
             return
         }
+
+        // 노드 주소는 예약 응답의 값을 쓴다, 후보를 조회하거나 요청을 저장한 뒤에 주소가 바뀌었을 수 있다
+        val placement = reservedPlacement(instanceId, chosenPlacement, reservation)
 
         log.info(
             "broker candidate selected: instanceId={}, candidateId={}, provider={}, region={}, target={}",
@@ -145,7 +148,8 @@ class InstanceOperationService(
                     eventType = InstanceEventType.STATE_CHANGED,
                     fromStatus = InstanceStatus.SCHEDULING,
                     toStatus = InstanceStatus.PROVISIONING,
-                    adminDetail = "$candidateSummary, reservation=${reservation.reservationId}",
+                    adminDetail = "$candidateSummary, reservation=${reservation.reservationId}" +
+                        ", target=${placement.runtimeTargetId}",
                 ),
             )
             RuntimeTarget(runtimeType = placement.runtimeType, targetId = placement.runtimeTargetId)
@@ -952,8 +956,9 @@ class InstanceOperationService(
     // 브로커는 같은 요청을 받으면 남은 자리와 상관없이 처음 만든 예약을 돌려준다
     // 후보를 새로 고르면 안 된다, 그 예약이 마지막 자리였다면 브로커가 그 후보를 목록에서 뺀다
     // HELD가 오면 그 예약을 쓴다
-    // 확실한 거절이나 HELD가 아닌 예약이 오면 쓸 수 있는 예약이 없다, 저장한 요청을 지우고 후보를 새로 고른다
-    // 통신 실패, 5xx, 이유 코드가 없는 응답이면 여전히 결과를 모른다, 요청을 그대로 두고 재시도로 넘긴다
+    // 예약을 찾은 뒤에 나오는 거절이나 HELD가 아닌 예약이 오면 돌려받을 예약이 없다, 저장한 요청을 지우고 후보를 새로 고른다
+    // 그 밖의 거절(401, 422 등), 통신 실패, 5xx, 이유 코드가 없는 응답이면 여전히 결과를 모른다, 요청을 그대로 두고 재시도로 넘긴다
+    // 브로커는 인증과 요청 형식을 같은 request_id의 예약을 찾기 전에 검사해서, 이런 거절은 예약이 없다는 뜻이 아니다
     private fun replayPendingReservation(
         instanceId: UUID,
         spec: WorkloadSpec,
@@ -964,7 +969,7 @@ class InstanceOperationService(
                 reservationRequest(instanceId, spec, pending.requestId, pending.placement.candidateId),
             )
         } catch (exception: BrokerRejectedException) {
-            if (exception.definite) {
+            if (exception.nothingToRecover) {
                 log.info(
                     "pending reservation was not made, choosing again: instanceId={}, requestId={}, code={}",
                     instanceId,
@@ -990,6 +995,25 @@ class InstanceOperationService(
             reservation.status,
         )
         return ReplayOutcome.Gone
+    }
+
+    // 예약 응답의 노드 주소가 고른 후보의 주소와 다르면 응답의 주소로 바꾼다
+    // 예전 주소로 런타임에 생성을 요청하면 브로커가 자리를 잡은 노드와 다른 곳에 만들거나 실패한다
+    // 응답에 주소가 없거나 비어 있으면 고른 후보의 주소를 그대로 쓴다
+    private fun reservedPlacement(
+        instanceId: UUID,
+        placement: Placement,
+        reservation: BrokerReservationResponse,
+    ): Placement {
+        val reservedTarget = reservation.targetId
+        if (reservedTarget.isNullOrBlank() || reservedTarget == placement.runtimeTargetId) return placement
+        log.warn(
+            "reserved node moved, using the address from the reservation: instanceId={}, chosen={}, reserved={}",
+            instanceId,
+            placement.runtimeTargetId,
+            reservedTarget,
+        )
+        return placement.copy(runtimeTargetId = reservedTarget)
     }
 
     // 다시 보낸 요청과 저장된 값이 같을 때만 지운다

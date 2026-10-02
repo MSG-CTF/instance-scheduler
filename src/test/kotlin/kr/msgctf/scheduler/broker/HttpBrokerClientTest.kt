@@ -237,6 +237,7 @@ class HttpBrokerClientTest {
         assertEquals("8f0e1362-3339-4a3f-9dc7-c60966f72487", response.reservationId)
         assertEquals(BrokerReservationStatus.HELD, response.status)
         assertEquals(Instant.parse("2026-08-21T11:33:54.710162Z"), response.expiresAt)
+        assertEquals("cd33055d-9467-4498-8f17-4c4fee6344df", response.targetId)
     }
 
     // 2026-09-07 계약부터 확정과 반납은 본문이 필수다, 경로의 id와 본문의 reservation_id가 같아야 한다
