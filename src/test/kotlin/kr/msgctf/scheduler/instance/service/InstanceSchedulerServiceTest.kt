@@ -18,6 +18,7 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
+import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -63,6 +64,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(InstanceAction.CREATE, saved.action)
         assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
+        assertNull(saved.healthcheck)
         assertEquals(command.registryRevision, saved.registryRevision)
         assertEquals(command.isolationProfile, saved.isolationProfile)
         assertEquals(command.architecture, saved.architecture)
@@ -319,6 +321,75 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.hardExpiresAt, fresh.hardExpiresAt)
         assertNull(fresh.runtimeWorkloadId)
         assertNull(fresh.serviceUrl)
+    }
+
+    @Test
+    fun `stores healthcheck on create even when forwarding is disabled`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceSchedulerService = newService(instanceRepository = newInstanceRepository(savedInstances))
+        val healthcheck = Healthcheck(container = "challenge", port = 8080, path = "/healthz")
+
+        // when
+        instanceSchedulerService.createInstance(newCommand(teamId = testUuid(201), healthcheck = healthcheck))
+
+        // then
+        assertEquals(healthcheck, HealthcheckCodec().decode(savedInstances.single().healthcheck!!))
+    }
+
+    @Test
+    fun `carries stored healthcheck into reset replacement`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val previous = instanceRepository.save(
+            newRunningInstance().apply { healthcheck = """{"container":"challenge","port":8080,"path":"/healthz"}""" },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = previous.instanceId))
+
+        // then
+        val fresh = instanceRepository.savedInstances.single { it.status == InstanceStatus.REQUESTED }
+        assertEquals(previous.healthcheck, fresh.healthcheck)
+    }
+
+    @Test
+    fun `rejects reset when stored healthcheck is unreadable and keeps the instance`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(newRunningInstance().apply { healthcheck = "not-json" })
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    @Test
+    fun `rejects reset when stored healthcheck breaks rules`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { healthcheck = """{"container":"challenge","port":9090,"path":"/healthz"}""" },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.INTERNAL_ERROR, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
     }
 
     // 실행 중이 아닌 인스턴스는 초기화 대상이 아님을 확인
@@ -879,6 +950,7 @@ class InstanceSchedulerServiceTest {
             transitionService = InstanceStateTransitionService(),
             instanceRepository = instanceRepository,
             containerSpecCodec = ContainerSpecCodec(),
+            healthcheckCodec = HealthcheckCodec(),
             serviceEndpointCodec = ServiceEndpointCodec(),
             clock = fixedClock(),
         )
@@ -889,12 +961,14 @@ class InstanceSchedulerServiceTest {
         hardTimeoutMinutes: Long = 180,
         userId: UUID = testUserId,
         containers: List<ContainerSpec> = testContainers(),
+        healthcheck: Healthcheck? = null,
     ): CreateInstanceCommand =
         CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
             challengeId = testUuid(10),
             containers = containers,
+            healthcheck = healthcheck,
             registryRevision = 3,
             // 기본값이 아닌 값을 써야 저장 매핑이 실제로 도는지 확인된다
             isolationProfile = IsolationProfile.PWN,

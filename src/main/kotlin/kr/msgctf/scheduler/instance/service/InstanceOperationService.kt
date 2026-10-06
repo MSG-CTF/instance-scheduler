@@ -21,9 +21,11 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
+import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -39,6 +41,7 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeEndpoint
+import kr.msgctf.scheduler.runtime.RuntimeHealthcheck
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeOperationType
@@ -63,7 +66,9 @@ class InstanceOperationService(
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
     private val containerSpecCodec: ContainerSpecCodec,
+    private val healthcheckCodec: HealthcheckCodec,
     private val serviceEndpointCodec: ServiceEndpointCodec,
+    private val policyProperties: InstancePolicyProperties,
     private val cleanupProperties: CleanupProperties,
     private val operationProperties: OperationProperties,
     private val clock: Clock,
@@ -256,6 +261,11 @@ class InstanceOperationService(
                                     },
                             )
                         },
+                        healthcheck = spec.healthcheck
+                            ?.takeIf { policyProperties.healthcheckEnabled }
+                            ?.let { check ->
+                                RuntimeHealthcheck(container = check.container, port = check.port, path = check.path)
+                            },
                         resourceLimits = RuntimeResourceLimits(
                             cpuMillicores = spec.resourceProfile.cpuMillicores,
                             memoryMib = spec.resourceProfile.memoryMib,
@@ -1277,13 +1287,19 @@ class InstanceOperationService(
             log.warn("stored containers unreadable: instanceId={}", instance.instanceId, exception)
             return null
         }
+        val healthcheck = try {
+            instance.healthcheck?.let { healthcheckCodec.decode(it) }
+        } catch (exception: Exception) {
+            log.warn("stored healthcheck unreadable: instanceId={}", instance.instanceId, exception)
+            return null
+        }
         val resourceProfile = ResourceProfile(
             cpuMillicores = instance.cpuMillicores ?: return null,
             memoryMib = instance.memoryMib ?: return null,
             ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
         )
         // 규칙에 어긋난 스펙을 그대로 보내면 브로커 예약까지 쓰고 런타임에서야 거절된다
-        ContainerSpecRules.violation(containers, instance.isolationProfile, resourceProfile)
+        ContainerSpecRules.violation(containers, instance.isolationProfile, resourceProfile, healthcheck)
             ?.let { reason ->
                 log.warn("stored spec invalid: instanceId={}, {}", instance.instanceId, reason)
                 return null
@@ -1292,6 +1308,7 @@ class InstanceOperationService(
             teamId = instance.teamId,
             challengeId = instance.challengeId,
             containers = containers,
+            healthcheck = healthcheck,
             isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
             resourceProfile = resourceProfile,
@@ -1347,6 +1364,7 @@ private data class WorkloadSpec(
     val teamId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
+    val healthcheck: Healthcheck?,
     val isolationProfile: IsolationProfile,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,

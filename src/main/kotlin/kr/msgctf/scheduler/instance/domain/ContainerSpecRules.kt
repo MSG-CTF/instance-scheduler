@@ -47,13 +47,18 @@ object ContainerSpecRules {
     // 문제 이미지는 전부 GHCR로 배포되므로 다른 저장소 주소는 받지 않는다
     private const val IMAGE_REGISTRY_PREFIX = "ghcr.io/"
 
+    // 실제 healthcheck 경로는 /health처럼 짧다, 상한은 여유 있게 둔다
+    const val MAX_HEALTHCHECK_PATH_LENGTH = 1024
+
     // 위반이 없으면 null, 있으면 원인 설명을 돌려준다
     // 공개 규칙이 격리 정책마다 달라 정책을 함께 받는다
     // 자원 규칙은 컨테이너 수에 걸려 있어 자원 프로필도 함께 받는다
+    // healthcheck는 컨테이너 이름과 포트로 검사해서 함께 받는다
     fun violation(
         containers: List<ContainerSpec>,
         isolationProfile: IsolationProfile,
         resourceProfile: ResourceProfile,
+        healthcheck: Healthcheck? = null,
     ): String? {
         if (containers.isEmpty()) {
             return "containers is empty"
@@ -100,10 +105,37 @@ object ContainerSpecRules {
         if (exposed.isEmpty()) {
             return "public ports=0, required=at least 1"
         }
-        return when (isolationProfile) {
+        val exposureViolation = when (isolationProfile) {
             IsolationProfile.WEB -> webViolation(exposed)
             IsolationProfile.PWN -> pwnViolation(exposed)
         }
+        if (exposureViolation != null) {
+            return exposureViolation
+        }
+        return healthcheck?.let { healthcheckViolation(containers, it) }
+    }
+
+    // 검사는 클러스터 안에서 하므로 공개하지 않은 포트도 쓸 수 있다
+    private fun healthcheckViolation(containers: List<ContainerSpec>, healthcheck: Healthcheck): String? {
+        val container = containers.firstOrNull { it.name == healthcheck.container }
+            ?: return "healthcheck container=${healthcheck.container}, reason=container does not exist"
+        if (healthcheck.port !in container.ports) {
+            return "healthcheck container=${healthcheck.container}, port=${healthcheck.port}, " +
+                "reason=port not declared on container"
+        }
+        // 경로를 사유에 넣기 전에 길이와 문자부터 본다, 긴 값이나 줄바꿈이 로그에 남지 않게 한다
+        val path = healthcheck.path
+        if (path.length > MAX_HEALTHCHECK_PATH_LENGTH) {
+            return "healthcheck path length=${path.length}, max=$MAX_HEALTHCHECK_PATH_LENGTH"
+        }
+        // 공백이나 제어 문자가 있으면 HTTP 요청이 깨진다
+        if (path.any { it.isWhitespace() || it.isISOControl() }) {
+            return "healthcheck reason=path must not contain whitespace or control characters"
+        }
+        if (!path.startsWith('/')) {
+            return "healthcheck path=$path, reason=must start with /"
+        }
+        return null
     }
 
     // 런타임 validImmutableImageReference와 같은 조건을 본다

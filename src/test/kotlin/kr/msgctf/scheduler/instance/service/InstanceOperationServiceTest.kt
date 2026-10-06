@@ -32,6 +32,7 @@ import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
@@ -46,6 +47,7 @@ import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
+import kr.msgctf.scheduler.runtime.RuntimeHealthcheck
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeOperationType
@@ -166,6 +168,90 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.FAILED, instance.status)
         assertEquals(1, events.saved.size)
         assertNull(instance.runtimeOperationId)
+    }
+
+    @Test
+    fun `sends stored healthcheck to runtime when enabled`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { healthcheck = HEALTHCHECK_JSON })
+        val runtimeClient = CapturingRuntimeClient()
+        val service = newService(
+            repository,
+            runtimeClient = runtimeClient,
+            policyProperties = InstancePolicyProperties(healthcheckEnabled = true),
+        )
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(
+            RuntimeHealthcheck(container = "challenge", port = 8080, path = "/healthz"),
+            runtimeClient.creates.single().workload.healthcheck,
+        )
+    }
+
+    @Test
+    fun `keeps stored healthcheck off runtime request when disabled`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { healthcheck = HEALTHCHECK_JSON })
+        val runtimeClient = CapturingRuntimeClient()
+        val service = newService(repository, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(runtimeClient.creates.single().workload.healthcheck)
+        assertEquals(HEALTHCHECK_JSON, instance.healthcheck)
+    }
+
+    @Test
+    fun `fails requested instance when stored healthcheck breaks rules`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(
+            newRequested().apply { healthcheck = """{"container":"missing","port":8080,"path":"/healthz"}""" },
+        )
+        val runtimeClient = CapturingRuntimeClient()
+        val service = newService(
+            repository,
+            runtimeClient = runtimeClient,
+            events = events,
+            policyProperties = InstancePolicyProperties(healthcheckEnabled = true),
+        )
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+        assertTrue(runtimeClient.creates.isEmpty())
+    }
+
+    // 못 읽는 값을 null로 넘기면 검사 없이 뜬다
+    @Test
+    fun `fails requested instance when stored healthcheck is unreadable`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested().apply { healthcheck = "not-json" })
+        val runtimeClient = CapturingRuntimeClient()
+        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, events.saved.size)
+        assertTrue(runtimeClient.creates.isEmpty())
     }
 
     // 저장된 exposedPorts가 런타임 요청에 그대로 실리는지 확인
@@ -3324,6 +3410,18 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.size)
     }
 
+    // 받은 생성 요청을 기록한다, 응답은 FakeRuntimeClient가 준다
+    private class CapturingRuntimeClient(
+        private val delegate: FakeRuntimeClient = FakeRuntimeClient(),
+    ) : RuntimeClient by delegate {
+        val creates = mutableListOf<RuntimeCreateRequest>()
+
+        override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+            creates += request
+            return delegate.submitCreate(request)
+        }
+    }
+
     private fun newService(
         repository: TestInstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),
@@ -3333,6 +3431,7 @@ class InstanceOperationServiceTest {
         operationProperties: OperationProperties = OperationProperties(),
         tx: TransactionOperations = TransactionOperations.withoutTransaction(),
         clock: Clock = this.clock,
+        policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
     ): InstanceOperationService =
         InstanceOperationService(
             transitionService = InstanceStateTransitionService(),
@@ -3342,7 +3441,9 @@ class InstanceOperationServiceTest {
             resourceCandidateSelector = ResourceCandidateSelector(clock),
             runtimeClient = runtimeClient,
             containerSpecCodec = ContainerSpecCodec(),
+            healthcheckCodec = HealthcheckCodec(),
             serviceEndpointCodec = ServiceEndpointCodec(),
+            policyProperties = policyProperties,
             cleanupProperties = cleanupProperties,
             operationProperties = operationProperties,
             clock = clock,
@@ -3433,3 +3534,6 @@ class InstanceOperationServiceTest {
         )
     }
 }
+
+// testContainers의 challenge 컨테이너 8080을 가리킨다
+private const val HEALTHCHECK_JSON = """{"container":"challenge","port":8080,"path":"/healthz"}"""

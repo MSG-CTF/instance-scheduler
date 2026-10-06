@@ -19,6 +19,7 @@ import kr.msgctf.scheduler.instance.dto.CreateInstanceRequest
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceRequest
 import kr.msgctf.scheduler.instance.dto.ResourceProfileRequest
 import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
+import kr.msgctf.scheduler.instance.service.HealthcheckCodec
 import kr.msgctf.scheduler.instance.service.InstancePolicyService
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
@@ -132,6 +133,7 @@ class InstanceCommandControllerTest {
             transitionService = InstanceStateTransitionService(),
             instanceRepository = repository.repository,
             containerSpecCodec = ContainerSpecCodec(),
+            healthcheckCodec = HealthcheckCodec(),
             serviceEndpointCodec = ServiceEndpointCodec(),
             clock = Clock.fixed(Instant.parse("2026-07-04T12:00:00Z"), ZoneOffset.UTC),
         )

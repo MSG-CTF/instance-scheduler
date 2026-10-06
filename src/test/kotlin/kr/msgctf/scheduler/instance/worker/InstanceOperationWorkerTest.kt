@@ -24,12 +24,14 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.config.OperationConfig
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
+import kr.msgctf.scheduler.instance.service.HealthcheckCodec
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
 import kr.msgctf.scheduler.instance.service.ServiceEndpointCodec
@@ -616,7 +618,9 @@ class InstanceOperationWorkerTest {
         resourceCandidateSelector = ResourceCandidateSelector(Clock.fixed(NOW, ZoneOffset.UTC)),
         runtimeClient = FakeRuntimeClient(),
         containerSpecCodec = ContainerSpecCodec(),
+        healthcheckCodec = HealthcheckCodec(),
         serviceEndpointCodec = ServiceEndpointCodec(),
+        policyProperties = InstancePolicyProperties(),
         cleanupProperties = CleanupProperties(),
         operationProperties = OperationProperties(),
         clock = Clock.fixed(NOW, ZoneOffset.UTC),

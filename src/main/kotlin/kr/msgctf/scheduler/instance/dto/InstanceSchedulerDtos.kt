@@ -5,6 +5,7 @@ import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
+import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
@@ -17,6 +18,7 @@ data class CreateInstanceCommand(
     val userId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
+    val healthcheck: Healthcheck? = null,
     val registryRevision: Long,
     val isolationProfile: IsolationProfile,
     val architecture: Architecture,
