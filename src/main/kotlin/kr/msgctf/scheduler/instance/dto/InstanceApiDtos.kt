@@ -125,6 +125,8 @@ data class ContainerSpecRequest(
     // 공개할 포트만 고른 목록, 빈 배열은 전부 비공개다
     // 명시적 null은 생략과 같다, 런타임은 null을 거절하지만 여기서 걸러져 런타임까지 가지 않는다
     val exposedPorts: List<Int>? = null,
+    val env: Map<String, Any?> = emptyMap(),
+    val secretRef: UUID? = null,
 ) {
 
     fun toContainerSpec(): ContainerSpec =
@@ -134,6 +136,13 @@ data class ContainerSpecRequest(
             ports = ports,
             expose = expose,
             exposedPorts = exposedPorts,
+            env = env.mapValues { (_, value) ->
+                value as? String ?: throw SchedulerException(
+                    errorCode = SchedulerErrorCode.INVALID_REQUEST,
+                    adminDetail = "env values must be strings",
+                )
+            },
+            secretRef = secretRef,
         )
 }
 

@@ -24,6 +24,20 @@ import tools.jackson.module.kotlin.readValue
 class CreateInstanceRequestTest {
 
     @Test
+    fun `environment JSON preserves strings and rejects scalar coercion`() {
+        val reference = testUuid(591)
+        fun json(value: String) = requestJson(""""isolation_profile": "WEB",""",
+            """{"name":"challenge","image":"$TEST_DIGEST_IMAGE","ports":[8080],"expose":true,"env":{"APP_MODE":$value},"secret_ref":"$reference"}""")
+        val command = requestMapper.readValue<CreateInstanceRequest>(json("\"ctf\"")).toCommand()
+        assertEquals(mapOf("APP_MODE" to "ctf"), command.containers.single().env)
+        assertEquals(reference, command.containers.single().secretRef)
+        for (value in listOf("null", "1", "true", "[]", "{}")) {
+            val request = requestMapper.readValue<CreateInstanceRequest>(json(value))
+            assertInvalidRequest { request.toCommand() }
+        }
+    }
+
+    @Test
     fun `keeps requested isolation profile`() {
         val request = newRequest(listOf(container()), isolationProfile = IsolationProfile.PWN)
 
