@@ -24,4 +24,10 @@ data class CleanupProperties(
     // runtime이 생성을 마치는 데 걸리는 시간에 맞추면 알림이 헛되이 나가지 않는다
     // 그 시간은 PROVISIONER_MAX_ATTEMPTS와 PROVISIONER_READY_TIMEOUT에 달려 있다
     val resolveTimeout: Duration = Duration.ofMinutes(10),
+    // 운영자 강제 정리가 받는 행의 최소 나이, 행을 만든 시각부터 센다
+    // 런타임은 접수한 생성을 코드 기본값으로 10~11분 안에 끝내고 마지막 재접수는 행이 생긴 뒤 몇 분 안에 나간다
+    // 그보다 이른 행은 생성이 아직 진행 중일 수 있어 받지 않는다
+    // 런타임이 꺼져 있던 동안 쌓인 생성은 이 기준으로 막지 못한다, 그 판단은 운영자가 한다
+    // 스케줄러가 꺼져 있었거나 밀려서 생성을 늦게 보낸 행도 막지 못한다, 행을 만든 시각부터 세기 때문이다
+    val forceCleanupMinAge: Duration = Duration.ofMinutes(30),
 )
