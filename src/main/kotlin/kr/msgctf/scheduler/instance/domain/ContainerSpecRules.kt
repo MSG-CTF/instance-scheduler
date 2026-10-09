@@ -72,6 +72,7 @@ object ContainerSpecRules {
             return "duplicated container names=$duplicatedNames"
         }
         containers.forEach { container ->
+            EnvironmentRules.violation(container)?.let { return it }
             if (container.name.length > MAX_NAME_LENGTH || !DNS_LABEL.matches(container.name)) {
                 return "container name=${container.name}, reason=must be a DNS label"
             }

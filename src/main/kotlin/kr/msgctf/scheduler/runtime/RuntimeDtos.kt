@@ -69,6 +69,11 @@ data class RuntimeContainer(
     // 읽기 전용 root filesystem에서 쓰기를 허용할 경로
     @JsonProperty("writable_paths")
     val writablePaths: List<RuntimeWritablePath>? = null,
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    val env: Map<String, String> = emptyMap(),
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("secret_ref")
+    val secretRef: UUID? = null,
 )
 
 // 컨테이너의 포트와 경로로 HTTP GET을 보내 확인한다

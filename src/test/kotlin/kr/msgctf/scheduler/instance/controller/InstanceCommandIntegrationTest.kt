@@ -66,11 +66,12 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `create api stores requested instance in postgres`() {
         // create 접수 결과가 DB와 응답에 반영되는지 확인
+        val releaseId = UUID.randomUUID()
         // when
         val response = mockMvc.post("/api/instances") {
             contentType = MediaType.APPLICATION_JSON
             // 픽스처 기본값 3을 피해야 다른 경로에서 새어 들어온 값과 구분된다
-            content = createRequestBody(teamId = testUuid(100), challengeId = testUuid(10), registryRevision = 5)
+            content = createRequestBody(teamId = testUuid(100), challengeId = testUuid(10), registryRevision = 5, releaseId = releaseId)
         }.andExpect {
             status { isAccepted() }
             jsonPath("$.code") { value("SUCCESS") }
@@ -80,6 +81,7 @@ class InstanceCommandIntegrationTest {
             jsonPath("$.data.service_url") { doesNotExist() }
             // 요청에 실려온 값을 그대로 돌려준다, Registry를 따로 보지 않는다
             jsonPath("$.data.registry_revision") { value(5) }
+            jsonPath("$.data.release_id") { value(releaseId.toString()) }
             jsonPath("$.data.hard_expires_at") { exists() }
         }.andReturn().response.contentAsString
 
@@ -91,6 +93,7 @@ class InstanceCommandIntegrationTest {
         assertEquals(InstanceStatus.REQUESTED, saved.status)
         assertEquals(testContainersJson(), saved.containers)
         assertEquals(5L, saved.registryRevision)
+        assertEquals(releaseId, saved.releaseId)
         assertEquals(500, saved.cpuMillicores)
         assertEquals(null, saved.provider)
         assertEquals(null, saved.runtimeWorkloadId)
@@ -217,8 +220,9 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `reset api response keeps the revision of the previous instance`() {
         // given
+        val releaseId = UUID.randomUUID()
         val previous = instanceRepository.saveAndFlush(
-            runningInstance(teamId = testUuid(245), registryRevision = 9),
+            runningInstance(teamId = testUuid(245), registryRevision = 9).apply { this.releaseId = releaseId },
         )
 
         // when & then
@@ -226,6 +230,7 @@ class InstanceCommandIntegrationTest {
             .andExpect {
                 status { isAccepted() }
                 jsonPath("$.data.registry_revision") { value(9) }
+                jsonPath("$.data.release_id") { value(releaseId.toString()) }
             }
     }
 
@@ -944,8 +949,10 @@ class InstanceCommandIntegrationTest {
         containers: String =
             """[ { "name": "challenge", "image": "$TEST_DIGEST_IMAGE", "ports": [8080], "expose": true } ]""",
         registryRevision: Long = 3,
+        releaseId: UUID? = null,
     ): String {
         val profileLine = isolationProfile?.let { """"isolation_profile": "$it",""" } ?: ""
+        val releaseLine = releaseId?.let { """"release_id": "$it",""" } ?: ""
         return """
             {
               "team_id": "$teamId",
@@ -953,6 +960,7 @@ class InstanceCommandIntegrationTest {
               "challenge_id": "$challengeId",
               "containers": $containers,
               "registry_revision": $registryRevision,
+              $releaseLine
               $profileLine
               "architecture": "AMD64",
               "resource_profile": {

@@ -10,3 +10,5 @@ MSG CTF 문제 인스턴스의 생성과 정리를 맡는 스케줄러다.
 - `scheduler.operation.parallelism`은 operation 워커가 한 단계의 대상을 동시에 처리하는 스레드 수다. 기본 1이면 한 건씩 처리한다. 올릴 때는 `spring.datasource.hikari.maximum-pool-size`를 병렬 수 + 10 이상으로 같이 올린다. 워커 스레드마다 커넥션 하나를 쓰고 나머지가 API 몫이다
 - `scheduler.instance-policy.exposed-ports-enabled`는 기본이 `false`다. 런타임이 `exposed_ports`를 받는 버전으로 배포된 것을 확인한 뒤 `true`로 켠다. 꺼져 있으면 그 필드가 온 생성과 초기화 요청을 400으로 거절한다. 켰다가 끄면 이미 접수된 행은 막지 않고 런타임에서 실패한다
 - `scheduler.instance-policy.healthcheck-enabled`는 기본이 `false`다. 런타임이 `workload.healthcheck`를 받게 된 뒤 `true`로 켠다. 꺼져 있어도 `healthcheck` 검증과 저장은 하고 런타임 요청에만 싣지 않는다. 그래서 잘못된 `healthcheck`는 꺼져 있어도 400이다
+
+실행 설정 계약: [환경변수와 비밀값](docs/execution-settings.md)

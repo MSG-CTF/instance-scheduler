@@ -93,6 +93,9 @@ class Instance(
     @Column(name = "registry_revision")
     var registryRevision: Long? = null,
 
+    @Column(name = "release_id")
+    var releaseId: UUID? = null,
+
     // Runtime에 그대로 넘길 격리 정책, 생성 요청이 반드시 값을 보낸다
     @Enumerated(EnumType.STRING)
     @Column(name = "isolation_profile", nullable = false)

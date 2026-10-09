@@ -71,6 +71,7 @@ class InstanceSchedulerService(
                 containers = containerSpecCodec.encode(command.containers),
                 healthcheck = command.healthcheck?.let { healthcheckCodec.encode(it) },
                 registryRevision = command.registryRevision,
+                releaseId = command.releaseId,
                 isolationProfile = command.isolationProfile,
                 architecture = command.architecture,
                 cpuMillicores = command.resourceProfile.cpuMillicores,
@@ -248,6 +249,7 @@ class InstanceSchedulerService(
                 // 옮기지 않으면 초기화한 인스턴스는 검사 없이 뜬다
                 healthcheck = previous.healthcheck,
                 registryRevision = previous.registryRevision,
+                releaseId = previous.releaseId,
                 isolationProfile = previous.isolationProfile,
                 architecture = architecture,
                 cpuMillicores = cpuMillicores,
