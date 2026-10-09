@@ -1,13 +1,14 @@
 # 실행 설정 전달
 
 백엔드가 선택한 릴리스의 env와 secret_ref를 저장하고 런타임에 그대로 전달합니다
+release_id도 함께 저장하고 생성·조회·reset 응답에 돌려줍니다 같은 registry_revision에서 관리자 설정 버전이 여러 개일 수 있기 때문입니다
 스케줄러는 비밀값을 조회하거나 값을 생성하지 않습니다
 
 | API | 용도 |
 | --- | --- |
 | POST /api/instances | 기존 생성 경로 |
 | POST /api/v2/instances | 환경변수·비밀값 참조가 있는 새 생성 경로 |
-| POST /api/instances/{instance_id}/reset | 저장된 revision·컨테이너 설정으로 재생성 |
+| POST /api/instances/{instance_id}/reset | 저장된 revision·release_id·컨테이너 설정으로 재생성 |
 
 두 생성 경로 모두 기존 서비스 Bearer 인증을 적용합니다
 백엔드는 새 필드가 있으면 v2 경로를 사용합니다

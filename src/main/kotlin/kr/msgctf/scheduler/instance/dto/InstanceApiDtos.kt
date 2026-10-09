@@ -42,6 +42,9 @@ data class CreateInstanceRequest(
     @field:Positive
     val registryRevision: Long,
 
+    // 백엔드에서 승인한 실행 설정 버전 ID, 재연결 때 같은 발행 번호의 설정을 구분한다
+    val releaseId: UUID? = null,
+
     // Runtime에 그대로 넘길 격리 정책
     // 런타임 계약이 값을 필수로 받으므로 여기서 빠지면 접수하지 않는다
     val isolationProfile: IsolationProfile,
@@ -73,6 +76,7 @@ data class CreateInstanceRequest(
             containers = containerSpecs,
             healthcheck = check,
             registryRevision = registryRevision,
+            releaseId = releaseId,
             isolationProfile = isolationProfile,
             architecture = architecture,
             resourceProfile = resources,
@@ -212,6 +216,7 @@ data class InstanceResponse(
     // 공개 접속점 전체, 계약상 service_url은 이 중 첫 번째다
     val endpoints: List<ServiceEndpoint>,
     val registryRevision: Long?,
+    val releaseId: UUID?,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
     val replacedInstanceId: UUID?,
@@ -228,6 +233,7 @@ data class InstanceResponse(
                 serviceUrl = result.serviceUrl,
                 endpoints = result.endpoints,
                 registryRevision = result.registryRevision,
+                releaseId = result.releaseId,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
                 replacedInstanceId = result.replacedInstanceId,
@@ -252,6 +258,7 @@ data class InstanceDetailResponse(
     // 공개 접속점 전체, 계약상 service_url은 이 중 첫 번째다
     val endpoints: List<ServiceEndpoint>,
     val registryRevision: Long?,
+    val releaseId: UUID?,
     val createdAt: Instant?,
     val updatedAt: Instant?,
     val expiresAt: Instant,
@@ -278,6 +285,7 @@ data class InstanceDetailResponse(
                 serviceUrl = result.serviceUrl,
                 endpoints = result.endpoints,
                 registryRevision = result.registryRevision,
+                releaseId = result.releaseId,
                 createdAt = result.createdAt,
                 updatedAt = result.updatedAt,
                 expiresAt = result.expiresAt,
