@@ -6,6 +6,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
@@ -151,6 +152,30 @@ class InstanceRepositoryTest {
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, events[0].errorCode)
         assertEquals("runtime create returned timeout", events[0].adminDetail)
         assertNotNull(events[0].createdAt)
+    }
+
+    // 저장한 JSON이 그대로 읽히고 없는 값은 null로 남는지 확인
+    @Test
+    fun `persists healthcheck`() {
+        // given
+        val json = """{"container":"challenge","port":8080,"path":"/healthz"}"""
+        val withCheck = newInstance(teamId = testUuid(6), challengeId = testUuid(10)).apply {
+            healthcheck = json
+            healthcheckForwarded = true
+        }
+        val withoutCheck = newInstance(teamId = testUuid(7), challengeId = testUuid(10))
+
+        // when
+        instanceRepository.saveAndFlush(withCheck)
+        instanceRepository.saveAndFlush(withoutCheck)
+
+        // then
+        val storedWithCheck = instanceRepository.findById(withCheck.instanceId).orElseThrow()
+        val storedWithoutCheck = instanceRepository.findById(withoutCheck.instanceId).orElseThrow()
+        assertEquals(json, storedWithCheck.healthcheck)
+        assertEquals(true, storedWithCheck.healthcheckForwarded)
+        assertNull(storedWithoutCheck.healthcheck)
+        assertNull(storedWithoutCheck.healthcheckForwarded)
     }
 
     @Test

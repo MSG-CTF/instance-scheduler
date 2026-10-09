@@ -79,6 +79,15 @@ class Instance(
     @Column(name = "containers", columnDefinition = "text")
     var containers: String? = null,
 
+    // Healthcheck의 JSON 문자열, null이면 검사하지 않는다
+    @Column(name = "healthcheck", columnDefinition = "text")
+    var healthcheck: String? = null,
+
+    // 런타임 생성 요청에 healthcheck를 실었는지, PROVISIONING으로 옮길 때 정한다
+    // 재접수는 플래그 대신 이 값을 쓴다, null은 싣지 않은 것으로 본다
+    @Column(name = "healthcheck_forwarded")
+    var healthcheckForwarded: Boolean? = null,
+
     // 이 인스턴스를 만들 때 쓴 릴리스 번호, Registry가 매기는 revision 값이다
     // 이 컬럼이 생기기 전 행은 값을 알 수 없어 null로 남는다
     @Column(name = "registry_revision")

@@ -50,6 +50,8 @@ class HttpRuntimeClientTest {
             .andExpect(jsonPath("$.workload.containers[0].writable_paths[0].size_mib").value(64))
             // STANDARD@v2부터 런타임이 이 필드를 거절한다, 빈 배열이나 null이어도 400이다
             .andExpect(jsonPath("$.workload.internal_connections").doesNotExist())
+            // healthcheck가 없으면 키도 보내지 않는다
+            .andExpect(withoutKey("$.workload", "healthcheck"))
             .andRespond(
                 withStatus(HttpStatus.ACCEPTED)
                     .header("Location", "/internal/v1/operations/op-create-123")
@@ -256,6 +258,30 @@ class HttpRuntimeClientTest {
         assertIs<RuntimeSubmitResult.Accepted>(submitted)
     }
 
+    @Test
+    fun `sends healthcheck in create body`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances"))
+            .andExpect(method(HttpMethod.POST))
+            .andExpect(jsonPath("$.workload.healthcheck.container").value("challenge"))
+            .andExpect(jsonPath("$.workload.healthcheck.port").value(8080))
+            .andExpect(jsonPath("$.workload.healthcheck.path").value("/healthz"))
+            .andRespond(
+                withStatus(HttpStatus.ACCEPTED)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body("""{"operation_id":"op-create-123","request_id":"runtime-create-$instanceId","type":"CREATE","status":"QUEUED","attempt":0,"max_attempts":3,"created":true}"""),
+            )
+
+        val submitted = client.submitCreate(
+            createRequest(
+                instanceId,
+                healthcheck = RuntimeHealthcheck(container = "challenge", port = 8080, path = "/healthz"),
+            ),
+        )
+
+        assertIs<RuntimeSubmitResult.Accepted>(submitted)
+    }
+
     // jsonPath의 doesNotExist는 값이 null이어도 통과한다, 런타임은 null이 실린 키도 거절하므로 키 자체가 없는지 본다
     private fun withoutKey(objectPath: String, key: String) =
         jsonPath(objectPath).value(not(hasKey(key)))
@@ -263,6 +289,7 @@ class HttpRuntimeClientTest {
     private fun createRequest(
         instanceId: UUID,
         containers: List<RuntimeContainer> = listOf(runtimeContainer()),
+        healthcheck: RuntimeHealthcheck? = null,
     ): RuntimeCreateRequest =
         RuntimeCreateRequest(
             requestId = "runtime-create-$instanceId",
@@ -272,6 +299,7 @@ class HttpRuntimeClientTest {
             target = RuntimeTarget(RuntimeType.KUBERNETES, "aws-k3s-001"),
             workload = RuntimeWorkload(
                 containers = containers,
+                healthcheck = healthcheck,
                 resourceLimits = RuntimeResourceLimits(500, 512, 1024),
             ),
         )

@@ -10,6 +10,7 @@ import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
+import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testUuid
 import tools.jackson.databind.ObjectMapper
@@ -503,6 +504,127 @@ class CreateInstanceRequestTest {
         assertEquals(listOf(listOf(31337), emptyList()), request.toCommand().containers.map { it.exposedPorts })
     }
 
+    // 아래는 healthcheck 규칙을 확인한다
+    @Test
+    fun `reads healthcheck from request body`() {
+        val json = requestJson(
+            """"isolation_profile": "WEB",
+            "healthcheck": { "container": "challenge", "port": 8080, "path": "/healthz" },""",
+        )
+
+        val command = requestMapper.readValue<CreateInstanceRequest>(json).toCommand()
+
+        assertEquals(Healthcheck(container = "challenge", port = 8080, path = "/healthz"), command.healthcheck)
+    }
+
+    @Test
+    fun `reads null healthcheck as none`() {
+        val json = requestJson(
+            """"isolation_profile": "WEB",
+            "healthcheck": null,""",
+        )
+
+        assertNull(requestMapper.readValue<CreateInstanceRequest>(json).toCommand().healthcheck)
+    }
+
+    // 빈 객체를 검사 없음으로 읽지 않는다
+    @Test
+    fun `fails to read empty or partial healthcheck`() {
+        listOf(
+            "{}",
+            """{ "container": "challenge", "path": "/healthz" }""",
+            """{ "container": "challenge", "port": null, "path": "/healthz" }""",
+        ).forEach { healthcheckJson ->
+            assertFailsWith<MismatchedInputException>(healthcheckJson) {
+                requestMapper.readValue<CreateInstanceRequest>(
+                    requestJson(""""isolation_profile": "WEB",
+            "healthcheck": $healthcheckJson,"""),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `accepts healthcheck on private container port`() {
+        val request = newRequest(twoContainers(), healthcheck = healthcheck(container = "db", port = 5432))
+
+        assertEquals("db", request.toCommand().healthcheck?.container)
+    }
+
+    @Test
+    fun `rejects healthcheck on unknown container`() {
+        val request = newRequest(listOf(container()), healthcheck = healthcheck(container = "missing"))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `rejects healthcheck port not declared on its container`() {
+        // 9090이 다른 컨테이너에 있어도 가리킨 컨테이너에 없으면 거절한다
+        val request = newRequest(
+            listOf(
+                container(name = "web", ports = listOf(8080), expose = true),
+                container(name = "db", ports = listOf(9090), expose = false),
+            ),
+            healthcheck = healthcheck(container = "web", port = 9090),
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `rejects healthcheck path without leading slash`() {
+        val request = newRequest(listOf(container()), healthcheck = healthcheck(path = "healthz"))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `rejects healthcheck path with whitespace`() {
+        val request = newRequest(listOf(container()), healthcheck = healthcheck(path = "/health check"))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `rejects healthcheck path with control character`() {
+        val request = newRequest(listOf(container()), healthcheck = healthcheck(path = "/healthz\u0000"))
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    @Test
+    fun `accepts healthcheck path at length limit and rejects one past it`() {
+        val atLimit = "/" + "a".repeat(ContainerSpecRules.MAX_HEALTHCHECK_PATH_LENGTH - 1)
+
+        assertEquals(
+            atLimit,
+            newRequest(listOf(container()), healthcheck = healthcheck(path = atLimit)).toCommand().healthcheck?.path,
+        )
+        assertInvalidRequest {
+            newRequest(listOf(container()), healthcheck = healthcheck(path = atLimit + "a")).toCommand()
+        }
+    }
+
+    // PWN 공개 규칙을 통과한 요청도 healthcheck를 검사한다
+    @Test
+    fun `checks healthcheck after pwn exposure rules pass`() {
+        val request = newRequest(
+            listOf(container(name = "pwn", ports = listOf(31337), expose = true)),
+            isolationProfile = IsolationProfile.PWN,
+            healthcheck = healthcheck(container = "pwn", port = 8080),
+        )
+
+        assertInvalidRequest { request.toCommand() }
+    }
+
+    private fun healthcheck(
+        container: String = "challenge",
+        port: Int = 8080,
+        path: String = "/healthz",
+    ): HealthcheckRequest =
+        HealthcheckRequest(container = container, port = port, path = path)
+
     private fun assertInvalidRequest(block: () -> Unit) {
         val exception = assertFailsWith<SchedulerException>(block = block)
         assertEquals(SchedulerErrorCode.INVALID_REQUEST, exception.errorCode)
@@ -572,12 +694,14 @@ class CreateInstanceRequestTest {
         containers: List<ContainerSpecRequest>,
         isolationProfile: IsolationProfile = IsolationProfile.WEB,
         resourceProfile: ResourceProfileRequest = resources(),
+        healthcheck: HealthcheckRequest? = null,
     ): CreateInstanceRequest =
         CreateInstanceRequest(
             teamId = testUuid(1),
             userId = UUID.randomUUID(),
             challengeId = testUuid(10),
             containers = containers,
+            healthcheck = healthcheck,
             registryRevision = 3,
             isolationProfile = isolationProfile,
             architecture = Architecture.AMD64,

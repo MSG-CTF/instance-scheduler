@@ -31,6 +31,7 @@ class InstanceSchedulerService(
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
     private val containerSpecCodec: ContainerSpecCodec,
+    private val healthcheckCodec: HealthcheckCodec,
     private val serviceEndpointCodec: ServiceEndpointCodec,
     private val clock: Clock,
 ) {
@@ -68,6 +69,7 @@ class InstanceSchedulerService(
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
                 containers = containerSpecCodec.encode(command.containers),
+                healthcheck = command.healthcheck?.let { healthcheckCodec.encode(it) },
                 registryRevision = command.registryRevision,
                 isolationProfile = command.isolationProfile,
                 architecture = command.architecture,
@@ -209,12 +211,21 @@ class InstanceSchedulerService(
                 cause = exception,
             )
         }
+        val storedHealthcheck = try {
+            previous.healthcheck?.let { healthcheckCodec.decode(it) }
+        } catch (exception: Exception) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INTERNAL_ERROR,
+                adminDetail = "instanceId=${command.instanceId}, reason=stored healthcheck unreadable",
+                cause = exception,
+            )
+        }
         val storedResources = ResourceProfile(
             cpuMillicores = cpuMillicores,
             memoryMib = memoryMib,
             ephemeralStorageMib = ephemeralStorageMib,
         )
-        ContainerSpecRules.violation(storedContainers, previous.isolationProfile, storedResources)
+        ContainerSpecRules.violation(storedContainers, previous.isolationProfile, storedResources, storedHealthcheck)
             ?.let { reason ->
                 throw SchedulerException(
                     errorCode = SchedulerErrorCode.INTERNAL_ERROR,
@@ -234,6 +245,8 @@ class InstanceSchedulerService(
                 status = InstanceStatus.REQUESTED,
                 action = InstanceAction.CREATE,
                 containers = containers,
+                // 옮기지 않으면 초기화한 인스턴스는 검사 없이 뜬다
+                healthcheck = previous.healthcheck,
                 registryRevision = previous.registryRevision,
                 isolationProfile = previous.isolationProfile,
                 architecture = architecture,

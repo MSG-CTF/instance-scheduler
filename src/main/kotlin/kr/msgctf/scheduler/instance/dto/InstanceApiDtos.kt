@@ -13,6 +13,7 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
+import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -31,6 +32,10 @@ data class CreateInstanceRequest(
     @field:Valid
     @field:NotEmpty
     val containers: List<ContainerSpecRequest>,
+
+    // 생략과 null은 같다, 검사하지 않는다
+    @field:Valid
+    val healthcheck: HealthcheckRequest? = null,
 
     // 백엔드가 Registry에서 고른 릴리스 번호(revision)
     // 스케줄러는 Registry를 직접 조회하지 않고 받은 값을 저장만 한다
@@ -57,14 +62,16 @@ data class CreateInstanceRequest(
     fun toCommand(): CreateInstanceCommand {
         val containerSpecs = containers.map { it.toContainerSpec() }
         val resources = resourceProfile.toResourceProfile()
+        val check = healthcheck?.toHealthcheck()
         // 접수(202) 뒤에 걸리면 400이 아니라 FAILED 상태로만 보이므로 여기서 거른다
-        ContainerSpecRules.violation(containerSpecs, isolationProfile, resources)
+        ContainerSpecRules.violation(containerSpecs, isolationProfile, resources, check)
             ?.let { reject(it) }
         return CreateInstanceCommand(
             teamId = teamId,
             userId = userId,
             challengeId = challengeId,
             containers = containerSpecs,
+            healthcheck = check,
             registryRevision = registryRevision,
             isolationProfile = isolationProfile,
             architecture = architecture,
@@ -78,6 +85,26 @@ data class CreateInstanceRequest(
         throw SchedulerException(
             errorCode = SchedulerErrorCode.INVALID_REQUEST,
             adminDetail = adminDetail,
+        )
+}
+
+// healthcheck 요청 값, HTTP GET으로 확인한다
+data class HealthcheckRequest(
+    @field:NotBlank
+    val container: String,
+
+    // 컨테이너 ports에 있는지는 ContainerSpecRules가 본다
+    val port: Int,
+
+    @field:NotBlank
+    val path: String,
+) {
+
+    fun toHealthcheck(): Healthcheck =
+        Healthcheck(
+            container = container,
+            port = port,
+            path = path,
         )
 }
 

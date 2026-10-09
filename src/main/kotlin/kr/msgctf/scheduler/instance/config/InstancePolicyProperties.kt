@@ -22,4 +22,8 @@ data class InstancePolicyProperties(
     // 컨테이너별 공개 포트(exposed_ports)를 받을지, 런타임이 이 필드를 받는 버전으로 배포된 뒤에 켠다
     // 꺼진 채로 넘기면 런타임이 모르는 필드로 400을 내고 인스턴스는 FAILED로만 남으므로 접수에서 거절한다
     val exposedPortsEnabled: Boolean = false,
+
+    // healthcheck를 런타임 요청에 실을지 정한다
+    // 꺼져 있어도 검증과 저장은 하고 요청에만 싣지 않는다
+    val healthcheckEnabled: Boolean = false,
 )

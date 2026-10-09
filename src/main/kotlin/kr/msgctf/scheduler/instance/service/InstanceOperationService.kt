@@ -21,9 +21,11 @@ import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
+import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
@@ -39,6 +41,7 @@ import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
 import kr.msgctf.scheduler.runtime.RuntimeEndpoint
+import kr.msgctf.scheduler.runtime.RuntimeHealthcheck
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeOperationType
@@ -63,7 +66,9 @@ class InstanceOperationService(
     private val resourceCandidateSelector: ResourceCandidateSelector,
     private val runtimeClient: RuntimeClient,
     private val containerSpecCodec: ContainerSpecCodec,
+    private val healthcheckCodec: HealthcheckCodec,
     private val serviceEndpointCodec: ServiceEndpointCodec,
+    private val policyProperties: InstancePolicyProperties,
     private val cleanupProperties: CleanupProperties,
     private val operationProperties: OperationProperties,
     private val clock: Clock,
@@ -120,6 +125,8 @@ class InstanceOperationService(
         )
 
         var reservationTaken = false
+        // 재접수가 같은 요청을 보내도록 첫 접수 전에 정해 행에 남긴다
+        val forwardHealthcheck = spec.healthcheck != null && policyProperties.healthcheckEnabled
         val target = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             // 예약을 잡는 사이 행이 SCHEDULING을 떠났으면 진행하지 않는다
@@ -135,6 +142,7 @@ class InstanceOperationService(
             instance.runtimeType = placement.runtimeType
             instance.runtimeTargetId = placement.runtimeTargetId
             instance.pendingReservation = null
+            instance.healthcheckForwarded = forwardHealthcheck
             move(instance, InstanceStatus.PROVISIONING)
             // broker 단계가 끝났으므로 재시도 횟수를 0에서 다시 센다
             instance.attemptCount = 0
@@ -165,7 +173,7 @@ class InstanceOperationService(
             return
         }
 
-        submitCreateAndStore(instanceId, spec, target, firstSubmit = true)
+        submitCreateAndStore(instanceId, spec, target, forwardHealthcheck, firstSubmit = true)
     }
 
     // PROVISIONING인데 operation을 접수하지 못한 행을 다시 접수한다
@@ -215,10 +223,22 @@ class InstanceOperationService(
             }
             log.info("resubmitting create for stalled instance: instanceId={}, attempt={}", instanceId, attempts)
             // broker 단계는 이미 끝났다, 후보를 다시 고르면 런타임이 기억하는 target과 어긋난다
-            spec to RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId)
+            // healthcheck는 지금 플래그가 아니라 첫 접수 때 정한 값을 따른다
+            // 같은 request_id로 내용이 다르면 런타임이 거절해 이미 접수된 작업을 이어받지 못한다
+            ResumedCreate(
+                spec = spec,
+                target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
+                forwardHealthcheck = instance.healthcheckForwarded == true,
+            )
         } ?: return
 
-        submitCreateAndStore(instanceId, resumed.first, resumed.second, firstSubmit = false)
+        submitCreateAndStore(
+            instanceId,
+            resumed.spec,
+            resumed.target,
+            resumed.forwardHealthcheck,
+            firstSubmit = false,
+        )
     }
 
     // 런타임에 생성을 접수하고 결과를 행에 반영한다, 첫 접수와 재접수가 함께 쓴다
@@ -228,6 +248,7 @@ class InstanceOperationService(
         instanceId: UUID,
         spec: WorkloadSpec,
         target: RuntimeTarget,
+        forwardHealthcheck: Boolean,
         firstSubmit: Boolean,
     ) {
         val submitted = try {
@@ -256,6 +277,11 @@ class InstanceOperationService(
                                     },
                             )
                         },
+                        healthcheck = spec.healthcheck
+                            ?.takeIf { forwardHealthcheck }
+                            ?.let { check ->
+                                RuntimeHealthcheck(container = check.container, port = check.port, path = check.path)
+                            },
                         resourceLimits = RuntimeResourceLimits(
                             cpuMillicores = spec.resourceProfile.cpuMillicores,
                             memoryMib = spec.resourceProfile.memoryMib,
@@ -1277,13 +1303,19 @@ class InstanceOperationService(
             log.warn("stored containers unreadable: instanceId={}", instance.instanceId, exception)
             return null
         }
+        val healthcheck = try {
+            instance.healthcheck?.let { healthcheckCodec.decode(it) }
+        } catch (exception: Exception) {
+            log.warn("stored healthcheck unreadable: instanceId={}", instance.instanceId, exception)
+            return null
+        }
         val resourceProfile = ResourceProfile(
             cpuMillicores = instance.cpuMillicores ?: return null,
             memoryMib = instance.memoryMib ?: return null,
             ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
         )
         // 규칙에 어긋난 스펙을 그대로 보내면 브로커 예약까지 쓰고 런타임에서야 거절된다
-        ContainerSpecRules.violation(containers, instance.isolationProfile, resourceProfile)
+        ContainerSpecRules.violation(containers, instance.isolationProfile, resourceProfile, healthcheck)
             ?.let { reason ->
                 log.warn("stored spec invalid: instanceId={}, {}", instance.instanceId, reason)
                 return null
@@ -1292,6 +1324,7 @@ class InstanceOperationService(
             teamId = instance.teamId,
             challengeId = instance.challengeId,
             containers = containers,
+            healthcheck = healthcheck,
             isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
             resourceProfile = resourceProfile,
@@ -1343,10 +1376,17 @@ private data class PendingCommit(
     val resourceProfile: ResourceProfile,
 )
 
+private data class ResumedCreate(
+    val spec: WorkloadSpec,
+    val target: RuntimeTarget,
+    val forwardHealthcheck: Boolean,
+)
+
 private data class WorkloadSpec(
     val teamId: UUID,
     val challengeId: UUID,
     val containers: List<ContainerSpec>,
+    val healthcheck: Healthcheck?,
     val isolationProfile: IsolationProfile,
     val architecture: Architecture,
     val resourceProfile: ResourceProfile,

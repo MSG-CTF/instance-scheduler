@@ -38,6 +38,10 @@ data class RuntimeTarget(
 data class RuntimeWorkload(
     val containers: List<RuntimeContainer>,
 
+    // null이면 키를 빼고 보낸다
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    val healthcheck: RuntimeHealthcheck? = null,
+
     @JsonProperty("resource_limits")
     val resourceLimits: RuntimeResourceLimits,
 )
@@ -65,6 +69,13 @@ data class RuntimeContainer(
     // 읽기 전용 root filesystem에서 쓰기를 허용할 경로
     @JsonProperty("writable_paths")
     val writablePaths: List<RuntimeWritablePath>? = null,
+)
+
+// 컨테이너의 포트와 경로로 HTTP GET을 보내 확인한다
+data class RuntimeHealthcheck(
+    val container: String,
+    val port: Int,
+    val path: String,
 )
 
 data class RuntimeWritablePath(
