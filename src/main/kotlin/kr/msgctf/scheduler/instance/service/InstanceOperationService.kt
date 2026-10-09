@@ -125,6 +125,8 @@ class InstanceOperationService(
         )
 
         var reservationTaken = false
+        // 재접수가 같은 요청을 보내도록 첫 접수 전에 정해 행에 남긴다
+        val forwardHealthcheck = spec.healthcheck != null && policyProperties.healthcheckEnabled
         val target = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             // 예약을 잡는 사이 행이 SCHEDULING을 떠났으면 진행하지 않는다
@@ -140,6 +142,7 @@ class InstanceOperationService(
             instance.runtimeType = placement.runtimeType
             instance.runtimeTargetId = placement.runtimeTargetId
             instance.pendingReservation = null
+            instance.healthcheckForwarded = forwardHealthcheck
             move(instance, InstanceStatus.PROVISIONING)
             // broker 단계가 끝났으므로 재시도 횟수를 0에서 다시 센다
             instance.attemptCount = 0
@@ -170,7 +173,7 @@ class InstanceOperationService(
             return
         }
 
-        submitCreateAndStore(instanceId, spec, target, firstSubmit = true)
+        submitCreateAndStore(instanceId, spec, target, forwardHealthcheck, firstSubmit = true)
     }
 
     // PROVISIONING인데 operation을 접수하지 못한 행을 다시 접수한다
@@ -220,10 +223,22 @@ class InstanceOperationService(
             }
             log.info("resubmitting create for stalled instance: instanceId={}, attempt={}", instanceId, attempts)
             // broker 단계는 이미 끝났다, 후보를 다시 고르면 런타임이 기억하는 target과 어긋난다
-            spec to RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId)
+            // healthcheck는 지금 플래그가 아니라 첫 접수 때 정한 값을 따른다
+            // 같은 request_id로 내용이 다르면 런타임이 거절해 이미 접수된 작업을 이어받지 못한다
+            ResumedCreate(
+                spec = spec,
+                target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
+                forwardHealthcheck = instance.healthcheckForwarded == true,
+            )
         } ?: return
 
-        submitCreateAndStore(instanceId, resumed.first, resumed.second, firstSubmit = false)
+        submitCreateAndStore(
+            instanceId,
+            resumed.spec,
+            resumed.target,
+            resumed.forwardHealthcheck,
+            firstSubmit = false,
+        )
     }
 
     // 런타임에 생성을 접수하고 결과를 행에 반영한다, 첫 접수와 재접수가 함께 쓴다
@@ -233,6 +248,7 @@ class InstanceOperationService(
         instanceId: UUID,
         spec: WorkloadSpec,
         target: RuntimeTarget,
+        forwardHealthcheck: Boolean,
         firstSubmit: Boolean,
     ) {
         val submitted = try {
@@ -262,7 +278,7 @@ class InstanceOperationService(
                             )
                         },
                         healthcheck = spec.healthcheck
-                            ?.takeIf { policyProperties.healthcheckEnabled }
+                            ?.takeIf { forwardHealthcheck }
                             ?.let { check ->
                                 RuntimeHealthcheck(container = check.container, port = check.port, path = check.path)
                             },
@@ -1358,6 +1374,12 @@ private data class PendingCommit(
     val instanceId: UUID,
     val runtimeWorkloadId: String,
     val resourceProfile: ResourceProfile,
+)
+
+private data class ResumedCreate(
+    val spec: WorkloadSpec,
+    val target: RuntimeTarget,
+    val forwardHealthcheck: Boolean,
 )
 
 private data class WorkloadSpec(
