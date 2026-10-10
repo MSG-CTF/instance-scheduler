@@ -24,4 +24,15 @@ data class CleanupProperties(
     // runtime이 생성을 마치는 데 걸리는 시간에 맞추면 알림이 헛되이 나가지 않는다
     // 그 시간은 PROVISIONER_MAX_ATTEMPTS와 PROVISIONER_READY_TIMEOUT에 달려 있다
     val resolveTimeout: Duration = Duration.ofMinutes(10),
-)
+    // 저장된 정보가 없다는 답을 받은 행에 다시 묻는 간격의 상한
+    // 간격은 행을 만든 뒤 지난 시간의 1/10이고, scheduler.operation.backoff-max보다 짧아지지 않는다
+    // 하드타임아웃으로 정리에 들어온 행은 만든 지 오래되어 처음부터 이 상한으로 묻는다
+    // 길게 둘수록 런타임 호출이 줄지만, 뒤늦게 끝난 생성이 남긴 workload를 그만큼 늦게 찾는다
+    // 알림을 보낼지는 런타임에 물을 때만 확인한다, 그래서 resolve-timeout보다 길게 두면 알림도 이 간격만큼 늦어진다
+    // backoff-max보다 짧게 두면 backoff-max 간격으로 묻는다
+    val statusCheckMaxInterval: Duration = Duration.ofMinutes(10),
+) {
+    init {
+        require(statusCheckMaxInterval.isPositive) { "scheduler.cleanup.status-check-max-interval 설정은 0보다 커야 한다" }
+    }
+}
