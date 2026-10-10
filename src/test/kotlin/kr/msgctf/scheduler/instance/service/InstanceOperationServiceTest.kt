@@ -8,6 +8,7 @@ import java.time.ZoneOffset
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -1946,6 +1947,183 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
+
+    // 저장된 정보가 없다는 답만 오는 행은 며칠씩 남을 수 있다
+    // 30초마다 물으면 행 하나가 하루 2,880번 런타임을 부른다, 만든 지 오래된 행일수록 덜 묻는다
+    @Test
+    fun `widens the status check interval as the stuck row ages`() {
+        val maxInterval = CleanupProperties().statusCheckMaxInterval
+        val backoffMax = OperationProperties().backoffMax
+        // 나이의 1/10이 하한(backoff-max)보다 짧으면 하한, 상한보다 길면 상한을 쓴다
+        assertEquals(backoffMax, nextStatusCheckDelay(createdBefore = Duration.ofMinutes(2)))
+        assertEquals(Duration.ofMinutes(2), nextStatusCheckDelay(createdBefore = Duration.ofMinutes(20)))
+        assertEquals(maxInterval, nextStatusCheckDelay(createdBefore = Duration.ofHours(5)))
+        // 경계, 기본값에서 5분 된 행이 하한에, 100분 된 행이 상한에 닿는다
+        assertEquals(backoffMax, nextStatusCheckDelay(createdBefore = backoffMax.multipliedBy(10)))
+        assertEquals(maxInterval, nextStatusCheckDelay(createdBefore = maxInterval.multipliedBy(10)))
+        assertEquals(
+            maxInterval.minusSeconds(1),
+            nextStatusCheckDelay(createdBefore = maxInterval.multipliedBy(10).minusSeconds(10)),
+        )
+    }
+
+    // 다른 노드가 만든 행은 시계 차이로 만든 시각이 지금보다 뒤일 수 있다, 그래도 하한보다 자주 묻지 않는다
+    @Test
+    fun `checks at the backoff max when the created time is ahead of the clock`() {
+        val delay = nextStatusCheckDelay(createdBefore = Duration.ofMinutes(-3))
+
+        assertEquals(OperationProperties().backoffMax, delay)
+    }
+
+    // 삭제를 접수하기 전의 STOPPING 행도 같은 경로로 묻는다
+    @Test
+    fun `widens the status check interval for a stopping row too`() {
+        val delay = nextStatusCheckDelay(createdBefore = Duration.ofHours(5), status = InstanceStatus.STOPPING)
+
+        assertEquals(CleanupProperties().statusCheckMaxInterval, delay)
+    }
+
+    @Test
+    fun `rejects a status check max interval that is not positive`() {
+        assertFailsWith<IllegalArgumentException> { CleanupProperties(statusCheckMaxInterval = Duration.ZERO) }
+        assertFailsWith<IllegalArgumentException> { CleanupProperties(statusCheckMaxInterval = Duration.ofSeconds(-1)) }
+    }
+
+    // 상한을 하한보다 짧게 두면 하한(backoff-max)으로 묻는다, 그보다 자주 묻지 않는다
+    @Test
+    fun `keeps the backoff max when the status check max interval is set below it`() {
+        val delay = nextStatusCheckDelay(
+            createdBefore = Duration.ofHours(5),
+            cleanupProperties = CleanupProperties(statusCheckMaxInterval = Duration.ofSeconds(5)),
+        )
+
+        assertEquals(OperationProperties().backoffMax, delay)
+    }
+
+    // 만든 시각을 모르면 나이를 알 수 없어 늘리지 않고 하한으로 묻는다
+    @Test
+    fun `checks at the backoff max when the created time is unknown`() {
+        val delay = nextStatusCheckDelay(createdBefore = null)
+
+        assertEquals(OperationProperties().backoffMax, delay)
+    }
+
+    // 간격을 늘려도 알림이 정리를 끝내지 않는 것은 그대로다
+    // 알림 간격과 조회 간격을 둘 다 10분으로 두면 알림도 10분마다 나간다
+    @Test
+    fun `still alerts and keeps waiting when the status check interval is wide`() {
+        val alerts = alertsOverThirtyMinutes(
+            CleanupProperties(resolveTimeout = Duration.ofMinutes(10), statusCheckMaxInterval = Duration.ofMinutes(10)),
+        )
+
+        // 0분에 대기를 시작하고 10분, 20분, 30분 조회에서 알린다
+        assertEquals(3, alerts)
+    }
+
+    // 알림은 조회할 때만 확인하므로 조회 간격보다 자주 나가지 않는다
+    // 알림 간격을 5분으로 줄여도 10분마다 묻는 행은 10분마다 알린다
+    @Test
+    fun `alerts no more often than the status check interval`() {
+        val alerts = alertsOverThirtyMinutes(
+            CleanupProperties(resolveTimeout = Duration.ofMinutes(5), statusCheckMaxInterval = Duration.ofMinutes(10)),
+        )
+
+        assertEquals(3, alerts)
+    }
+
+    // 상한 간격으로 묻는 오래된 행을 30분 동안 정해진 조회 시각마다 묻고, 남은 알림 수를 돌려준다
+    private fun alertsOverThirtyMinutes(cleanupProperties: CleanupProperties): Int {
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val start = Instant.parse("2026-08-12T00:00:00Z")
+        val movingClock = MutableClock(start)
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                createdAt = start.minus(Duration.ofHours(5))
+            },
+        )
+        val service = newService(
+            repository,
+            runtimeClient = notStoredRuntimeClient(),
+            events = events,
+            cleanupProperties = cleanupProperties,
+            clock = movingClock,
+        )
+
+        service.submitDelete(instance.instanceId)
+        repeat(3) {
+            movingClock.advance(Duration.between(movingClock.instant(), instance.nextPollAt))
+            service.submitDelete(instance.instanceId)
+        }
+
+        assertEquals(start.plus(Duration.ofMinutes(30)), movingClock.instant())
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        return events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED }
+    }
+
+    // 고친 효과를 숫자로 본다, 생성 직후 갇힌 행 하나가 8일 동안 런타임을 몇 번 부르는지 센다
+    // 간격을 30초로 고정하면 8일에 23,040번이다
+    @Test
+    fun `calls runtime status far less often over eight days`() {
+        // given
+        val repository = TestInstanceRepository()
+        val start = Instant.parse("2026-08-12T00:00:00Z")
+        val movingClock = MutableClock(start)
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                createdAt = start
+            },
+        )
+        var calls = 0
+        val runtimeClient = object : RuntimeClient by notStoredRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                calls += 1
+                return RuntimeStatusResult.NotStored
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient, clock = movingClock)
+        val end = start.plus(Duration.ofDays(8))
+
+        // when: 정해진 다음 조회 시각마다 묻는다
+        // 간격이 0이 되면 시계가 멈춰 끝나지 않으므로 예전 방식의 횟수를 넘기면 멈춘다
+        while (movingClock.instant().isBefore(end) && calls <= 23_040) {
+            service.submitDelete(instance.instanceId)
+            movingClock.advance(Duration.between(movingClock.instant(), instance.nextPollAt))
+        }
+
+        // then: 처음 100분 동안 간격이 늘어나는 구간을 지나면 하루 144번이라 8일에 1,184번이다
+        assertTrue(calls in 1_100..1_300, "calls=$calls")
+    }
+
+    // 생성 시각이 지금보다 createdBefore만큼 앞선 갇힌 행을 한 번 조회하고, 다음 조회까지의 간격을 돌려준다
+    private fun nextStatusCheckDelay(
+        createdBefore: Duration?,
+        cleanupProperties: CleanupProperties = CleanupProperties(),
+        status: InstanceStatus = InstanceStatus.CLEANUP_PENDING,
+    ): Duration {
+        val repository = TestInstanceRepository()
+        val row = if (status == InstanceStatus.STOPPING) newStopping() else newCleanupPending()
+        val instance = repository.save(row.apply { runtimeWorkloadId = null })
+        // 저장소가 빈 생성 시각을 채우므로 저장한 뒤에 정한다
+        instance.createdAt = createdBefore?.let { clock.instant().minus(it) }
+        val service = newService(repository, runtimeClient = notStoredRuntimeClient(), cleanupProperties = cleanupProperties)
+
+        service.submitDelete(instance.instanceId)
+
+        assertEquals(status, instance.status)
+        return Duration.between(clock.instant(), instance.nextPollAt)
+    }
+
+    // 저장된 정보가 없다고만 답하는 client, 삭제 접수는 막는다
+    private fun notStoredRuntimeClient(): RuntimeClient =
+        object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = RuntimeStatusResult.NotStored
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
 
     // 런타임은 workload를 만든 뒤 결과를 먼저 저장하고 그다음 binding을 저장한다
     // 그 사이가 깨지면 살아 있는 workload를 남긴 채 operation이 FAILED로 끝난다

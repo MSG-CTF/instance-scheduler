@@ -447,7 +447,7 @@ class InstanceOperationService(
                     // 실패를 세는 값과 섞지 않는다, 이건 실패가 아니라 기다리는 중이다
                     // 섞으면 조회가 실제로 실패할 때 운영자에게 알리는 한도가 이미 지나가 있다
                     // 마감으로 자르지 않는다, 마감이 끝내는 시각이 아니라 알리는 시각이라 넘겨도 된다
-                    instance.nextPollAt = now.plus(operationProperties.backoffMax)
+                    instance.nextPollAt = now.plus(statusCheckDelay(instance, now))
                     if (!now.isBefore(deadline)) {
                         // 알릴 때마다 다음 알림 시각을 뒤로 민다
                         // 매 주기마다 쌓지 않으면서, 멈춘 채로 있으면 같은 간격으로 다시 알린다
@@ -479,6 +479,20 @@ class InstanceOperationService(
                 cleanupProperties.resolveTimeout,
             )
         }
+    }
+
+    // 저장된 정보가 없다는 답을 받은 행을 다시 묻기까지의 간격
+    // 이런 행은 며칠씩 남을 수 있어 30초마다 물으면 행 하나가 하루 2,880번 런타임을 부른다
+    // 나이는 기다리기 시작한 때가 아니라 행을 만든 때부터 센다, 기다리기 시작한 시각은 어디에도 남지 않는다
+    // 그래서 생성 결과를 끝내 못 받아 들어온 행은 이미 20분 넘게 지나 처음부터 2분 넘게 기다리고,
+    // 하드타임아웃으로 들어온 행은 처음부터 상한으로 기다린다
+    // 그만큼 늦게 끝난 생성이 남긴 workload를 늦게 찾지만, 생성을 그만큼 기다린 뒤라 곧 끝날 가능성은 낮다
+    // 만든 시각을 모르면 나이를 알 수 없어 늘리지 않는다
+    private fun statusCheckDelay(instance: Instance, now: Instant): Duration {
+        val shortest = operationProperties.backoffMax
+        val age = instance.createdAt?.let { Duration.between(it, now) } ?: return shortest
+        val delay = minOf(age.dividedBy(STATUS_CHECK_AGE_DIVISOR), cleanupProperties.statusCheckMaxInterval)
+        return maxOf(delay, shortest)
     }
 
     // 조회가 안 되는 동안은 자원이 남았는지 모르는 상태다
@@ -1345,6 +1359,8 @@ class InstanceOperationService(
             InstanceStatus.STOPPING,
             InstanceStatus.CLEANUP_PENDING,
         )
+        // 기본값이면 5분 된 행까지는 backoff-max인 30초로 묻고, 100분 된 행부터 상한 10분으로 묻는다
+        private const val STATUS_CHECK_AGE_DIVISOR = 10L
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
         private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
 
