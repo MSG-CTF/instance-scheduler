@@ -855,6 +855,7 @@ class InstanceCommandIntegrationTest {
                 action = InstanceAction.CLEANUP
                 deleteReason = RuntimeDeleteReason.TTL_EXPIRED
                 runtimeWorkloadId = null
+                createFailureConfirmed = true
             },
         ).instanceId
         // 대기 조건을 넘기도록 하루 전에 만든 행으로 바꾼다
@@ -889,6 +890,7 @@ class InstanceCommandIntegrationTest {
                 action = InstanceAction.CLEANUP
                 deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
                 runtimeWorkloadId = null
+                createFailureConfirmed = true
             },
         ).instanceId
 
@@ -897,6 +899,32 @@ class InstanceCommandIntegrationTest {
             .andExpect {
                 status { isBadRequest() }
                 jsonPath("$.code") { value("INVALID_STATE_TRANSITION") }
+            }
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instanceRepository.findById(instanceId).orElseThrow().status)
+    }
+
+    // 생성 응답을 잃은 행은 런타임 큐에 생성이 남아 있을 수 있어 오래됐어도 받지 않는다
+    @Test
+    fun `force cleanup api rejects a row whose create result is unknown`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(703)).apply {
+                status = InstanceStatus.CLEANUP_PENDING
+                action = InstanceAction.CLEANUP
+                deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+                runtimeWorkloadId = null
+            },
+        ).instanceId
+        jdbcTemplate.update(
+            "update challenge_instance set created_at = now() - interval '1 day' where instance_id = ?",
+            instanceId,
+        )
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/force-cleanup")
+            .andExpect {
+                status { isConflict() }
+                jsonPath("$.code") { value("CREATE_RESULT_UNKNOWN") }
             }
         assertEquals(InstanceStatus.CLEANUP_PENDING, instanceRepository.findById(instanceId).orElseThrow().status)
     }

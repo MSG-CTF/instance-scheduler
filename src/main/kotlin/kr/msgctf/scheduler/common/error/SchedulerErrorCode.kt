@@ -72,6 +72,12 @@ enum class SchedulerErrorCode(
         HttpStatus.CONFLICT,
         "런타임에 인스턴스가 아직 남아 있습니다.",
     ),
+    // 생성 요청의 결과를 받지 못한 행이다, 런타임 큐에 남은 생성이 나중에 workload를 만들 수 있다
+    // 끝내면 그 workload를 지울 수단이 없어 정리 워커가 계속 확인하게 둔다
+    CREATE_RESULT_UNKNOWN(
+        HttpStatus.CONFLICT,
+        "런타임에서 생성 결과를 확인하지 못해 강제 정리할 수 없습니다.",
+    ),
     HARD_TIMEOUT_EXCEEDED(
         HttpStatus.BAD_REQUEST,
         "더 이상 인스턴스 시간을 연장할 수 없습니다.",

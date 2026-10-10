@@ -396,7 +396,8 @@ class InstanceOperationService(
 
     // 정리 워커가 끝내지 못하는 행을 운영자가 끝낸다
     // 워커는 런타임이 정보를 저장하지 않았다는 답만으로는 끝내지 않는다, 생성이 진행 중일 때도 같은 답이 오기 때문이다
-    // 그래서 끝내기 전에 한 번 더 묻고, workload가 있다고 하면 끝내지 않는다
+    // 그래서 런타임이 생성 실패를 알려 준 행만 받는다, 그 생성은 런타임 큐에 다시 들어가지 않는다
+    // 끝내기 전에 한 번 더 묻고, workload가 있다고 하면 끝내지 않는다
     fun forceCleanup(instanceId: UUID): InstanceResult {
         val current = instanceRepository.findById(instanceId).orElse(null)
             ?: throw instanceNotFound(instanceId)
@@ -445,12 +446,10 @@ class InstanceOperationService(
                         completeDelete(instance)
                     }
                     // 정리를 확인하지 못했으므로 CLEANED가 아니라 FAILED로 끝낸다
-                    // 런타임 큐에 생성이 남아 있으면 나중에 workload가 생길 수 있어 그 사실을 이벤트에 남긴다
                     RuntimeStatusResult.NotStored ->
                         parkFailed(
                             instance,
-                            "forced by operator, runtime has not stored the instance, " +
-                                "a create queued while runtime was down may still run",
+                            "forced by operator, create failed in runtime and runtime has not stored the instance",
                         )
                 }
                 reservationToRelease = takeReservation(instance)
@@ -458,10 +457,10 @@ class InstanceOperationService(
             },
         )
         // CLEANED로 끝난 행은 이벤트가 남지 않아 워커가 끝낸 행과 구분되지 않는다, 운영자가 끝냈다는 것은 로그로 남긴다
-        // FAILED로 끝난 행은 나중에 런타임 큐에 남은 생성이 workload를 만들 수 있어 경고로 남긴다
+        // FAILED로 끝난 행은 정리를 확인하지 못한 채 끝낸 것이라 경고로 남긴다
         if (result.status == InstanceStatus.FAILED) {
             log.warn(
-                "instance force cleaned by operator, runtime had no record, a queued create may still run: " +
+                "instance force cleaned by operator without confirming cleanup, runtime had no record: " +
                     "instanceId={}, status={}",
                 instanceId,
                 result.status,
@@ -486,6 +485,15 @@ class InstanceOperationService(
                 errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
                 adminDetail = "instanceId=${instance.instanceId}, status=${instance.status}, " +
                     "runtimeWorkloadId=${instance.runtimeWorkloadId}, runtimeOperationId=${instance.runtimeOperationId}",
+            )
+        }
+        // 생성 응답을 잃은 행은 런타임 큐에 생성이 남아 있을 수 있다, 런타임이 재시작하면 실행된다
+        // 지금 끝내면 나중에 생긴 workload를 아무도 지우지 않으므로 워커가 계속 확인하게 둔다
+        // 큐는 시간이 지나도 생성을 버리지 않아 나이로는 판단할 수 없다
+        if (!instance.createFailureConfirmed) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.CREATE_RESULT_UNKNOWN,
+                adminDetail = "instanceId=${instance.instanceId}, reason=runtime has not confirmed the create failed",
             )
         }
         // 만든 시각을 모르면 나이를 판단할 수 없어 받지 않는다
@@ -767,6 +775,8 @@ class InstanceOperationService(
             when (instance.status) {
                 InstanceStatus.PROVISIONING -> {
                     parkForCreateCleanup(instance)
+                    // 런타임은 FAILED로 끝난 operation을 다시 실행하지 않는다
+                    instance.createFailureConfirmed = true
                     recordError(
                         instance,
                         SchedulerErrorCode.RUNTIME_CREATE_FAILED,
@@ -778,6 +788,7 @@ class InstanceOperationService(
                     // 다만 실패한 생성이 자원을 남겼을 수 있어 여기서 끝내지 않고 조회로 확인하게 넘긴다
                     if (snapshot.type == RuntimeOperationType.CREATE) {
                         clearOperation(instance)
+                        instance.createFailureConfirmed = true
                         instance.nextPollAt = clock.instant()
                         recordError(
                             instance,

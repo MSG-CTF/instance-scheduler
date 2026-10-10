@@ -9,6 +9,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -1979,6 +1980,40 @@ class InstanceOperationServiceTest {
         }
     }
 
+    // 생성 응답을 잃은 행은 런타임 큐에 생성이 남아 있을 수 있다
+    // 지금 런타임에 없어도 나중에 생기면 워커가 지워야 하므로 행과 예약을 그대로 둔다
+    // 나이와 상관없이 막는다, 런타임 큐는 시간이 지나도 생성을 버리지 않는다
+    @Test
+    fun `rejects a row whose create result is unknown without calling runtime`() {
+        listOf(
+            "old" to clock.instant().minus(Duration.ofDays(1)),
+            "young" to clock.instant().minusSeconds(1),
+        ).forEach { (label, createdAt) ->
+            // given
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val events = TestInstanceEventRepository()
+            val instance = repository.save(
+                stuckCleanupPending().apply {
+                    createFailureConfirmed = false
+                    this.createdAt = createdAt
+                    reservationId = "reservation-held"
+                },
+            )
+            val service = newService(repository, brokerClient = broker, events = events, runtimeClient = runtimeMustNotBeAsked())
+
+            // when
+            val exception = assertFailsWith<SchedulerException>(label) { service.forceCleanup(instance.instanceId) }
+
+            // then
+            assertEquals(SchedulerErrorCode.CREATE_RESULT_UNKNOWN, exception.errorCode, label)
+            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status, label)
+            assertEquals("reservation-held", instance.reservationId, label)
+            assertEquals(emptyList(), broker.releasedReservations, label)
+            assertTrue(events.saved.isEmpty(), label)
+        }
+    }
+
     // 생성이 아직 진행 중일 수 있는 행은 런타임에 묻지 않고 거절한다
     @Test
     fun `rejects a row younger than the minimum age without calling runtime`() {
@@ -2145,11 +2180,13 @@ class InstanceOperationServiceTest {
     }
 
     // 워커가 끝내지 못하는 행, 런타임 좌표는 있고 id는 둘 다 없다
+    // 런타임이 생성 실패를 알려 준 행으로 둔다, 강제 정리가 받는 행은 이것뿐이다
     // 대기 조건에 걸리지 않게 하루 전에 만든 행으로 둔다
     private fun stuckCleanupPending(): Instance =
         newCleanupPending().apply {
             runtimeWorkloadId = null
             runtimeOperationId = null
+            createFailureConfirmed = true
             createdAt = clock.instant().minus(Duration.ofDays(1))
         }
 
@@ -2307,6 +2344,8 @@ class InstanceOperationServiceTest {
         assertNull(instance.runtimeOperationId)
         assertNotNull(instance.nextPollAt)
         assertNotEquals(InstanceStatus.CLEANED, instance.status)
+        // 런타임이 생성을 끝냈으므로 큐에 남은 생성은 없다, 운영자가 강제 정리할 수 있다
+        assertTrue(instance.createFailureConfirmed)
     }
 
     // 생성 결과를 이어 보는 동안에는 삭제 접수가 이 행을 건드리면 안 된다
@@ -2363,6 +2402,8 @@ class InstanceOperationServiceTest {
         assertNull(instance.runtimeOperationId)
         assertNotNull(instance.nextPollAt)
         assertNotEquals(InstanceStatus.FAILED, instance.status)
+        // 생성 결과를 끝내 못 받았으므로 생성이 아직 큐에 남아 있을 수 있다
+        assertFalse(instance.createFailureConfirmed)
     }
 
     // 정리로 넘어온 뒤에 생성이 끝나는 경우다
@@ -2881,6 +2922,8 @@ class InstanceOperationServiceTest {
 
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        // 접수가 런타임에 닿았는지 모르므로 생성이 큐에 남아 있을 수 있다
+        assertFalse(instance.createFailureConfirmed)
     }
 
     // 거부가 아닌 실패는 파킹하지 않는 갈래를 고정한다
@@ -3246,6 +3289,7 @@ class InstanceOperationServiceTest {
         // 남겨 두면 다음 주기에 같은 실패를 다시 받아 기록만 두 번 남는다
         assertNull(instance.runtimeOperationId)
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+        assertTrue(instance.createFailureConfirmed)
     }
 
     // 조회 오류는 상태를 바꾸지 않고 간격을 늘려 다음 조회를 예약하는지 확인
