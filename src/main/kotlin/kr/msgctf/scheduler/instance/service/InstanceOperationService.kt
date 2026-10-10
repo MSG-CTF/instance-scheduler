@@ -481,13 +481,13 @@ class InstanceOperationService(
         }
     }
 
-    // 저장된 정보가 없다는 답을 받은 행을 다시 묻기까지의 간격
-    // 이런 행은 며칠씩 남을 수 있어 30초마다 물으면 행 하나가 하루 2,880번 런타임을 부른다
-    // 나이는 기다리기 시작한 때가 아니라 행을 만든 때부터 센다, 기다리기 시작한 시각은 어디에도 남지 않는다
-    // 그래서 생성 결과를 끝내 못 받아 들어온 행은 이미 20분 넘게 지나 처음부터 2분 넘게 기다리고,
-    // 하드타임아웃으로 들어온 행은 처음부터 상한으로 기다린다
-    // 그만큼 늦게 끝난 생성이 남긴 workload를 늦게 찾지만, 생성을 그만큼 기다린 뒤라 곧 끝날 가능성은 낮다
-    // 만든 시각을 모르면 나이를 알 수 없어 늘리지 않는다
+    // 저장된 정보가 없다는 답을 받은 행에 다시 묻기까지 기다릴 간격을 정한다
+    // 이런 행은 며칠씩 남을 수 있다, 30초마다 물으면 행 하나가 하루에 2,880번 런타임을 호출한다
+    // 간격은 행을 만든 뒤 지난 시간으로 정한다, 정리를 기다리기 시작한 시각은 어디에도 저장되지 않기 때문이다
+    // 그래서 생성 결과를 끝내 못 받고 들어온 행은 이미 20분 넘게 지나 있어 처음부터 2분 넘게 기다린다
+    // 하드타임아웃으로 들어온 행은 처음부터 상한만큼 기다린다
+    // 뒤늦게 끝난 생성이 남긴 workload는 그만큼 늦게 찾는다, 다만 생성을 이만큼 기다린 뒤라 그 사이에 끝날 가능성은 낮다
+    // 만든 시각을 모르면 지난 시간을 알 수 없어 간격을 늘리지 않는다
     private fun statusCheckDelay(instance: Instance, now: Instant): Duration {
         val shortest = operationProperties.backoffMax
         val age = instance.createdAt?.let { Duration.between(it, now) } ?: return shortest
@@ -1359,7 +1359,7 @@ class InstanceOperationService(
             InstanceStatus.STOPPING,
             InstanceStatus.CLEANUP_PENDING,
         )
-        // 기본값이면 5분 된 행까지는 backoff-max인 30초로 묻고, 100분 된 행부터 상한 10분으로 묻는다
+        // 기본 설정에서는 만든 지 5분 안 된 행에 backoff-max인 30초마다 묻고, 100분이 지난 행부터 상한인 10분마다 묻는다
         private const val STATUS_CHECK_AGE_DIVISOR = 10L
         private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
         private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
