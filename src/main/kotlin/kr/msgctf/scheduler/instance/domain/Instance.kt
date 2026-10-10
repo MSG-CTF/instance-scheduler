@@ -88,6 +88,12 @@ class Instance(
     @Column(name = "healthcheck_forwarded")
     var healthcheckForwarded: Boolean? = null,
 
+    // 런타임이 생성 operation을 FAILED로 끝냈다고 알려 줬는지
+    // true면 런타임 큐에 이 생성이 남아 있지 않다, 운영자 강제 정리는 이 행만 받는다
+    // 실패한 생성이 남긴 자원이 없다는 뜻은 아니다, 그것은 강제 정리가 runtime-status로 따로 묻는다
+    @Column(name = "create_failure_confirmed", nullable = false)
+    var createFailureConfirmed: Boolean = false,
+
     // 이 인스턴스를 만들 때 쓴 릴리스 번호, Registry가 매기는 revision 값이다
     // 이 컬럼이 생기기 전 행은 값을 알 수 없어 null로 남는다
     @Column(name = "registry_revision")

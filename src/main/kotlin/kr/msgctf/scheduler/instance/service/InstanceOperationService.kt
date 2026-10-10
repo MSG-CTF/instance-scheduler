@@ -32,6 +32,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
+import kr.msgctf.scheduler.instance.dto.InstanceResult
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
@@ -393,6 +394,127 @@ class InstanceOperationService(
         releaseReservationQuietly(missingReservation)
     }
 
+    // 정리 워커가 끝내지 못하는 행을 운영자가 끝낸다
+    // 워커는 런타임이 정보를 저장하지 않았다는 답만으로는 끝내지 않는다, 생성이 진행 중일 때도 같은 답이 오기 때문이다
+    // 그래서 런타임이 생성 실패를 알려 준 행만 받는다, 그 생성은 런타임 큐에 다시 들어가지 않는다
+    // 끝내기 전에 한 번 더 묻고, workload가 있다고 하면 끝내지 않는다
+    fun forceCleanup(instanceId: UUID): InstanceResult {
+        val current = instanceRepository.findById(instanceId).orElse(null)
+            ?: throw instanceNotFound(instanceId)
+        // 런타임을 부르기 전에 거른다, 런타임이 꺼져 있어도 대상이 아닌 행에는 400이 나가야 한다
+        rejectUnlessForceCleanable(current)
+
+        // 잠근 채 런타임을 기다리면 같은 행을 보는 워커가 막히므로 잠금 밖에서 묻는다
+        val status = try {
+            runtimeClient.getRuntimeStatus(instanceId)
+        } catch (exception: Exception) {
+            // 행에는 아무것도 남지 않으므로 운영자가 원인을 찾을 수 있게 로그로 남긴다
+            log.warn(
+                "force cleanup refused, runtime status unavailable: instanceId={}, reason={}",
+                instanceId,
+                failureDetail(exception),
+            )
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+                adminDetail = "instanceId=$instanceId, reason=runtime status unavailable, ${failureDetail(exception)}",
+                cause = exception,
+            )
+        }
+
+        var reservationToRelease: PendingRelease? = null
+        val result = checkNotNull(
+            tx.execute {
+                val instance = instanceRepository.findByIdForUpdate(instanceId) ?: throw instanceNotFound(instanceId)
+                // 묻는 사이 워커가 id를 채웠거나 상태를 옮겼으면 그쪽 판단을 덮지 않는다
+                rejectUnlessForceCleanable(instance)
+                when (status) {
+                    // 예약도 쥔 채로 둔다, 워커가 다음 조회에서 이 id를 받아 정상 삭제한다
+                    is RuntimeStatusResult.Found -> {
+                        log.info(
+                            "force cleanup refused, runtime still has the workload: instanceId={}, runtimeWorkloadId={}",
+                            instanceId,
+                            status.runtimeWorkloadId,
+                        )
+                        throw SchedulerException(
+                            errorCode = SchedulerErrorCode.WORKLOAD_STILL_EXISTS,
+                            adminDetail = "instanceId=$instanceId, runtimeWorkloadId=${status.runtimeWorkloadId}",
+                        )
+                    }
+                    // 이미 지워졌으면 정리를 확인한 것이라 사실대로 CLEANED로 둔다, 워커와 같은 처리다
+                    is RuntimeStatusResult.AlreadyDeleted -> {
+                        instance.runtimeWorkloadId = status.runtimeWorkloadId
+                        completeDelete(instance)
+                    }
+                    // 정리를 확인하지 못했으므로 CLEANED가 아니라 FAILED로 끝낸다
+                    RuntimeStatusResult.NotStored ->
+                        parkFailed(
+                            instance,
+                            "forced by operator, create failed in runtime and runtime has not stored the instance",
+                        )
+                }
+                reservationToRelease = takeReservation(instance)
+                InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
+            },
+        )
+        // CLEANED로 끝난 행은 이벤트가 남지 않아 워커가 끝낸 행과 구분되지 않는다, 운영자가 끝냈다는 것은 로그로 남긴다
+        // FAILED로 끝난 행은 정리를 확인하지 못한 채 끝낸 것이라 경고로 남긴다
+        if (result.status == InstanceStatus.FAILED) {
+            log.warn(
+                "instance force cleaned by operator without confirming cleanup, runtime had no record: " +
+                    "instanceId={}, status={}",
+                instanceId,
+                result.status,
+            )
+        } else {
+            log.info("instance force cleaned by operator: instanceId={}, status={}", instanceId, result.status)
+        }
+        // 반납이 실패해도 행은 이미 끝났다, 오류를 내면 운영자가 다시 부르고 다시 부르면 400이 된다
+        releaseReservationQuietly(reservationToRelease)
+        return result
+    }
+
+    // 워커가 끝낼 수 있는 행과 생성이 아직 진행 중일 수 있는 행은 받지 않는다
+    // workload id가 있으면 삭제 재시도가 끝내고, operation id가 있으면 런타임 결과를 기다리는 중이다
+    private fun rejectUnlessForceCleanable(instance: Instance) {
+        if (
+            instance.status != InstanceStatus.CLEANUP_PENDING ||
+            instance.runtimeWorkloadId != null ||
+            instance.runtimeOperationId != null
+        ) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=${instance.instanceId}, status=${instance.status}, " +
+                    "runtimeWorkloadId=${instance.runtimeWorkloadId}, runtimeOperationId=${instance.runtimeOperationId}",
+            )
+        }
+        // 생성 응답을 잃은 행은 런타임 큐에 생성이 남아 있을 수 있다, 런타임이 재시작하면 실행된다
+        // 지금 끝내면 나중에 생긴 workload를 아무도 지우지 않으므로 워커가 계속 확인하게 둔다
+        // 큐는 시간이 지나도 생성을 버리지 않아 나이로는 판단할 수 없다
+        if (!instance.createFailureConfirmed) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.CREATE_RESULT_UNKNOWN,
+                adminDetail = "instanceId=${instance.instanceId}, reason=runtime has not confirmed the create failed",
+            )
+        }
+        // 만든 시각을 모르면 나이를 판단할 수 없어 받지 않는다
+        val createdAt = instance.createdAt
+        val earliest = createdAt?.plus(cleanupProperties.forceCleanupMinAge)
+        if (earliest == null || clock.instant().isBefore(earliest)) {
+            val reason = if (createdAt == null) "created time unknown" else "create may still be in progress"
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=${instance.instanceId}, createdAt=$createdAt, " +
+                    "minAge=${cleanupProperties.forceCleanupMinAge}, reason=$reason",
+            )
+        }
+    }
+
+    private fun instanceNotFound(instanceId: UUID): SchedulerException =
+        SchedulerException(
+            errorCode = SchedulerErrorCode.INSTANCE_NOT_FOUND,
+            adminDetail = "instanceId=$instanceId",
+        )
+
     // 확인 없이 정리를 끝내면 접수가 닿았던 workload가 런타임에 남는다
     private fun resolveWorkloadForDelete(instanceId: UUID) {
         val status = try {
@@ -653,6 +775,8 @@ class InstanceOperationService(
             when (instance.status) {
                 InstanceStatus.PROVISIONING -> {
                     parkForCreateCleanup(instance)
+                    // 런타임은 FAILED로 끝난 operation을 다시 실행하지 않는다
+                    instance.createFailureConfirmed = true
                     recordError(
                         instance,
                         SchedulerErrorCode.RUNTIME_CREATE_FAILED,
@@ -664,6 +788,7 @@ class InstanceOperationService(
                     // 다만 실패한 생성이 자원을 남겼을 수 있어 여기서 끝내지 않고 조회로 확인하게 넘긴다
                     if (snapshot.type == RuntimeOperationType.CREATE) {
                         clearOperation(instance)
+                        instance.createFailureConfirmed = true
                         instance.nextPollAt = clock.instant()
                         recordError(
                             instance,
@@ -916,7 +1041,8 @@ class InstanceOperationService(
             )
         } catch (exception: Exception) {
             log.warn(
-                "reservation release failed: reservationId={}, releaseReason={}, reason={}",
+                "reservation release failed: instanceId={}, reservationId={}, releaseReason={}, reason={}",
+                release.instanceId,
                 release.reservationId,
                 release.reason,
                 failureDetail(exception),
