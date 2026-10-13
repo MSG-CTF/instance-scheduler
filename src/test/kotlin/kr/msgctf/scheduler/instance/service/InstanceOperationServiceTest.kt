@@ -254,6 +254,95 @@ class InstanceOperationServiceTest {
         assertTrue(runtimeClient.creates.isEmpty())
     }
 
+    // 응답을 못 받은 뒤 플래그를 바꿔 재시작해도 재접수는 첫 접수와 같은 요청을 보낸다
+    // 같은 request_id로 내용이 다르면 런타임이 409로 거절해 이미 접수된 작업을 이어받지 못한다
+    @Test
+    fun `resubmits the first request when healthcheck forwarding is turned on after a lost response`() {
+        assertResubmitRepeatsFirstRequest(enabledAtFirstSubmit = false)
+    }
+
+    @Test
+    fun `resubmits the first request when healthcheck forwarding is turned off after a lost response`() {
+        assertResubmitRepeatsFirstRequest(enabledAtFirstSubmit = true)
+    }
+
+    // 결정을 저장하기 전 버전이 접수한 행은 healthcheck 없이 나갔으므로 재접수에도 싣지 않는다
+    @Test
+    fun `keeps healthcheck off resubmit for rows provisioned before the decision was stored`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newStalledProvisioning().apply { healthcheck = HEALTHCHECK_JSON })
+        val runtimeClient = CapturingRuntimeClient()
+        val service = newService(
+            repository,
+            runtimeClient = runtimeClient,
+            policyProperties = InstancePolicyProperties(healthcheckEnabled = true),
+        )
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertNull(runtimeClient.creates.single().workload.healthcheck)
+        assertNotNull(instance.runtimeOperationId)
+    }
+
+    // 플래그가 켜져 있어도 healthcheck가 없는 행은 싣지 않음으로 남긴다
+    @Test
+    fun `stores healthcheck as not forwarded when the row has none`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, policyProperties = InstancePolicyProperties(healthcheckEnabled = true))
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(false, instance.healthcheckForwarded)
+    }
+
+    private fun assertResubmitRepeatsFirstRequest(enabledAtFirstSubmit: Boolean) {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { healthcheck = HEALTHCHECK_JSON })
+        val delegate = FakeRuntimeClient()
+        val creates = mutableListOf<RuntimeCreateRequest>()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                creates += request
+                val accepted = delegate.submitCreate(request)
+                // 첫 접수는 런타임이 받았지만 응답이 스케줄러에 닿지 않는다
+                if (creates.size == 1) throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "response lost")
+                return accepted
+            }
+        }
+        val beforeRestart = newService(
+            repository,
+            runtimeClient = runtimeClient,
+            policyProperties = InstancePolicyProperties(healthcheckEnabled = enabledAtFirstSubmit),
+        )
+        val afterRestart = newService(
+            repository,
+            runtimeClient = runtimeClient,
+            policyProperties = InstancePolicyProperties(healthcheckEnabled = !enabledAtFirstSubmit),
+        )
+
+        // when
+        beforeRestart.progressRequested(instance.instanceId)
+        instance.nextPollAt = clock.instant()
+        afterRestart.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(2, creates.size)
+        assertEquals(creates[0], creates[1])
+        assertEquals(enabledAtFirstSubmit, creates[0].workload.healthcheck != null)
+        assertEquals(enabledAtFirstSubmit, instance.healthcheckForwarded)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNotNull(instance.runtimeOperationId)
+    }
+
     // 저장된 exposedPorts가 런타임 요청에 그대로 실리는지 확인
     // 빈 목록도 null이 아니라 빈 배열로 나가야 한다, null이 실리면 런타임이 거절한다
     @Test
