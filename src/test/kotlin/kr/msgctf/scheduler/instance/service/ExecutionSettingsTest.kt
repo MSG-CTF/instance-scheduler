@@ -13,6 +13,14 @@ class ExecutionSettingsTest {
     private val container = ContainerSpec("web","ghcr.io/test/web@sha256:"+"a".repeat(64),listOf(8080),true)
 
     @Test
+    fun `large environment retains every value through the database codec`() {
+        val source = container.copy(env = (0 until 128).associate { "SETTING_$it" to "$it" }, secretRef = reference)
+        assertNull(EnvironmentRules.violation(source))
+        val codec = ContainerSpecCodec()
+        assertEquals(source, codec.decode(codec.encode(listOf(source))).single())
+    }
+
+    @Test
     fun `database json preserves environment and backend reference`() {
         val source = container.copy(env=mapOf("APP_MODE" to "ctf","LANG" to "ko_KR.UTF-8"),secretRef=reference)
         val codec = ContainerSpecCodec()
@@ -26,7 +34,7 @@ class ExecutionSettingsTest {
             mapOf("FLAG" to "do-not-log"), mapOf("DB_PASSWORD" to "do-not-log"),
             mapOf("lowercase" to "do-not-log"), mapOf("APP_MODE" to "x".repeat(4097)),
             mapOf("APP_MODE" to "\u0000"), mapOf("APP_MODE" to "\ud800"),
-            (0..32).associate { "V$it" to "value" },
+            (0..128).associate { "V$it" to "value" },
         )
         for (env in invalid) {
             val reason = EnvironmentRules.violation(container.copy(env=env))
