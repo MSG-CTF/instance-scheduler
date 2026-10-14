@@ -11,9 +11,11 @@ import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
@@ -28,6 +30,7 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.context.annotation.Import
 import org.springframework.http.MediaType
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.delete
@@ -56,6 +59,9 @@ class InstanceCommandIntegrationTest {
 
     @Autowired
     private lateinit var objectMapper: ObjectMapper
+
+    @Autowired
+    private lateinit var jdbcTemplate: JdbcTemplate
 
     @BeforeEach
     fun setUp() {
@@ -837,6 +843,114 @@ class InstanceCommandIntegrationTest {
 
         assertEquals(saved.expiresAt, parseTime(data.get("expires_at").asString()))
         assertEquals(saved.hardExpiresAt, parseTime(data.get("hard_expires_at").asString()))
+    }
+
+    // 운영자가 정리를 끝내지 못한 행을 끝낸다, 테스트 런타임은 이 행을 모르므로 FAILED가 된다
+    @Test
+    fun `force cleanup api fails a stuck cleanup row`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(700)).apply {
+                status = InstanceStatus.CLEANUP_PENDING
+                action = InstanceAction.CLEANUP
+                deleteReason = RuntimeDeleteReason.TTL_EXPIRED
+                runtimeWorkloadId = null
+                createFailureConfirmed = true
+            },
+        ).instanceId
+        // 대기 조건을 넘기도록 하루 전에 만든 행으로 바꾼다
+        jdbcTemplate.update(
+            "update challenge_instance set created_at = now() - interval '1 day' where instance_id = ?",
+            instanceId,
+        )
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/force-cleanup")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.code") { value("SUCCESS") }
+                jsonPath("$.data.instance_id") { value(instanceId.toString()) }
+                jsonPath("$.data.status") { value("FAILED") }
+            }
+        assertEquals(InstanceStatus.FAILED, instanceRepository.findById(instanceId).orElseThrow().status)
+        // 운영자가 나중에 이벤트 API로 FAILED가 된 이유를 볼 수 있어야 한다
+        val event = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(instanceId).single()
+        assertEquals(InstanceEventType.ERROR_RECORDED, event.eventType)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, event.errorCode)
+        assertEquals(InstanceStatus.FAILED, event.toStatus)
+    }
+
+    // 막 정리로 넘어온 행은 생성이 진행 중일 수 있어 받지 않는다
+    @Test
+    fun `force cleanup api rejects a row younger than the minimum age`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(702)).apply {
+                status = InstanceStatus.CLEANUP_PENDING
+                action = InstanceAction.CLEANUP
+                deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+                runtimeWorkloadId = null
+                createFailureConfirmed = true
+            },
+        ).instanceId
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/force-cleanup")
+            .andExpect {
+                status { isBadRequest() }
+                jsonPath("$.code") { value("INVALID_STATE_TRANSITION") }
+            }
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instanceRepository.findById(instanceId).orElseThrow().status)
+    }
+
+    // 생성 응답을 잃은 행은 런타임 큐에 생성이 남아 있을 수 있어 오래됐어도 받지 않는다
+    @Test
+    fun `force cleanup api rejects a row whose create result is unknown`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(703)).apply {
+                status = InstanceStatus.CLEANUP_PENDING
+                action = InstanceAction.CLEANUP
+                deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+                runtimeWorkloadId = null
+            },
+        ).instanceId
+        jdbcTemplate.update(
+            "update challenge_instance set created_at = now() - interval '1 day' where instance_id = ?",
+            instanceId,
+        )
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/force-cleanup")
+            .andExpect {
+                status { isConflict() }
+                jsonPath("$.code") { value("CREATE_RESULT_UNKNOWN") }
+            }
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instanceRepository.findById(instanceId).orElseThrow().status)
+    }
+
+    @Test
+    fun `force cleanup api rejects a running instance`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(701))).instanceId
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/force-cleanup")
+            .andExpect {
+                status { isBadRequest() }
+                jsonPath("$.code") { value("INVALID_STATE_TRANSITION") }
+            }
+        assertEquals(InstanceStatus.RUNNING, instanceRepository.findById(instanceId).orElseThrow().status)
+    }
+
+    @Test
+    fun `force cleanup api returns not found for unknown instance`() {
+        // when & then
+        mockMvc.post("/api/instances/${UUID.randomUUID()}/force-cleanup")
+            .andExpect {
+                status { isNotFound() }
+                jsonPath("$.code") { value("INSTANCE_NOT_FOUND") }
+            }
     }
 
     // extend가 만료 시각을 늘리고 DB에 반영되는지 확인
