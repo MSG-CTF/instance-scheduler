@@ -11,6 +11,7 @@ import org.springframework.http.HttpHeaders
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
+import org.springframework.test.web.servlet.post
 import org.testcontainers.junit.jupiter.Testcontainers
 
 // 토큰이 설정된 프로파일에서 수신 인증이 실제 API 경로에 걸리는지 확인
@@ -44,5 +45,16 @@ class ApiAuthIntegrationTest {
             status { isNotFound() }
             jsonPath("$.code") { value("INSTANCE_NOT_FOUND") }
         }
+    }
+
+    // 운영자 전용 경로도 같은 토큰으로 막는다
+    @Test
+    fun `rejects force cleanup without token`() {
+        // when & then
+        mockMvc.post("/api/instances/${UUID.randomUUID()}/force-cleanup")
+            .andExpect {
+                status { isUnauthorized() }
+                jsonPath("$.code") { value("UNAUTHORIZED") }
+            }
     }
 }
