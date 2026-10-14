@@ -3514,6 +3514,38 @@ class InstanceOperationServiceTest {
         }
     }
 
+    @Test
+    fun `releases reservation only after runtime confirms failed create cleanup`() {
+        for (timedOut in listOf(false, true)) {
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val delegate = FakeRuntimeClient()
+            val runtime = object : RuntimeClient by delegate {
+                override fun getOperation(operationId: String) = RuntimeOperationSnapshot(
+                    operationId = operationId, type = RuntimeOperationType.CREATE,
+                    status = RuntimeOperationState.FAILED, retryAfterSeconds = null,
+                    result = null, lastErrorCode = "WORKLOAD_NOT_READY", cleanupCompleted = true,
+                )
+            }
+            val instance = repository.save(newRequested())
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+            service.progressRequested(instance.instanceId)
+            val reservation = instance.reservationId
+            if (timedOut) {
+                instance.pollDeadlineAt = clock.instant()
+                service.pollOperation(instance.instanceId)
+                assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+            }
+            service.pollOperation(instance.instanceId)
+            service.pollOperation(instance.instanceId)
+            assertEquals(InstanceStatus.CLEANED, instance.status)
+            assertNull(instance.runtimeOperationId)
+            assertNull(instance.reservationId)
+            assertEquals(listOf(reservation), broker.releasedReservations)
+            assertEquals(ReleaseReason.RUNTIME_CREATE_FAILED, broker.releaseRequests.single().releaseReason)
+        }
+    }
+
     private fun newService(
         repository: TestInstanceRepository,
         brokerClient: BrokerClient = FakeBrokerClient(),

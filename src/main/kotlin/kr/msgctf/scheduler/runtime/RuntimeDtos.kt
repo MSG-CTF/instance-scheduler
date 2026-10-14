@@ -211,6 +211,7 @@ data class RuntimeOperationSnapshot(
     val retryAfterSeconds: Long?,
     val result: RuntimeOperationResult?,
     val lastErrorCode: String?,
+    val cleanupCompleted: Boolean = false,
 )
 
 // SUCCEEDED일 때만 존재한다
@@ -272,4 +273,6 @@ data class RuntimeOperationStatusResponse(
 
     @JsonProperty("last_error_code")
     val lastErrorCode: String?,
+    @JsonProperty("cleanup_completed")
+    val cleanupCompleted: Boolean = false,
 )
