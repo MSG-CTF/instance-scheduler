@@ -89,4 +89,36 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
 
     // 데모 감시 화면이 새 인스턴스를 알아채는 용도라 최근 20개만 조회한다
     fun findTop20ByOrderByCreatedAtDesc(): List<Instance>
+
+    // 감시 쪽이 인스턴스 전체를 쪽 단위로 끝까지 읽는 목록의 첫 쪽이다
+    // 생성 시각이 같은 인스턴스가 쪽 경계에 걸려도 빠지거나 겹치지 않게 id까지 넣어 순서를 고정한다
+    @Query(
+        "select i from Instance i where i.status in :statuses" +
+            " and i.createdAt >= :from and i.createdAt < :to" +
+            " order by i.createdAt desc, i.instanceId desc",
+    )
+    fun findPage(
+        @Param("statuses") statuses: Collection<InstanceStatus>,
+        @Param("from") from: Instant,
+        @Param("to") to: Instant,
+        limit: Limit,
+    ): List<Instance>
+
+    // 두 번째 쪽부터 쓴다, cursorAt과 cursorId는 지난 쪽 마지막 인스턴스의 생성 시각과 id다
+    // 그 인스턴스보다 정렬상 뒤에 있는 것부터 준다, 즉 생성 시각이 더 이르거나 시각이 같고 id가 더 작은 인스턴스다
+    // 시각만 비교하면 같은 시각에 만든 인스턴스가 쪽 경계에 걸릴 때 빠지거나 두 번 나온다
+    @Query(
+        "select i from Instance i where i.status in :statuses" +
+            " and i.createdAt >= :from and i.createdAt < :to" +
+            " and (i.createdAt < :cursorAt or (i.createdAt = :cursorAt and i.instanceId < :cursorId))" +
+            " order by i.createdAt desc, i.instanceId desc",
+    )
+    fun findPageAfter(
+        @Param("statuses") statuses: Collection<InstanceStatus>,
+        @Param("from") from: Instant,
+        @Param("to") to: Instant,
+        @Param("cursorAt") cursorAt: Instant,
+        @Param("cursorId") cursorId: UUID,
+        limit: Limit,
+    ): List<Instance>
 }

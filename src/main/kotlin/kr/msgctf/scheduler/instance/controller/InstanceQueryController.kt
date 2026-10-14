@@ -1,9 +1,13 @@
 package kr.msgctf.scheduler.instance.controller
 
+import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.common.response.ApiResponse
+import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.InstanceDetailResponse
 import kr.msgctf.scheduler.instance.dto.InstanceEventResponse
+import kr.msgctf.scheduler.instance.dto.InstanceListQuery
+import kr.msgctf.scheduler.instance.dto.InstancePageResponse
 import kr.msgctf.scheduler.instance.dto.InstanceResponse
 import kr.msgctf.scheduler.instance.service.InstanceQueryService
 import org.springframework.web.bind.annotation.GetMapping
@@ -35,6 +39,33 @@ class InstanceQueryController(
         ApiResponse.success(
             message = "인스턴스 이벤트 조회 성공",
             data = instanceQueryService.getEvents(instanceId).map(InstanceEventResponse::from),
+        )
+
+    // 감시 쪽이 인스턴스 전체를 쪽 단위로 끝까지 읽는 목록 조회
+    // status는 여러 번 줄 수 있고, 빈 값은 Spring이 null로 바꾸므로 걸러낸다
+    // 시각은 응답과 같은 형식(예: 2026-10-14T00:00:00.000+00:00)으로 받는다
+    // URL에서는 + 가 공백으로 읽혀 400이 되므로, 호출하는 쪽은 + 를 %2B로 적거나 끝을 Z로 쓴다
+    @GetMapping
+    fun listInstances(
+        @RequestParam("status", required = false) statuses: Set<InstanceStatus?>?,
+        @RequestParam("created_after", required = false) createdAfter: Instant?,
+        @RequestParam("created_before", required = false) createdBefore: Instant?,
+        @RequestParam("cursor", required = false) cursor: String?,
+        @RequestParam("limit", required = false) limit: Int?,
+    ): ApiResponse<InstancePageResponse> =
+        ApiResponse.success(
+            message = "인스턴스 목록 조회 성공",
+            data = InstancePageResponse.from(
+                instanceQueryService.listInstances(
+                    InstanceListQuery(
+                        statuses = statuses.orEmpty().filterNotNull().toSet(),
+                        createdAfter = createdAfter,
+                        createdBefore = createdBefore,
+                        cursor = cursor,
+                        limit = limit,
+                    ),
+                ),
+            ),
         )
 
     // 데모 감시 화면용 최근 인스턴스 목록 조회

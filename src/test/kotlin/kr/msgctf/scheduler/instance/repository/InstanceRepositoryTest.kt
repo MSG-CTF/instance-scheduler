@@ -388,6 +388,84 @@ class InstanceRepositoryTest {
         assertEquals(false, found.any { it.instanceId == latest.instanceId })
     }
 
+    // 목록은 최신순이고 생성 시각이 같으면 id 역순으로 정해진 순서를 갖는다
+    // id 순서는 DB가 uuid를 바이트로 비교한 결과라 문자열 비교와 같고 Java UUID 비교와는 다르다
+    @Test
+    fun `lists newest first with id as tiebreaker`() {
+        val older = instanceRepository.saveAndFlush(newInstance())
+        val tieA = instanceRepository.saveAndFlush(newInstance())
+        val tieB = instanceRepository.saveAndFlush(newInstance())
+        val base = Instant.parse("2026-09-01T00:00:00Z")
+        setCreatedAt(older, base)
+        setCreatedAt(tieA, base.plusSeconds(60))
+        setCreatedAt(tieB, base.plusSeconds(60))
+
+        val found = instanceRepository.findPage(
+            InstanceStatus.entries,
+            LIST_FROM,
+            LIST_TO,
+            Limit.unlimited(),
+        )
+
+        val ties = listOf(tieA, tieB).map { it.instanceId }.sortedByDescending { it.toString() }
+        assertEquals(ties + older.instanceId, found.map { it.instanceId })
+    }
+
+    // 다음 쪽은 지난 쪽 마지막 인스턴스를 빼고, 그것과 생성 시각이 같은 나머지 인스턴스부터 이어서 준다
+    @Test
+    fun `lists rows after the cursor including rows with the same created at`() {
+        val older = instanceRepository.saveAndFlush(newInstance())
+        val tieA = instanceRepository.saveAndFlush(newInstance())
+        val tieB = instanceRepository.saveAndFlush(newInstance())
+        val base = Instant.parse("2026-09-01T00:00:00Z")
+        setCreatedAt(older, base)
+        setCreatedAt(tieA, base.plusSeconds(60))
+        setCreatedAt(tieB, base.plusSeconds(60))
+        val first = listOf(tieA, tieB).map { it.instanceId }.maxBy { it.toString() }
+        val second = listOf(tieA, tieB).map { it.instanceId }.minBy { it.toString() }
+
+        val found = instanceRepository.findPageAfter(
+            InstanceStatus.entries,
+            LIST_FROM,
+            LIST_TO,
+            base.plusSeconds(60),
+            first,
+            Limit.unlimited(),
+        )
+
+        assertEquals(listOf(second, older.instanceId), found.map { it.instanceId })
+    }
+
+    // 상태와 생성 시각 범위로 거르고, 범위는 시작을 넣고 끝을 뺀다
+    @Test
+    fun `lists rows matching statuses and created range`() {
+        val base = Instant.parse("2026-09-01T00:00:00Z")
+        val atStart = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.RUNNING))
+        val atEnd = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.RUNNING))
+        val otherStatus = instanceRepository.saveAndFlush(newInstance(status = InstanceStatus.CLEANED))
+        setCreatedAt(atStart, base)
+        setCreatedAt(atEnd, base.plusSeconds(60))
+        setCreatedAt(otherStatus, base.plusSeconds(30))
+
+        val found = instanceRepository.findPage(
+            listOf(InstanceStatus.RUNNING),
+            base,
+            base.plusSeconds(60),
+            Limit.unlimited(),
+        )
+
+        assertEquals(listOf(atStart.instanceId), found.map { it.instanceId })
+    }
+
+    // created_at은 auditing이 저장 시각으로 채우고 엔티티로는 못 바꿔서 직접 고친다
+    private fun setCreatedAt(instance: Instance, createdAt: Instant) {
+        jdbcTemplate.update(
+            "update challenge_instance set created_at = ? where instance_id = ?",
+            Timestamp.from(createdAt),
+            instance.instanceId,
+        )
+    }
+
     private fun newInstance(
         teamId: UUID = testUuid(100),
         challengeId: UUID = testUuid(10),
@@ -451,4 +529,9 @@ class InstanceRepositoryTest {
             hardExpiresAt = expiresAt.plusSeconds(3600),
             cleanupRetryCount = retryCount,
         )
+
+    private companion object {
+        val LIST_FROM: Instant = Instant.parse("2000-01-01T00:00:00Z")
+        val LIST_TO: Instant = Instant.parse("2100-01-01T00:00:00Z")
+    }
 }

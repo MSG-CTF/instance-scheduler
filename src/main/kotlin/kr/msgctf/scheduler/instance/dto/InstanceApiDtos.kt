@@ -279,6 +279,23 @@ data class InstanceDetailResponse(
     }
 }
 
+// 목록 조회 API 응답 body
+// 항목은 단건 조회와 같은 모양이고, next_cursor가 null이면 마지막 쪽이다
+data class InstancePageResponse(
+    val items: List<InstanceDetailResponse>,
+    val nextCursor: String?,
+) {
+
+    companion object {
+
+        fun from(result: InstancePageResult): InstancePageResponse =
+            InstancePageResponse(
+                items = result.items.map(InstanceDetailResponse::from),
+                nextCursor = result.nextCursor,
+            )
+    }
+}
+
 // delete API 응답 body
 data class DeleteInstanceResponse(
     val instanceId: UUID,

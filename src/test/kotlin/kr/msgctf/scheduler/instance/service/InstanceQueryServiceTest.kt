@@ -1,10 +1,12 @@
 package kr.msgctf.scheduler.instance.service
 
 import java.time.Instant
+import java.util.Base64
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
@@ -14,6 +16,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.dto.InstanceListQuery
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testEndpoints
 import kr.msgctf.scheduler.testEndpointsJson
@@ -248,6 +251,197 @@ class InstanceQueryServiceTest {
 
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
+
+    // 남은 인스턴스가 있으면 다음 쪽 커서를 주고, 최신순으로 상한만큼만 준다
+    @Test
+    fun `lists newest instances up to the limit with next cursor`() {
+        // given
+        val repository = TestInstanceRepository()
+        val saved = (1..3).map { repository.save(listedInstance()) }
+        val service = newService(repository)
+
+        // when
+        val page = service.listInstances(InstanceListQuery(limit = 2))
+
+        // then
+        assertEquals(listOf(saved[2].instanceId, saved[1].instanceId), page.items.map { it.instanceId })
+        assertNotNull(page.nextCursor)
+    }
+
+    // 마지막 쪽에는 커서가 없어야 감시 쪽이 다 읽었다고 판단할 수 있다
+    @Test
+    fun `returns no next cursor on the last page`() {
+        // given
+        val repository = TestInstanceRepository()
+        repeat(2) { repository.save(listedInstance()) }
+        val service = newService(repository)
+
+        // when
+        val page = service.listInstances(InstanceListQuery(limit = 2))
+
+        // then
+        assertEquals(2, page.items.size)
+        assertNull(page.nextCursor)
+    }
+
+    // 커서를 따라가면 생성 시각이 같은 인스턴스가 쪽 경계에 걸려도 빠지거나 겹치지 않는다
+    @Test
+    fun `follows cursors through every row once`() {
+        // given
+        val repository = TestInstanceRepository()
+        val tied = Instant.parse("2026-09-01T00:00:00Z")
+        val saved = (1..5).map { repository.save(listedInstance(createdAt = tied)) }
+        val service = newService(repository)
+
+        // when
+        val seen = mutableListOf<UUID>()
+        var cursor: String? = null
+        do {
+            val page = service.listInstances(InstanceListQuery(cursor = cursor, limit = 2))
+            seen += page.items.map { it.instanceId }
+            cursor = page.nextCursor
+        } while (cursor != null)
+
+        // then
+        assertEquals(saved.map { it.instanceId }.sortedByDescending { it.toString() }, seen)
+    }
+
+    // 상태를 주지 않으면 모든 상태를 준다
+    @Test
+    fun `lists every status when no status is given`() {
+        // given
+        val repository = TestInstanceRepository()
+        repository.save(listedInstance(status = InstanceStatus.RUNNING))
+        repository.save(listedInstance(status = InstanceStatus.CLEANED))
+        val service = newService(repository)
+
+        // when
+        val page = service.listInstances(InstanceListQuery())
+
+        // then
+        assertEquals(setOf(InstanceStatus.RUNNING, InstanceStatus.CLEANED), page.items.map { it.status }.toSet())
+    }
+
+    @Test
+    fun `lists only the given statuses`() {
+        // given
+        val repository = TestInstanceRepository()
+        val running = repository.save(listedInstance(status = InstanceStatus.RUNNING))
+        val pending = repository.save(listedInstance(status = InstanceStatus.CLEANUP_PENDING))
+        repository.save(listedInstance(status = InstanceStatus.CLEANED))
+        val service = newService(repository)
+
+        // when
+        val page = service.listInstances(
+            InstanceListQuery(statuses = setOf(InstanceStatus.RUNNING, InstanceStatus.CLEANUP_PENDING)),
+        )
+
+        // then
+        assertEquals(setOf(running.instanceId, pending.instanceId), page.items.map { it.instanceId }.toSet())
+    }
+
+    // 범위는 시작 시각을 넣고 끝 시각을 뺀다
+    @Test
+    fun `lists rows created within the given range`() {
+        // given
+        val repository = TestInstanceRepository()
+        val base = Instant.parse("2026-09-01T00:00:00Z")
+        repository.save(listedInstance(createdAt = base.minusSeconds(1)))
+        val atStart = repository.save(listedInstance(createdAt = base))
+        repository.save(listedInstance(createdAt = base.plusSeconds(60)))
+        val service = newService(repository)
+
+        // when
+        val page = service.listInstances(
+            InstanceListQuery(createdAfter = base, createdBefore = base.plusSeconds(60)),
+        )
+
+        // then
+        assertEquals(listOf(atStart.instanceId), page.items.map { it.instanceId })
+    }
+
+    @Test
+    fun `rejects limit outside the allowed range`() {
+        // given
+        val service = newService(TestInstanceRepository())
+
+        // when & then
+        for (limit in listOf(0, 201)) {
+            val exception = assertFailsWith<SchedulerException> {
+                service.listInstances(InstanceListQuery(limit = limit))
+            }
+
+            assertEquals(SchedulerErrorCode.INVALID_REQUEST, exception.errorCode)
+        }
+    }
+
+    // 커서는 서버가 준 값만 받는다, 깨진 값을 처음부터 읽기로 바꾸면 감시 쪽이 같은 인스턴스를 다시 센다
+    @Test
+    fun `rejects malformed cursor`() {
+        // given
+        val service = newService(TestInstanceRepository())
+
+        // when & then
+        for (cursor in listOf("not-base64!", "bm8tc2VwYXJhdG9y", "")) {
+            val exception = assertFailsWith<SchedulerException> {
+                service.listInstances(InstanceListQuery(cursor = cursor))
+            }
+
+            assertEquals(SchedulerErrorCode.INVALID_REQUEST, exception.errorCode)
+        }
+    }
+
+    // DB가 담을 수 없는 시각은 쿼리까지 가면 500이 되므로 요청 단계에서 거절한다
+    @Test
+    fun `rejects times outside the storable range`() {
+        // given
+        val service = newService(TestInstanceRepository())
+        val farFuture = Instant.parse("+300000-01-01T00:00:00Z")
+        val farCursor = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("$farFuture|${UUID.randomUUID()}".toByteArray())
+        val queries = listOf(
+            InstanceListQuery(createdAfter = farFuture),
+            InstanceListQuery(createdBefore = farFuture),
+            InstanceListQuery(createdAfter = Instant.EPOCH.minusSeconds(1)),
+            InstanceListQuery(cursor = farCursor),
+        )
+
+        // when & then
+        for (query in queries) {
+            val exception = assertFailsWith<SchedulerException> { service.listInstances(query) }
+
+            assertEquals(SchedulerErrorCode.INVALID_REQUEST, exception.errorCode)
+        }
+    }
+
+    // 같은 영속성 컨텍스트에서 막 저장한 인스턴스는 생성 시각에 나노초를 가질 수 있다
+    // 커서가 DB 정밀도로 잘려 있어야 다음 쪽 비교에서 같은 시각의 인스턴스가 빠지지 않는다
+    @Test
+    fun `cuts cursor time to database precision`() {
+        // given
+        val repository = TestInstanceRepository()
+        val precise = Instant.parse("2026-09-01T00:00:00.123456789Z")
+        val first = repository.save(listedInstance(createdAt = precise))
+        repository.save(listedInstance(createdAt = precise.minusSeconds(1)))
+        val service = newService(repository)
+
+        // when
+        val cursor = service.listInstances(InstanceListQuery(limit = 1)).nextCursor
+        val decoded = String(Base64.getUrlDecoder().decode(cursor))
+
+        // then
+        assertEquals(first.instanceId.toString(), decoded.substringAfter("|"))
+        assertEquals("2026-09-01T00:00:00.123456Z", decoded.substringBefore("|"))
+    }
+
+    private fun listedInstance(
+        status: InstanceStatus = InstanceStatus.RUNNING,
+        createdAt: Instant? = null,
+    ): Instance =
+        newRunningInstance(teamId = testUuid(1)).apply {
+            this.status = status
+            this.createdAt = createdAt
+        }
 
     private fun newService(
         repository: TestInstanceRepository,
