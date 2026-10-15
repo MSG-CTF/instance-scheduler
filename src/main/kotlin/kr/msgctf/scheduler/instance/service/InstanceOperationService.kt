@@ -890,7 +890,26 @@ class InstanceOperationService(
         var rejectedReservation: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
-            // 기다리는 사이 정리 경로로 넘어갔으면 그쪽 판단을 덮지 않는다
+            // 첫 접수를 기다리는 사이 하드타임아웃이 정리 대기로 옮긴 경우다
+            // 첫 접수 도중에 이 인스턴스를 정리 대기로 옮길 수 있는 것은 하드타임아웃뿐이다, 삭제 요청은 PROVISIONING을 받지 않는다
+            // 거절된 첫 접수는 런타임에 아무것도 남기지 않으므로 정리 경로가 물어도 저장된 정보가 없다는 답만 온다
+            // 그 답으로는 정리를 끝내지 않으므로 여기서 끝낸다, 아니면 손으로 지울 때까지 정리 대기에 남는다
+            // 그사이 재접수가 시작됐다면 끝내면 안 되지만 하드타임아웃이 시도 횟수를 0으로 되돌려 알 수 없다
+            // 그래서 런타임 응답 대기 시간이 재접수 유예보다 짧다는 설정 전제에 기댄다
+            // 이 전제가 깨지면 재접수가 만든 workload를 아무도 지우지 않게 된다
+            if (instance.status == InstanceStatus.CLEANUP_PENDING) {
+                if (rejected && firstSubmit && instance.runtimeOperationId == null && instance.runtimeWorkloadId == null) {
+                    recordError(
+                        instance,
+                        SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                        "first submit rejected after cleanup started, ${failureDetail(exception)}",
+                    )
+                    completeDelete(instance)
+                    rejectedReservation = takeReservation(instance)
+                }
+                return@executeWithoutResult
+            }
+            // 그 밖에 정리 경로로 넘어갔으면 그쪽 판단을 덮지 않는다
             if (instance.status != InstanceStatus.PROVISIONING) return@executeWithoutResult
             // 이 호출이 도는 사이 다른 접수가 먼저 202를 받아 저장했으면 늦게 온 실패로 덮지 않는다
             // 재접수 유예가 런타임 읽기 시간보다 짧게 설정되면 생길 수 있다

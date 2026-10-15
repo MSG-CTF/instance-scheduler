@@ -2791,6 +2791,127 @@ class InstanceOperationServiceTest {
         assertEquals(resubmitDue, instance.nextPollAt)
     }
 
+    // 첫 접수를 기다리는 사이 하드타임아웃이 정리 대기로 옮기고, 그 뒤에 거절이 도착한 경우다
+    // 거절된 첫 접수는 런타임에 아무것도 남기지 않으므로 런타임에 묻지 않고 바로 끝내야 한다
+    // 끝내지 않으면 런타임은 계속 저장된 정보가 없다고만 답하고, 강제 정리도 생성 실패 확인이 없어 받지 않는다
+    @Test
+    fun `cleans a hard timed out instance when its first submit is rejected`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                hardTimeOutDuringSubmit(repository, instance)
+                throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "rejected after hard timeout")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 정리에 들어온 이유는 하드타임아웃이라 그 기록은 그대로 둔다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
+        assertNull(instance.runtimeOperationId)
+        assertNull(instance.reservationId)
+        assertEquals(1, broker.releasedReservations.size)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED, broker.releaseRequests.single().releaseReason)
+        val error = events.saved.single { it.eventType == InstanceEventType.ERROR_RECORDED }
+        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, error.errorCode)
+    }
+
+    // 결과를 모르는 실패는 접수가 런타임에 닿았을 수 있다, 정리 경로가 런타임에 물어 확인하게 그대로 둔다
+    @Test
+    fun `keeps a hard timed out instance when its first submit is unanswered`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newRequested())
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                hardTimeOutDuringSubmit(repository, instance)
+                throw IllegalStateException("read timed out")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNotNull(instance.reservationId)
+        assertEquals(0, broker.releasedReservations.size)
+    }
+
+    // 재접수가 거절됐어도 앞서 보낸 접수는 응답만 못 받았을 수 있다, 정리 대기로 옮겨진 뒤라도 끝내지 않는다
+    @Test
+    fun `keeps a hard timed out instance when its resubmit is rejected`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStalledProvisioning().apply { reservationId = "reservation-held" })
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                hardTimeOutDuringSubmit(repository, instance)
+                throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "resubmit rejected")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(0, broker.releasedReservations.size)
+    }
+
+    // 정리 대기 인스턴스에 operation id나 workload id가 있으면 런타임에 무언가 있다는 뜻이다
+    // 첫 접수 거절만 보고 끝내면 그것을 지울 수단이 없어지므로 정리 경로에 맡긴다
+    @Test
+    fun `keeps a hard timed out instance with runtime ids when its first submit is rejected`() {
+        listOf<Pair<String, (Instance) -> Unit>>(
+            "operation id" to { it.runtimeOperationId = "op-create-other" },
+            "workload id" to { it.runtimeWorkloadId = "workload-1" },
+        ).forEach { (label, mark) ->
+            // given
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val instance = repository.save(newRequested())
+            val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+                override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                    hardTimeOutDuringSubmit(repository, instance)
+                    mark(instance)
+                    throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "rejected after hard timeout")
+                }
+            }
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+            // when
+            service.progressRequested(instance.instanceId)
+
+            // then
+            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status, label)
+            assertNotNull(instance.reservationId, label)
+            assertEquals(0, broker.releasedReservations.size, label)
+        }
+    }
+
+    // 첫 접수 도중에 cleanup 워커가 하드타임아웃을 처리한 상태를 만든다
+    // 손으로 값을 따라 만들지 않고 실제 처리를 불러야 그 처리가 바뀔 때 이 테스트도 함께 따라간다
+    private fun hardTimeOutDuringSubmit(repository: TestInstanceRepository, instance: Instance) {
+        instance.hardExpiresAt = clock.instant()
+        InstanceCleanupService(InstanceStateTransitionService(), repository.repository, clock)
+            .cleanup(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
+    }
+
     // 접수를 기다리는 사이 정리 대상이 되면 operation을 저장하지 않는지 확인
     @Test
     fun `does not store operation when instance left provisioning during submit`() {
