@@ -1,7 +1,9 @@
 package kr.msgctf.scheduler.instance.controller
 
+import java.net.URI
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.Test
@@ -29,6 +31,7 @@ import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
 import org.testcontainers.junit.jupiter.Testcontainers
+import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 
 // 실제 MVC 스택으로 조회 응답과 파라미터 바인딩 확인
@@ -463,7 +466,145 @@ class InstanceQueryIntegrationTest {
         assertEquals(saved.hardExpiresAt, parseTime(data.get("hard_expires_at").asString()))
     }
 
+    // 항목 모양은 단건 조회와 같고, 다 읽었으면 next_cursor 키가 null로 남는다
+    @Test
+    fun `list api returns items in snake case with null next cursor`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(600), endpoints = testEndpointsJson())
+
+        // when
+        val response = mockMvc.get("/api/instances")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.code") { value("SUCCESS") }
+                jsonPath("$.message") { value("인스턴스 목록 조회 성공") }
+                jsonPath("$.data.items.length()") { value(1) }
+                jsonPath("$.data.items[0].instance_id") { value(instanceId.toString()) }
+                jsonPath("$.data.items[0].status") { value("RUNNING") }
+                jsonPath("$.data.items[0].runtime_target_id") { value("cluster-main") }
+                jsonPath("$.data.items[0].endpoints[0].container_name") { value("challenge") }
+                jsonPath("$.data.items[0].expires_at") { exists() }
+                jsonPath("$.data.items[0].hard_expires_at") { exists() }
+            }
+            .andReturn().response.contentAsString
+
+        // then
+        val data = objectMapper.readTree(response).get("data")
+        assertTrue(data.has("next_cursor"), "next_cursor 키가 응답에 없다")
+        assertTrue(data.get("next_cursor").isNull, "next_cursor 값이 null이 아니다")
+    }
+
+    // 상태는 여러 번 줄 수 있고, 시각은 응답에 나가는 오프셋 형식 그대로 다시 넣을 수 있어야 한다
+    @Test
+    fun `list api binds repeated statuses and created range with offset`() {
+        // given
+        val running = createInstance(teamId = testUuid(610))
+        val pending = createInstance(teamId = testUuid(611), status = InstanceStatus.CLEANUP_PENDING)
+        createInstance(teamId = testUuid(612), status = InstanceStatus.CLEANED)
+        val anHourAgo = OffsetDateTime.now().minusHours(1).withOffsetSameInstant(ZoneOffset.ofHours(9))
+
+        // when
+        val response = mockMvc.get("/api/instances") {
+            param("status", "RUNNING")
+            param("status", "CLEANUP_PENDING")
+            param("created_after", anHourAgo.toString())
+        }
+            .andExpect { status { isOk() } }
+            .andReturn().response.contentAsString
+
+        // then
+        val ids = itemIds(objectMapper.readTree(response).get("data"))
+        assertEquals(setOf(running.toString(), pending.toString()), ids.toSet())
+    }
+
+    // param()은 URL 인코딩을 거치지 않아 실제 요청처럼 + 를 %2B로 적은 주소를 직접 보낸다
+    // URL에서 + 는 공백으로 읽혀 400이 되므로 호출하는 쪽은 %2B나 Z를 써야 한다
+    @Test
+    fun `list api accepts percent encoded offset in raw url`() {
+        // given
+        val instanceId = createInstance(teamId = testUuid(630))
+        val anHourAgo = OffsetDateTime.now().minusHours(1).withOffsetSameInstant(ZoneOffset.ofHours(9))
+        val encoded = anHourAgo.toString().replace("+", "%2B")
+
+        // when
+        val response = mockMvc.get(URI("/api/instances?created_after=$encoded"))
+            .andExpect { status { isOk() } }
+            .andReturn().response.contentAsString
+
+        // then
+        assertEquals(listOf(instanceId.toString()), itemIds(objectMapper.readTree(response).get("data")))
+    }
+
+    // 빈 status 값은 조건 없음으로 보지 않고 무시한다, 나머지 상태 조건은 그대로 걸린다
+    @Test
+    fun `list api ignores empty status value`() {
+        // given
+        val running = createInstance(teamId = testUuid(640))
+        createInstance(teamId = testUuid(641), status = InstanceStatus.CLEANED)
+
+        // when
+        val response = mockMvc.get(URI("/api/instances?status=RUNNING&status="))
+            .andExpect { status { isOk() } }
+            .andReturn().response.contentAsString
+
+        // then
+        assertEquals(listOf(running.toString()), itemIds(objectMapper.readTree(response).get("data")))
+    }
+
+    // 받은 next_cursor를 그대로 넣어 끝까지 읽으면 모든 인스턴스를 한 번씩 본다
+    @Test
+    fun `list api walks every row through next cursor`() {
+        // given
+        // 생성 시각이 같으면 id 순서로 나와 기대 순서를 정할 수 없어 간격을 둔다
+        val created = (0 until 3).map {
+            Thread.sleep(2)
+            createInstance(teamId = testUuid(620L + it))
+        }
+
+        // when
+        val seen = mutableListOf<String>()
+        var cursor: String? = null
+        do {
+            val response = mockMvc.get("/api/instances") {
+                param("limit", "2")
+                cursor?.let { param("cursor", it) }
+            }
+                .andExpect { status { isOk() } }
+                .andReturn().response.contentAsString
+            val data = objectMapper.readTree(response).get("data")
+            seen += itemIds(data)
+            cursor = data.get("next_cursor").takeUnless { it.isNull }?.asString()
+        } while (cursor != null)
+
+        // then
+        assertEquals(created.reversed().map { it.toString() }, seen)
+    }
+
+    @Test
+    fun `list api rejects invalid query values`() {
+        // when & then
+        val invalidQueries = listOf(
+            "status" to "running",
+            "cursor" to "not-a-cursor",
+            "limit" to "0",
+            "created_after" to "yesterday",
+        )
+
+        for ((name, value) in invalidQueries) {
+            mockMvc.get("/api/instances") { param(name, value) }
+                .andExpect {
+                    status { isBadRequest() }
+                    jsonPath("$.code") { value("INVALID_REQUEST") }
+                }
+        }
+    }
+
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
+
+    private fun itemIds(data: JsonNode): List<String> {
+        val items = data.get("items")
+        return (0 until items.size()).map { index -> items.get(index).get("instance_id").asString() }
+    }
 
     // create가 접수만 하므로 조회 대상 RUNNING 인스턴스를 저장소에 직접 넣는다
     // 만료 시각은 응답 직렬화 정밀도(밀리초)에 맞춘다
@@ -473,13 +614,14 @@ class InstanceQueryIntegrationTest {
         endpoints: String? = null,
         // 컬럼이 생기기 전 행을 흉내내려면 null을 넣는다
         registryRevision: Long? = 3,
+        status: InstanceStatus = InstanceStatus.RUNNING,
     ): UUID {
         val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         val instance = Instance(
             teamId = teamId,
             userId = userId,
             challengeId = testUuid(10),
-            status = InstanceStatus.RUNNING,
+            status = status,
             isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,
             provider = "SELF_HOSTED",

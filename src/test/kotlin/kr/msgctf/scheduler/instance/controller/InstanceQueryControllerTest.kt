@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.runtime.IsolationProfile
@@ -93,6 +94,30 @@ class InstanceQueryControllerTest {
         assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, response.data[0].errorCode)
         assertEquals("requestId=req-01, status=422", response.data[0].adminDetail)
         assertEquals(createdAt, response.data[0].createdAt)
+    }
+
+    // 목록 조회 응답 확인
+    @Test
+    fun `wraps instance page in success envelope`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        val controller = InstanceQueryController(newService(repository))
+
+        // when
+        val response = controller.listInstances(
+            statuses = null,
+            createdAfter = null,
+            createdBefore = null,
+            cursor = null,
+            limit = null,
+        )
+
+        // then
+        assertEquals("SUCCESS", response.code)
+        assertEquals("인스턴스 목록 조회 성공", response.message)
+        assertEquals(listOf(instance.instanceId), response.data.items.map { it.instanceId })
+        assertNull(response.data.nextCursor)
     }
 
     private fun newService(
