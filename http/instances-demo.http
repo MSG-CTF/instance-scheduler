@@ -54,6 +54,19 @@ GET {{host}}/api/instances/{{instance_id}}
 # 삭제 접수 직후부터는 404가 된다(active 아님, 재생성 가능 신호).
 GET {{host}}/api/instances/active?user_id={{user_id}}
 
+### 3-1. 감시용 목록 조회 (CLEANED, FAILED를 뺀 끝나지 않은 인스턴스, 최신순 2개씩)
+# 응답의 data.next_cursor를 cursor로 넣어 다시 보내면 다음 쪽이 나오고, null이면 다 읽은 것이다.
+# created_after에 + 오프셋을 넣을 때는 %2B로 적는다(예: 2026-10-14T00:00:00%2B09:00).
+GET {{host}}/api/instances?status=REQUESTED&status=SCHEDULING&status=PROVISIONING&status=RUNNING&status=RESTARTING&status=RESETTING&status=STOPPING&status=STOPPED&status=EXPIRED&status=CLEANUP_PENDING&limit=2
+
+> {%
+    client.global.set("list_cursor", response.body.data.next_cursor);
+    client.log("next_cursor = " + response.body.data.next_cursor);
+%}
+
+### 3-2. 감시용 목록 다음 쪽 (3-1 응답의 next_cursor 사용)
+GET {{host}}/api/instances?status=REQUESTED&status=SCHEDULING&status=PROVISIONING&status=RUNNING&status=RESTARTING&status=RESETTING&status=STOPPING&status=STOPPED&status=EXPIRED&status=CLEANUP_PENDING&limit=2&cursor={{list_cursor}}
+
 ### 4. 초기화 -> 새 인스턴스로 교체 (RUNNING 상태에서 실행한다)
 # 응답은 202 + status REQUESTED이고 instance_id가 새로 발급된다.
 # replaced_instance_id가 이전 id다. 새 id를 전역 변수로 다시 잡아

@@ -68,6 +68,22 @@ data class InstanceDetailResult(
     }
 }
 
+// 목록 조회 조건
+// 상태를 비워 두면 모든 상태를, 시각과 limit을 비워 두면 서비스의 기본값을 쓴다
+data class InstanceListQuery(
+    val statuses: Set<InstanceStatus> = emptySet(),
+    val createdAfter: Instant? = null,
+    val createdBefore: Instant? = null,
+    val cursor: String? = null,
+    val limit: Int? = null,
+)
+
+// 목록 한 쪽과 다음 쪽 커서, 다 읽었으면 커서가 null이다
+data class InstancePageResult(
+    val items: List<InstanceDetailResult>,
+    val nextCursor: String?,
+)
+
 // 이벤트 조회 서비스가 돌려주는 결과 값
 data class InstanceEventResult(
     val eventId: UUID,

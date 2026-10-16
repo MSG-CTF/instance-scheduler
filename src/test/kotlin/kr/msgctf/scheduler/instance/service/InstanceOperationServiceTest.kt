@@ -8,6 +8,9 @@ import java.time.ZoneOffset
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -23,6 +26,7 @@ import kr.msgctf.scheduler.broker.BrokerRejectedException
 import kr.msgctf.scheduler.broker.BrokerReservationCommitRequest
 import kr.msgctf.scheduler.broker.ReleaseReason
 import kr.msgctf.scheduler.broker.BrokerReservationRequest
+import kr.msgctf.scheduler.broker.BrokerReservationReleaseRequest
 import kr.msgctf.scheduler.broker.BrokerReservationResponse
 import kr.msgctf.scheduler.broker.BrokerReservationStatus
 import kr.msgctf.scheduler.broker.FakeBrokerClient
@@ -1836,6 +1840,375 @@ class InstanceOperationServiceTest {
         override fun withZone(zone: ZoneId): Clock = this
     }
 
+    // 아래는 운영자 강제 종료를 확인한다
+    // 대상은 workload id와 operation id가 둘 다 없는 CLEANUP_PENDING 행이다
+    @Test
+    fun `fails a stuck cleanup row when runtime has not stored it`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val service = newService(repository, brokerClient = broker, events = events, runtimeClient = statusRuntime(RuntimeStatusResult.NotStored))
+
+        // when
+        val result = service.forceCleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, result.status)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.reservationId)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        val event = events.saved.single()
+        assertEquals(InstanceEventType.ERROR_RECORDED, event.eventType)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, event.errorCode)
+        assertEquals(InstanceStatus.FAILED, event.toStatus)
+    }
+
+    // 반납 사유는 정리에 들어온 이유를 따른다
+    @Test
+    fun `releases the reservation with the reason of the cleanup`() {
+        listOf(
+            RuntimeDeleteReason.CREATE_FAILED_CLEANUP to ReleaseReason.RUNTIME_CREATE_FAILED,
+            RuntimeDeleteReason.TTL_EXPIRED to ReleaseReason.SCHEDULER_CANCELLED,
+        ).forEach { (deleteReason, releaseReason) ->
+            // given
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val instance = repository.save(
+                stuckCleanupPending().apply {
+                    this.deleteReason = deleteReason
+                    reservationId = "reservation-held"
+                },
+            )
+            val service = newService(repository, brokerClient = broker, runtimeClient = statusRuntime(RuntimeStatusResult.NotStored))
+
+            // when
+            service.forceCleanup(instance.instanceId)
+
+            // then
+            assertEquals(releaseReason, broker.releaseRequests.single().releaseReason, deleteReason.name)
+        }
+    }
+
+    @Test
+    fun `cleans a stuck row when runtime reports it already deleted`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val service = newService(
+            repository,
+            brokerClient = broker,
+            runtimeClient = statusRuntime(RuntimeStatusResult.AlreadyDeleted("cluster-main/ns/gone")),
+        )
+
+        // when
+        val result = service.forceCleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, result.status)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals("cluster-main/ns/gone", instance.runtimeWorkloadId)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+    }
+
+    // 예약을 반납하면 브로커가 남은 workload 자리를 다시 배정한다
+    @Test
+    fun `rejects when runtime still has the workload`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val service = newService(
+            repository,
+            brokerClient = broker,
+            events = events,
+            runtimeClient = statusRuntime(RuntimeStatusResult.Found("cluster-main/ns/alive")),
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.WORKLOAD_STILL_EXISTS, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNull(instance.runtimeWorkloadId)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertTrue(events.saved.isEmpty())
+    }
+
+    @Test
+    fun `rejects when runtime status lookup fails`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val service = newService(repository, brokerClient = broker, runtimeClient = statuslessRuntimeClient())
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+    }
+
+    // 조건 위반은 런타임을 부르기 전에 거른다, 런타임이 꺼져 있어도 400이 나가야 한다
+    @Test
+    fun `rejects rows outside the target without calling runtime`() {
+        listOf(
+            "running" to newRequested().apply { status = InstanceStatus.RUNNING },
+            "workload id" to stuckCleanupPending().apply { runtimeWorkloadId = "workload-1" },
+            "operation id" to stuckCleanupPending().apply { runtimeOperationId = "op-delete-1" },
+        ).forEach { (label, row) ->
+            // given
+            val repository = TestInstanceRepository()
+            val instance = repository.save(row)
+            val statusBefore = instance.status
+            val service = newService(repository, runtimeClient = runtimeMustNotBeAsked())
+
+            // when
+            val exception = assertFailsWith<SchedulerException>(label) { service.forceCleanup(instance.instanceId) }
+
+            // then
+            assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode, label)
+            assertEquals(statusBefore, instance.status, label)
+        }
+    }
+
+    // 생성 응답을 잃은 행은 런타임 큐에 생성이 남아 있을 수 있다
+    // 지금 런타임에 없어도 나중에 생기면 워커가 지워야 하므로 행과 예약을 그대로 둔다
+    // 나이와 상관없이 막는다, 런타임 큐는 시간이 지나도 생성을 버리지 않는다
+    @Test
+    fun `rejects a row whose create result is unknown without calling runtime`() {
+        listOf(
+            "old" to clock.instant().minus(Duration.ofDays(1)),
+            "young" to clock.instant().minusSeconds(1),
+        ).forEach { (label, createdAt) ->
+            // given
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val events = TestInstanceEventRepository()
+            val instance = repository.save(
+                stuckCleanupPending().apply {
+                    createFailureConfirmed = false
+                    this.createdAt = createdAt
+                    reservationId = "reservation-held"
+                },
+            )
+            val service = newService(repository, brokerClient = broker, events = events, runtimeClient = runtimeMustNotBeAsked())
+
+            // when
+            val exception = assertFailsWith<SchedulerException>(label) { service.forceCleanup(instance.instanceId) }
+
+            // then
+            assertEquals(SchedulerErrorCode.CREATE_RESULT_UNKNOWN, exception.errorCode, label)
+            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status, label)
+            assertEquals("reservation-held", instance.reservationId, label)
+            assertEquals(emptyList(), broker.releasedReservations, label)
+            assertTrue(events.saved.isEmpty(), label)
+        }
+    }
+
+    // 생성이 아직 진행 중일 수 있는 행은 런타임에 묻지 않고 거절한다
+    @Test
+    fun `rejects a row younger than the minimum age without calling runtime`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            stuckCleanupPending().apply {
+                createdAt = clock.instant().minus(CleanupProperties().forceCleanupMinAge).plusSeconds(1)
+            },
+        )
+        val service = newService(repository, runtimeClient = runtimeMustNotBeAsked())
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+    }
+
+    // 기준에 딱 닿은 행은 받는다
+    @Test
+    fun `accepts a row exactly at the minimum age`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = repository.save(
+            stuckCleanupPending().apply { createdAt = clock.instant().minus(CleanupProperties().forceCleanupMinAge) },
+        )
+        val service = newService(repository, runtimeClient = statusRuntime(RuntimeStatusResult.NotStored))
+
+        // when
+        val result = service.forceCleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, result.status)
+    }
+
+    // 만든 시각을 모르면 생성이 끝났는지 판단할 수 없다
+    @Test
+    fun `rejects a row without created time without calling runtime`() {
+        // given
+        val repository = TestInstanceRepository()
+        val instance = stuckCleanupPending().apply { createdAt = null }
+        repository.save(instance)
+        // 테스트 저장소는 비어 있는 만든 시각을 채우므로 저장 뒤에 다시 비운다
+        instance.createdAt = null
+        val service = newService(repository, runtimeClient = runtimeMustNotBeAsked())
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+    }
+
+    // 묻는 사이 늦게 끝난 생성이 operation을 남기면 그 결과를 기다려야 한다
+    @Test
+    fun `rejects when an operation id appears during the lookup`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                instance.runtimeOperationId = "op-delete-late"
+                return RuntimeStatusResult.NotStored
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+    }
+
+    @Test
+    fun `rejects unknown instance`() {
+        // given
+        val service = newService(TestInstanceRepository(), runtimeClient = runtimeMustNotBeAsked())
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(UUID.randomUUID()) }
+
+        // then
+        assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
+    }
+
+    // 조회하는 사이 워커가 id를 찾았으면 그 id로 정상 삭제가 이어져야 한다
+    @Test
+    fun `rejects when the worker fills the workload id during the lookup`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                instance.runtimeWorkloadId = "workload-found-by-worker"
+                return RuntimeStatusResult.NotStored
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("workload-found-by-worker", instance.runtimeWorkloadId)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+    }
+
+    // 운영자가 응답을 못 보고 다시 불러도 반납이 두 번 나가지 않는다
+    @Test
+    fun `rejects a second call on a forced row`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val service = newService(repository, brokerClient = broker, runtimeClient = statusRuntime(RuntimeStatusResult.NotStored))
+        service.forceCleanup(instance.instanceId)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> { service.forceCleanup(instance.instanceId) }
+
+        // then
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, exception.errorCode)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+    }
+
+    // 반납 실패로 오류를 내면 운영자가 다시 부르고, 다시 부르면 이미 FAILED라 400이 된다
+    @Test
+    fun `still fails the row when the reservation release fails`() {
+        // given
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val releaseAttempts = mutableListOf<String>()
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse {
+                releaseAttempts += request.reservationId
+                throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "broker down")
+            }
+        }
+        val instance = repository.save(stuckCleanupPending().apply { reservationId = "reservation-held" })
+        val service = newService(repository, brokerClient = broker, runtimeClient = statusRuntime(RuntimeStatusResult.NotStored))
+
+        // when
+        val result = service.forceCleanup(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, result.status)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(listOf("reservation-held"), releaseAttempts)
+    }
+
+    // 워커가 끝내지 못하는 행, 런타임 좌표는 있고 id는 둘 다 없다
+    // 런타임이 생성 실패를 알려 준 행으로 둔다, 강제 정리가 받는 행은 이것뿐이다
+    // 대기 조건에 걸리지 않게 하루 전에 만든 행으로 둔다
+    private fun stuckCleanupPending(): Instance =
+        newCleanupPending().apply {
+            runtimeWorkloadId = null
+            runtimeOperationId = null
+            createFailureConfirmed = true
+            createdAt = clock.instant().minus(Duration.ofDays(1))
+        }
+
+    private fun statusRuntime(status: RuntimeStatusResult): RuntimeClient {
+        val delegate = FakeRuntimeClient()
+        return object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = status
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
+    }
+
+    private fun runtimeMustNotBeAsked(): RuntimeClient {
+        val delegate = FakeRuntimeClient()
+        return object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
+                throw IllegalStateException("runtime must not be asked")
+        }
+    }
+
     // runtime-status 조회가 실패하는 client, 502와 503을 흉내낸다
     private fun statuslessRuntimeClient(): RuntimeClient {
         val delegate = FakeRuntimeClient()
@@ -1947,6 +2320,183 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
+    // 저장된 정보가 없다는 답만 오는 행은 며칠씩 남을 수 있다
+    // 30초마다 물으면 행 하나가 하루에 2,880번 런타임을 호출한다, 그래서 만든 지 오래된 행일수록 드물게 묻는다
+    @Test
+    fun `widens the status check interval as the stuck row ages`() {
+        val maxInterval = CleanupProperties().statusCheckMaxInterval
+        val backoffMax = OperationProperties().backoffMax
+        // 만든 뒤 지난 시간의 1/10이 하한(backoff-max)보다 짧으면 하한을, 상한보다 길면 상한을 쓴다
+        assertEquals(backoffMax, nextStatusCheckDelay(createdBefore = Duration.ofMinutes(2)))
+        assertEquals(Duration.ofMinutes(2), nextStatusCheckDelay(createdBefore = Duration.ofMinutes(20)))
+        assertEquals(maxInterval, nextStatusCheckDelay(createdBefore = Duration.ofHours(5)))
+        // 경계값을 본다, 기본 설정에서는 만든 지 5분 된 행이 하한에, 100분 된 행이 상한에 닿는다
+        assertEquals(backoffMax, nextStatusCheckDelay(createdBefore = backoffMax.multipliedBy(10)))
+        assertEquals(maxInterval, nextStatusCheckDelay(createdBefore = maxInterval.multipliedBy(10)))
+        assertEquals(
+            maxInterval.minusSeconds(1),
+            nextStatusCheckDelay(createdBefore = maxInterval.multipliedBy(10).minusSeconds(10)),
+        )
+    }
+
+    // 다른 노드가 만든 행은 노드끼리 시계가 어긋나 만든 시각이 지금보다 뒤일 수 있다, 그래도 하한보다 자주 묻지 않는다
+    @Test
+    fun `checks at the backoff max when the created time is ahead of the clock`() {
+        val delay = nextStatusCheckDelay(createdBefore = Duration.ofMinutes(-3))
+
+        assertEquals(OperationProperties().backoffMax, delay)
+    }
+
+    // 삭제를 접수하기 전인 STOPPING 행도 같은 간격으로 묻는다
+    @Test
+    fun `widens the status check interval for a stopping row too`() {
+        val delay = nextStatusCheckDelay(createdBefore = Duration.ofHours(5), status = InstanceStatus.STOPPING)
+
+        assertEquals(CleanupProperties().statusCheckMaxInterval, delay)
+    }
+
+    @Test
+    fun `rejects a status check max interval that is not positive`() {
+        assertFailsWith<IllegalArgumentException> { CleanupProperties(statusCheckMaxInterval = Duration.ZERO) }
+        assertFailsWith<IllegalArgumentException> { CleanupProperties(statusCheckMaxInterval = Duration.ofSeconds(-1)) }
+    }
+
+    // 상한을 하한보다 짧게 설정해도 하한(backoff-max)보다 자주 묻지 않는다
+    @Test
+    fun `keeps the backoff max when the status check max interval is set below it`() {
+        val delay = nextStatusCheckDelay(
+            createdBefore = Duration.ofHours(5),
+            cleanupProperties = CleanupProperties(statusCheckMaxInterval = Duration.ofSeconds(5)),
+        )
+
+        assertEquals(OperationProperties().backoffMax, delay)
+    }
+
+    // 만든 시각을 모르면 지난 시간을 알 수 없어 간격을 늘리지 않고 하한으로 묻는다
+    @Test
+    fun `checks at the backoff max when the created time is unknown`() {
+        val delay = nextStatusCheckDelay(createdBefore = null)
+
+        assertEquals(OperationProperties().backoffMax, delay)
+    }
+
+    // 간격을 늘려도 알림은 나가고, 알림을 보냈다고 정리를 끝내지 않는다
+    // 알림 간격과 조회 간격을 둘 다 10분으로 두면 알림도 10분마다 나간다
+    @Test
+    fun `still alerts and keeps waiting when the status check interval is wide`() {
+        val alerts = alertsOverThirtyMinutes(
+            CleanupProperties(resolveTimeout = Duration.ofMinutes(10), statusCheckMaxInterval = Duration.ofMinutes(10)),
+        )
+
+        // 0분에 기다리기 시작하고, 10분과 20분과 30분에 물을 때마다 알린다
+        assertEquals(3, alerts)
+    }
+
+    // 알림을 보낼지는 런타임에 물을 때만 확인하므로, 알림이 묻는 간격보다 자주 나가지 않는다
+    // 알림 간격을 5분으로 줄여도 10분마다 묻는 행은 10분마다 알린다
+    @Test
+    fun `alerts no more often than the status check interval`() {
+        val alerts = alertsOverThirtyMinutes(
+            CleanupProperties(resolveTimeout = Duration.ofMinutes(5), statusCheckMaxInterval = Duration.ofMinutes(10)),
+        )
+
+        assertEquals(3, alerts)
+    }
+
+    // 만든 지 오래되어 상한 간격으로 묻는 행을 30분 동안 조회 시각마다 묻고, 기록된 알림 수를 돌려준다
+    private fun alertsOverThirtyMinutes(cleanupProperties: CleanupProperties): Int {
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val start = Instant.parse("2026-08-12T00:00:00Z")
+        val movingClock = MutableClock(start)
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                createdAt = start.minus(Duration.ofHours(5))
+            },
+        )
+        val service = newService(
+            repository,
+            runtimeClient = notStoredRuntimeClient(),
+            events = events,
+            cleanupProperties = cleanupProperties,
+            clock = movingClock,
+        )
+
+        service.submitDelete(instance.instanceId)
+        repeat(3) {
+            movingClock.advance(Duration.between(movingClock.instant(), instance.nextPollAt))
+            service.submitDelete(instance.instanceId)
+        }
+
+        assertEquals(start.plus(Duration.ofMinutes(30)), movingClock.instant())
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        return events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED }
+    }
+
+    // 간격을 늘린 효과를 숫자로 확인한다, 만들자마자 정리에 갇힌 행 하나가 8일 동안 런타임을 몇 번 호출하는지 센다
+    // 간격을 30초로 고정하면 8일에 23,040번이다
+    @Test
+    fun `calls runtime status far less often over eight days`() {
+        // given
+        val repository = TestInstanceRepository()
+        val start = Instant.parse("2026-08-12T00:00:00Z")
+        val movingClock = MutableClock(start)
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                createdAt = start
+            },
+        )
+        var calls = 0
+        val runtimeClient = object : RuntimeClient by notStoredRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                calls += 1
+                return RuntimeStatusResult.NotStored
+            }
+        }
+        val service = newService(repository, runtimeClient = runtimeClient, clock = movingClock)
+        val end = start.plus(Duration.ofDays(8))
+
+        // when: 정해진 다음 조회 시각마다 묻는다
+        // 간격이 0이 되면 시계가 앞으로 가지 않아 끝나지 않는다, 그래서 30초 고정일 때의 횟수를 넘기면 멈춘다
+        while (movingClock.instant().isBefore(end) && calls <= 23_040) {
+            service.submitDelete(instance.instanceId)
+            movingClock.advance(Duration.between(movingClock.instant(), instance.nextPollAt))
+        }
+
+        // then: 처음 100분 동안은 간격이 점점 늘고, 그 뒤로는 하루 144번씩 물어 8일에 1,184번이 된다
+        assertTrue(calls in 1_100..1_300, "calls=$calls")
+    }
+
+    // 지금보다 createdBefore만큼 앞서 만든 갇힌 행에 한 번 묻고, 다음에 묻기까지의 간격을 돌려준다
+    private fun nextStatusCheckDelay(
+        createdBefore: Duration?,
+        cleanupProperties: CleanupProperties = CleanupProperties(),
+        status: InstanceStatus = InstanceStatus.CLEANUP_PENDING,
+    ): Duration {
+        val repository = TestInstanceRepository()
+        val row = if (status == InstanceStatus.STOPPING) newStopping() else newCleanupPending()
+        val instance = repository.save(row.apply { runtimeWorkloadId = null })
+        // 저장소가 빈 생성 시각을 채우므로 저장한 뒤에 정한다
+        instance.createdAt = createdBefore?.let { clock.instant().minus(it) }
+        val service = newService(repository, runtimeClient = notStoredRuntimeClient(), cleanupProperties = cleanupProperties)
+
+        service.submitDelete(instance.instanceId)
+
+        assertEquals(status, instance.status)
+        return Duration.between(clock.instant(), instance.nextPollAt)
+    }
+
+    // 저장된 정보가 없다고만 답하는 client, 삭제 접수는 막는다
+    private fun notStoredRuntimeClient(): RuntimeClient =
+        object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = RuntimeStatusResult.NotStored
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult =
+                throw IllegalStateException("delete must not be submitted")
+        }
+
     // 런타임은 workload를 만든 뒤 결과를 먼저 저장하고 그다음 binding을 저장한다
     // 그 사이가 깨지면 살아 있는 workload를 남긴 채 operation이 FAILED로 끝난다
     // 실제로 고아를 만드는 쪽이 이 분기라, 여기서 정리를 끝내면 안 된다
@@ -1972,6 +2522,8 @@ class InstanceOperationServiceTest {
         assertNull(instance.runtimeOperationId)
         assertNotNull(instance.nextPollAt)
         assertNotEquals(InstanceStatus.CLEANED, instance.status)
+        // 런타임이 생성을 끝냈으므로 큐에 남은 생성은 없다, 운영자가 강제 정리할 수 있다
+        assertTrue(instance.createFailureConfirmed)
     }
 
     // 생성 결과를 이어 보는 동안에는 삭제 접수가 이 행을 건드리면 안 된다
@@ -2028,6 +2580,8 @@ class InstanceOperationServiceTest {
         assertNull(instance.runtimeOperationId)
         assertNotNull(instance.nextPollAt)
         assertNotEquals(InstanceStatus.FAILED, instance.status)
+        // 생성 결과를 끝내 못 받았으므로 생성이 아직 큐에 남아 있을 수 있다
+        assertFalse(instance.createFailureConfirmed)
     }
 
     // 정리로 넘어온 뒤에 생성이 끝나는 경우다
@@ -2235,6 +2789,127 @@ class InstanceOperationServiceTest {
         // then: 재접수가 밀어 둔 예정 시각을 덮어쓰지 않는다
         assertEquals(InstanceStatus.PROVISIONING, instance.status)
         assertEquals(resubmitDue, instance.nextPollAt)
+    }
+
+    // 첫 접수를 기다리는 사이 하드타임아웃이 정리 대기로 옮기고, 그 뒤에 거절이 도착한 경우다
+    // 거절된 첫 접수는 런타임에 아무것도 남기지 않으므로 런타임에 묻지 않고 바로 끝내야 한다
+    // 끝내지 않으면 런타임은 계속 저장된 정보가 없다고만 답하고, 강제 정리도 생성 실패 확인이 없어 받지 않는다
+    @Test
+    fun `cleans a hard timed out instance when its first submit is rejected`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                hardTimeOutDuringSubmit(repository, instance)
+                throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "rejected after hard timeout")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then: 정리에 들어온 이유는 하드타임아웃이라 그 기록은 그대로 둔다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
+        assertNull(instance.runtimeOperationId)
+        assertNull(instance.reservationId)
+        assertEquals(1, broker.releasedReservations.size)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED, broker.releaseRequests.single().releaseReason)
+        val error = events.saved.single { it.eventType == InstanceEventType.ERROR_RECORDED }
+        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, error.errorCode)
+    }
+
+    // 결과를 모르는 실패는 접수가 런타임에 닿았을 수 있다, 정리 경로가 런타임에 물어 확인하게 그대로 둔다
+    @Test
+    fun `keeps a hard timed out instance when its first submit is unanswered`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newRequested())
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                hardTimeOutDuringSubmit(repository, instance)
+                throw IllegalStateException("read timed out")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertNotNull(instance.reservationId)
+        assertEquals(0, broker.releasedReservations.size)
+    }
+
+    // 재접수가 거절됐어도 앞서 보낸 접수는 응답만 못 받았을 수 있다, 정리 대기로 옮겨진 뒤라도 끝내지 않는다
+    @Test
+    fun `keeps a hard timed out instance when its resubmit is rejected`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStalledProvisioning().apply { reservationId = "reservation-held" })
+        val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                hardTimeOutDuringSubmit(repository, instance)
+                throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "resubmit rejected")
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.resubmitCreate(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(0, broker.releasedReservations.size)
+    }
+
+    // 정리 대기 인스턴스에 operation id나 workload id가 있으면 런타임에 무언가 있다는 뜻이다
+    // 첫 접수 거절만 보고 끝내면 그것을 지울 수단이 없어지므로 정리 경로에 맡긴다
+    @Test
+    fun `keeps a hard timed out instance with runtime ids when its first submit is rejected`() {
+        listOf<Pair<String, (Instance) -> Unit>>(
+            "operation id" to { it.runtimeOperationId = "op-create-other" },
+            "workload id" to { it.runtimeWorkloadId = "workload-1" },
+        ).forEach { (label, mark) ->
+            // given
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val instance = repository.save(newRequested())
+            val runtimeClient = object : RuntimeClient by FakeRuntimeClient() {
+                override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                    hardTimeOutDuringSubmit(repository, instance)
+                    mark(instance)
+                    throw SchedulerException(SchedulerErrorCode.RUNTIME_CREATE_FAILED, "rejected after hard timeout")
+                }
+            }
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+            // when
+            service.progressRequested(instance.instanceId)
+
+            // then
+            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status, label)
+            assertNotNull(instance.reservationId, label)
+            assertEquals(0, broker.releasedReservations.size, label)
+        }
+    }
+
+    // 첫 접수 도중에 cleanup 워커가 하드타임아웃을 처리한 상태를 만든다
+    // 손으로 값을 따라 만들지 않고 실제 처리를 불러야 그 처리가 바뀔 때 이 테스트도 함께 따라간다
+    private fun hardTimeOutDuringSubmit(repository: TestInstanceRepository, instance: Instance) {
+        instance.hardExpiresAt = clock.instant()
+        InstanceCleanupService(InstanceStateTransitionService(), repository.repository, clock)
+            .cleanup(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
     }
 
     // 접수를 기다리는 사이 정리 대상이 되면 operation을 저장하지 않는지 확인
@@ -2546,6 +3221,8 @@ class InstanceOperationServiceTest {
 
         // then
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        // 접수가 런타임에 닿았는지 모르므로 생성이 큐에 남아 있을 수 있다
+        assertFalse(instance.createFailureConfirmed)
     }
 
     // 거부가 아닌 실패는 파킹하지 않는 갈래를 고정한다
@@ -2914,6 +3591,7 @@ class InstanceOperationServiceTest {
         // 남겨 두면 다음 주기에 같은 실패를 다시 받아 기록만 두 번 남는다
         assertNull(instance.runtimeOperationId)
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+        assertTrue(instance.createFailureConfirmed)
     }
 
     // 조회 오류는 상태를 바꾸지 않고 간격을 늘려 다음 조회를 예약하는지 확인

@@ -29,6 +29,10 @@ FLAG·SECRET·TOKEN·PASSWORD·PASSWD·PRIVATE_KEY·API_KEY·CREDENTIAL 이름�
 reset은 최신 릴리스를 다시 조회하지 않으며 저장한 값을 사용합니다
 env와 참조가 없는 기존 JSON의 형식도 유지합니다
 
+release_id 컬럼은 V19 마이그레이션으로 추가합니다
+dev의 V18은 생성 실패 확인 상태를 저장하는 데 사용하므로 번호를 공유하지 않습니다
+기존 V18 DB를 올려도 컨테이너 설정과 정리 상태는 유지되고, 이전 인스턴스의 release_id는 null로 남습니다
+
 | 검수 | 기대 결과 |
 | --- | --- |
 | 문자열·UUID의 DB 왕복 | 값과 참조 보존 |
@@ -38,3 +42,4 @@ env와 참조가 없는 기존 JSON의 형식도 유지합니다
 | v2 경로에 토큰 누락 | 401 |
 
 검사: [DTO 입력](../src/test/kotlin/kr/msgctf/scheduler/instance/dto/CreateInstanceRequestTest.kt), [저장 규칙](../src/test/kotlin/kr/msgctf/scheduler/instance/service/ExecutionSettingsTest.kt)
+DB 업데이트 검사: [V18 데이터 보존](../src/test/kotlin/kr/msgctf/scheduler/db/ReleaseIdMigrationTest.kt)

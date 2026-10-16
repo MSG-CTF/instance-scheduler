@@ -75,6 +75,31 @@ class TestInstanceRepository {
                         .sortedWith(compareBy<Instance>({ it.nextPollAt }, { it.instanceId }))
                         .limitTo(limit)
                 }
+                // 실제 쿼리와 같게 최신순, 같은 시각이면 id 역순으로 준다
+                // DB는 uuid를 바이트로 비교하므로 Java UUID 비교가 아니라 문자열 비교로 흉내낸다
+                "findPage" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val statuses = args?.get(0) as Collection<InstanceStatus>
+                    val from = args[1] as Instant
+                    val to = args[2] as Instant
+                    val limit = args[3] as Limit
+                    listed(statuses, from, to).limitTo(limit)
+                }
+                "findPageAfter" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val statuses = args?.get(0) as Collection<InstanceStatus>
+                    val from = args[1] as Instant
+                    val to = args[2] as Instant
+                    val cursorAt = args[3] as Instant
+                    val cursorId = (args[4] as UUID).toString()
+                    val limit = args[5] as Limit
+                    listed(statuses, from, to)
+                        .filter {
+                            it.createdAt!!.isBefore(cursorAt) ||
+                                (it.createdAt == cursorAt && it.instanceId.toString() < cursorId)
+                        }
+                        .limitTo(limit)
+                }
                 // 단위 테스트에는 동시성이 없어 잠금 없이 같은 행을 돌려준다
                 "findByUserIdAndStatusInForUpdate" -> {
                     @Suppress("UNCHECKED_CAST")
@@ -110,6 +135,11 @@ class TestInstanceRepository {
 
     private fun findByIdOrNull(instanceId: UUID): Instance? =
         savedInstances.firstOrNull { instance -> instance.instanceId == instanceId }
+
+    private fun listed(statuses: Collection<InstanceStatus>, from: Instant, to: Instant): List<Instance> =
+        savedInstances
+            .filter { it.status in statuses && !it.createdAt!!.isBefore(from) && it.createdAt!!.isBefore(to) }
+            .sortedWith(compareByDescending<Instance> { it.createdAt }.thenByDescending { it.instanceId.toString() })
 
     private fun List<Instance>.limitTo(limit: Limit): List<Instance> =
         if (limit.isLimited) take(limit.max()) else this
