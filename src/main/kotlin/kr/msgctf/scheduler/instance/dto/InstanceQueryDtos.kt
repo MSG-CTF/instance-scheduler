@@ -29,6 +29,7 @@ data class InstanceDetailResult(
     // 공개 접속점 전체, Runtime이 아직 안 보냈거나 생성 전이면 비어 있다
     val endpoints: List<ServiceEndpoint>,
     val registryRevision: Long?,
+    val releaseId: UUID?,
     val createdAt: Instant?,
     val updatedAt: Instant?,
     val expiresAt: Instant,
@@ -56,6 +57,7 @@ data class InstanceDetailResult(
                 serviceUrl = instance.serviceUrl,
                 endpoints = endpoints,
                 registryRevision = instance.registryRevision,
+                releaseId = instance.releaseId,
                 createdAt = instance.createdAt,
                 updatedAt = instance.updatedAt,
                 expiresAt = instance.expiresAt,

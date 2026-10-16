@@ -111,6 +111,7 @@ class HttpRuntimeClient(
             retryAfterSeconds = retryAfterSeconds(response.headers),
             result = body.result,
             lastErrorCode = body.lastErrorCode,
+            cleanupCompleted = body.cleanupCompleted,
         )
     }
 

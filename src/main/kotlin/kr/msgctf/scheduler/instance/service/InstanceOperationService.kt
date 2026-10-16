@@ -269,6 +269,8 @@ class InstanceOperationService(
                                 ports = container.ports,
                                 expose = container.expose,
                                 exposedPorts = container.exposedPorts,
+                                env = container.env,
+                                secretRef = container.secretRef,
                                 // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
                                 // PWN은 쓰기 경로가 /tmp 아래여야 해서 요청에서 받게 되면 정책별로 갈라야 한다
                                 runAsUser = DEFAULT_RUN_AS_USER,
@@ -796,11 +798,25 @@ class InstanceOperationService(
                         SchedulerErrorCode.RUNTIME_CREATE_FAILED,
                         "operationId=${snapshot.operationId}, lastErrorCode=${snapshot.lastErrorCode}",
                     )
+                    if (snapshot.type == RuntimeOperationType.CREATE && snapshot.cleanupCompleted) {
+                        completeDelete(instance)
+                        reservationToRelease = takeReservation(instance)
+                    }
                 }
                 InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
-                    // 생성이 끝내 실패한 것이라 더 진행되지 않는다
-                    // 다만 실패한 생성이 자원을 남겼을 수 있어 여기서 끝내지 않고 조회로 확인하게 넘긴다
+                    // Runtime이 삭제를 확인했을 때만 끝내고, 확인이 없으면 상태 조회를 이어간다
                     if (snapshot.type == RuntimeOperationType.CREATE) {
+                        if (snapshot.cleanupCompleted) {
+                            recordError(
+                                instance,
+                                SchedulerErrorCode.RUNTIME_CREATE_FAILED,
+                                "create failed and rollback completed, operationId=${snapshot.operationId}, " +
+                                    "lastErrorCode=${snapshot.lastErrorCode}",
+                            )
+                            completeDelete(instance)
+                            reservationToRelease = takeReservation(instance)
+                            return@executeWithoutResult
+                        }
                         clearOperation(instance)
                         instance.createFailureConfirmed = true
                         instance.nextPollAt = clock.instant()

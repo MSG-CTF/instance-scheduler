@@ -22,12 +22,12 @@ import org.springframework.web.bind.annotation.RestController
 
 // 인스턴스 생성과 삭제 API
 @RestController
-@RequestMapping("/api/instances")
+@RequestMapping("/api")
 class InstanceCommandController(
     private val instanceSchedulerService: InstanceSchedulerService,
 ) {
 
-    @PostMapping
+    @PostMapping(value = ["/instances", "/v2/instances"])
     @ResponseStatus(HttpStatus.ACCEPTED)
     fun createInstance(
         @Valid @RequestBody request: CreateInstanceRequest,
@@ -39,7 +39,7 @@ class InstanceCommandController(
             ),
         )
 
-    @DeleteMapping("/{instanceId}")
+    @DeleteMapping("/instances/{instanceId}")
     @ResponseStatus(HttpStatus.ACCEPTED)
     fun deleteInstance(
         @PathVariable instanceId: UUID,
@@ -55,7 +55,7 @@ class InstanceCommandController(
         )
 
     // 초기화도 생성처럼 접수만 하므로 202로 응답한다
-    @PostMapping("/{instanceId}/reset")
+    @PostMapping("/instances/{instanceId}/reset")
     @ResponseStatus(HttpStatus.ACCEPTED)
     fun resetInstance(
         @PathVariable instanceId: UUID,
@@ -67,7 +67,7 @@ class InstanceCommandController(
             ),
         )
 
-    @PostMapping("/{instanceId}/extend")
+    @PostMapping("/instances/{instanceId}/extend")
     fun extendInstance(
         @PathVariable instanceId: UUID,
         @Valid @RequestBody request: ExtendInstanceRequest,

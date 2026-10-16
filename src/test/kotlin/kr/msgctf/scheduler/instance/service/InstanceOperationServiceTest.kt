@@ -3379,7 +3379,8 @@ class InstanceOperationServiceTest {
         // given
         val repository = TestInstanceRepository()
         val multiContainers = listOf(
-            ContainerSpec(name = "web", image = "ghcr.io/example/web@sha256:${"a".repeat(64)}", ports = listOf(8080), expose = true),
+            ContainerSpec(name = "web", image = "ghcr.io/example/web@sha256:${"a".repeat(64)}", ports = listOf(8080), expose = true,
+                env = mapOf("APP_MODE" to "ctf"), secretRef = testUuid(591)),
             ContainerSpec(name = "db", image = "ghcr.io/example/db@sha256:${"b".repeat(64)}", ports = listOf(5432, 9090), expose = false),
         )
         val instance = repository.save(
@@ -3404,6 +3405,8 @@ class InstanceOperationServiceTest {
         assertEquals(multiContainers.map { it.image }, sent.map { it.image })
         assertEquals(multiContainers.map { it.ports }, sent.map { it.ports })
         assertEquals(multiContainers.map { it.expose }, sent.map { it.expose })
+        assertEquals(multiContainers.map { it.env }, sent.map { it.env })
+        assertEquals(multiContainers.map { it.secretRef }, sent.map { it.secretRef })
         assertEquals(listOf(10001L, 10001L), sent.map { it.runAsUser })
         // 요청에 실리는 쓰기 용량이 자원 검증이 보는 값과 같아야 한다
         // 둘이 갈라지면 검증을 통과한 요청을 런타임이 거절한다
@@ -4186,6 +4189,38 @@ class InstanceOperationServiceTest {
         override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
             creates += request
             return delegate.submitCreate(request)
+        }
+    }
+
+    @Test
+    fun `releases reservation only after runtime confirms failed create cleanup`() {
+        for (timedOut in listOf(false, true)) {
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val delegate = FakeRuntimeClient()
+            val runtime = object : RuntimeClient by delegate {
+                override fun getOperation(operationId: String) = RuntimeOperationSnapshot(
+                    operationId = operationId, type = RuntimeOperationType.CREATE,
+                    status = RuntimeOperationState.FAILED, retryAfterSeconds = null,
+                    result = null, lastErrorCode = "WORKLOAD_NOT_READY", cleanupCompleted = true,
+                )
+            }
+            val instance = repository.save(newRequested())
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+            service.progressRequested(instance.instanceId)
+            val reservation = instance.reservationId
+            if (timedOut) {
+                instance.pollDeadlineAt = clock.instant()
+                service.pollOperation(instance.instanceId)
+                assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+            }
+            service.pollOperation(instance.instanceId)
+            service.pollOperation(instance.instanceId)
+            assertEquals(InstanceStatus.CLEANED, instance.status)
+            assertNull(instance.runtimeOperationId)
+            assertNull(instance.reservationId)
+            assertEquals(listOf(reservation), broker.releasedReservations)
+            assertEquals(ReleaseReason.RUNTIME_CREATE_FAILED, broker.releaseRequests.single().releaseReason)
         }
     }
 
