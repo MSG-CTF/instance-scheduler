@@ -159,7 +159,10 @@ class InstanceRepositoryTest {
     fun `persists healthcheck`() {
         // given
         val json = """{"container":"challenge","port":8080,"path":"/healthz"}"""
-        val withCheck = newInstance(teamId = testUuid(6), challengeId = testUuid(10)).apply { healthcheck = json }
+        val withCheck = newInstance(teamId = testUuid(6), challengeId = testUuid(10)).apply {
+            healthcheck = json
+            healthcheckForwarded = true
+        }
         val withoutCheck = newInstance(teamId = testUuid(7), challengeId = testUuid(10))
 
         // when
@@ -167,8 +170,12 @@ class InstanceRepositoryTest {
         instanceRepository.saveAndFlush(withoutCheck)
 
         // then
-        assertEquals(json, instanceRepository.findById(withCheck.instanceId).orElseThrow().healthcheck)
-        assertNull(instanceRepository.findById(withoutCheck.instanceId).orElseThrow().healthcheck)
+        val storedWithCheck = instanceRepository.findById(withCheck.instanceId).orElseThrow()
+        val storedWithoutCheck = instanceRepository.findById(withoutCheck.instanceId).orElseThrow()
+        assertEquals(json, storedWithCheck.healthcheck)
+        assertEquals(true, storedWithCheck.healthcheckForwarded)
+        assertNull(storedWithoutCheck.healthcheck)
+        assertNull(storedWithoutCheck.healthcheckForwarded)
     }
 
     @Test

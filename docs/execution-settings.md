@@ -22,7 +22,7 @@ release_id도 함께 저장하고 생성·조회·reset 응답에 돌려줍니�
 
 env 값은 타입 변환 없이 검증합니다
 FLAG·SECRET·TOKEN·PASSWORD·PASSWD·PRIVATE_KEY·API_KEY·CREDENTIAL 이름의 비밀값은 secret_ref를 사용합니다
-컨테이너당 일반 env는 32개, 값당 UTF-8 4096바이트, 이름과 값의 합계 16384바이트까지 허용합니다
+컨테이너당 일반 env는 128개, 값당 UTF-8 4096바이트, 이름과 값의 합계 16384바이트까지 허용합니다
 런타임은 조회한 비밀값을 합친 한도를 다시 검사합니다
 
 설정은 기존 containers JSON에 함께 저장합니다

@@ -3,13 +3,14 @@ package kr.msgctf.scheduler.instance.domain
 import java.util.UUID
 
 object EnvironmentRules {
+    const val MAX_ENV_ENTRIES = 128
     private val name = Regex("[A-Z_][A-Z0-9_]{0,63}")
     private val sensitive = Regex("SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|CREDENTIAL")
     private val nilId = UUID(0, 0)
 
     fun violation(container: ContainerSpec): String? {
         if (container.secretRef == nilId) return "secret_ref must be a nonzero UUID"
-        if (container.env.size > 32) return "env must have at most 32 entries"
+        if (container.env.size > MAX_ENV_ENTRIES) return "env must have at most 128 entries"
         var total = 0
         for ((key, value) in container.env) {
             if (!name.matches(key)) return "env names must be uppercase identifiers"

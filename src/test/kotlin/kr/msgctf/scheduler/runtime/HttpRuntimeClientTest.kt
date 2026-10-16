@@ -27,6 +27,19 @@ import org.springframework.web.client.RestClient
 
 class HttpRuntimeClientTest {
 
+    @Test
+    fun `reads cleanup proof and defaults old responses to unconfirmed`() {
+        for (confirmed in listOf(false, true)) {
+            server.expect(requestTo("http://runtime.test/internal/v1/operations/op-cleanup"))
+                .andRespond(withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON).body(
+                    """{"operation_id":"op-cleanup","type":"CREATE","status":"FAILED","last_error_code":"WORKLOAD_NOT_READY"${if (confirmed) ",\"cleanup_completed\":true" else ""}}""",
+                ))
+            assertEquals(confirmed, client.getOperation("op-cleanup").cleanupCompleted)
+            server.verify()
+            server.reset()
+        }
+    }
+
     private val builder = RestClient.builder().baseUrl("http://runtime.test")
     private val server = MockRestServiceServer.bindTo(builder).build()
     private val client = HttpRuntimeClient(builder.build(), "test-token")

@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.service
 import java.time.Clock
 import java.time.Instant
 import java.util.UUID
+import kr.msgctf.scheduler.instance.config.CleanupProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
@@ -17,6 +18,7 @@ class InstanceCleanupService(
     private val transitionService: InstanceStateTransitionService,
     private val instanceRepository: InstanceRepository,
     private val clock: Clock,
+    private val cleanupProperties: CleanupProperties = CleanupProperties(),
 ) {
 
     // 정상 흐름은 RUNNING(만료) -> EXPIRED -> CLEANUP_PENDING
@@ -53,13 +55,17 @@ class InstanceCleanupService(
             instance.attemptCount = 0
             return
         }
-        // 하드타임아웃은 더 기다리지 않기로 한 시점이라 생성 결과를 이어 보지 않는다
-        // 정리 경로가 instance id로 runtime에 물어 workload를 찾으므로 id를 놓아도 지울 수 있다
-        // STOPPING은 삭제 operation이 돌고 있거나 접수 재시도를 기다리는 중이라 그대로 둔다
+        // 생성이 뒤늦게 끝나면 workload를 삭제하고, 롤백됐으면 예약을 반납해야 한다
+        // binding이 없는 실패도 있으므로 생성 operation을 바로 버리지 않는다
         if (instance.status != InstanceStatus.STOPPING) {
-            instance.runtimeOperationId = null
-            instance.nextPollAt = null
-            instance.pollDeadlineAt = null
+            if (instance.runtimeWorkloadId == null && instance.runtimeOperationId != null) {
+                instance.nextPollAt = clock.instant()
+                instance.pollDeadlineAt = clock.instant().plus(cleanupProperties.resolveTimeout)
+            } else {
+                instance.runtimeOperationId = null
+                instance.nextPollAt = null
+                instance.pollDeadlineAt = null
+            }
             instance.attemptCount = 0
         }
         instance.action = InstanceAction.CLEANUP
