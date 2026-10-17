@@ -1,0 +1,92 @@
+name: Scheduler CI and deployment
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduler-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '24'
+          cache: gradle
+      - name: Verify Docker and deployment recovery
+        run: |
+          docker info > /dev/null
+          python3 -m unittest discover -s deploy -p 'test_*.py' -v
+      - name: Test with real PostgreSQL and Redis and build the release JAR
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain --max-workers=2 test bootJar
+      - name: Reject skipped integration tests and prepare the artifact
+        run: |
+          python3 - <<'PY'
+          import pathlib, shutil, xml.etree.ElementTree as ET
+          reports = [ET.parse(p).getroot() for p in pathlib.Path('build/test-results/test').glob('TEST-*.xml')]
+          totals = {key: sum(int(r.get(key, 0)) for r in reports) for key in ('tests', 'failures', 'errors', 'skipped')}
+          assert totals['tests'] > 0 and all(totals[key] == 0 for key in ('failures', 'errors', 'skipped')), totals
+          assert any('IntegrationTest' in r.get('name', '') for r in reports), 'Integration test report missing'
+          jars = [p for p in pathlib.Path('build/libs').glob('*.jar') if not p.name.endswith('-plain.jar')]
+          assert len(jars) == 1, 'Expected one executable JAR'
+          pathlib.Path('dist').mkdir(exist_ok=True)
+          shutil.copyfile(jars[0], 'dist/artifact')
+          print(totals)
+          PY
+          (cd dist && sha256sum artifact > artifact.sha256)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scheduler-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scheduler-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/test-results/test/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/dev' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: control-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: scheduler-${{ github.sha }}
+          path: dist/
+      - name: Deploy the verified artifact and check authenticated API responses
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: msgctf-deploy
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_ENV: ${{ secrets.DEPLOY_ENV }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          (cd dist && sha256sum -c artifact.sha256)
+          python3 deploy/send_release.py scheduler --artifact dist/artifact --source-sha "$SOURCE_SHA"
