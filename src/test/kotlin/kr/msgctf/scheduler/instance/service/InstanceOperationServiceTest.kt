@@ -48,6 +48,7 @@ import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
+import kr.msgctf.scheduler.runtime.RuntimeContainer
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.runtime.RuntimeDeleteRequest
@@ -55,8 +56,11 @@ import kr.msgctf.scheduler.runtime.RuntimeHealthcheck
 import kr.msgctf.scheduler.runtime.RuntimeOperationSnapshot
 import kr.msgctf.scheduler.runtime.RuntimeOperationState
 import kr.msgctf.scheduler.runtime.RuntimeOperationType
+import kr.msgctf.scheduler.runtime.RuntimeResourceLimits
 import kr.msgctf.scheduler.runtime.RuntimeStatusResult
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
+import kr.msgctf.scheduler.runtime.RuntimeTarget
+import kr.msgctf.scheduler.runtime.RuntimeWorkload
 import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.extension.ExtendWith
@@ -4222,6 +4226,144 @@ class InstanceOperationServiceTest {
             assertEquals(listOf(reservation), broker.releasedReservations)
             assertEquals(ReleaseReason.RUNTIME_CREATE_FAILED, broker.releaseRequests.single().releaseReason)
         }
+    }
+
+    @Test
+    fun `reconciles an unaccepted create and releases only after cleanup proof`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newCleanupPending().apply {
+            runtimeWorkloadId = null
+            reservationId = "reservation-lost-create"
+            healthcheck = HEALTHCHECK_JSON
+            healthcheckForwarded = true
+            deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+        })
+        var reconciled: RuntimeCreateRequest? = null
+        val runtime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID) = RuntimeStatusResult.NotStored
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult = error("cleanup must not create a new workload")
+            override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted {
+                reconciled = request
+                return RuntimeSubmitResult.Accepted("op-unaccepted", 0)
+            }
+            override fun getOperation(operationId: String) = RuntimeOperationSnapshot(
+                operationId, RuntimeOperationType.CREATE, RuntimeOperationState.FAILED, null,
+                null, "CREATE_NOT_ACCEPTED", cleanupCompleted = true,
+            )
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+        service.submitDelete(instance.instanceId)
+        assertEquals("runtime-create-${instance.instanceId}", reconciled?.requestId)
+        assertEquals(RuntimeHealthcheck("challenge", 8080, "/healthz"), reconciled?.workload?.healthcheck)
+        assertEquals("op-unaccepted", instance.runtimeOperationId)
+        assertEquals("reservation-lost-create", instance.reservationId)
+        assertTrue(broker.releasedReservations.isEmpty())
+        service.pollOperation(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertNull(instance.reservationId)
+        assertEquals(listOf("reservation-lost-create"), broker.releasedReservations)
+    }
+
+    @Test
+    fun `recovered accepted create stays reserved until its workload is deleted`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newCleanupPending().apply {
+            runtimeWorkloadId = null
+            reservationId = "reservation-accepted-create"
+        })
+        val delegate = FakeRuntimeClient()
+        val original = delegate.submitCreate(RuntimeCreateRequest(
+            "runtime-create-${instance.instanceId}", instance.instanceId, instance.teamId,
+            instance.isolationProfile,
+            RuntimeTarget(RuntimeType.KUBERNETES, "cluster-main"),
+            RuntimeWorkload(
+                containers = listOf(RuntimeContainer("challenge", TEST_DIGEST_IMAGE, listOf(8080), expose = true, runAsUser = 10001)),
+                resourceLimits = RuntimeResourceLimits(500, 512, 1024),
+            ),
+        )) as RuntimeSubmitResult.Accepted
+        var running = true
+        var newCreates = 0
+        val runtime = object : RuntimeClient by delegate {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult { newCreates++; error("unexpected new create") }
+            override fun getRuntimeStatus(instanceId: UUID) = RuntimeStatusResult.NotStored
+            override fun reconcileCreate(request: RuntimeCreateRequest) = original
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot =
+                if (operationId == original.operationId && running) RuntimeOperationSnapshot(
+                    operationId, RuntimeOperationType.CREATE, RuntimeOperationState.RUNNING, 2, null, null,
+                ) else delegate.getOperation(operationId)
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertTrue(broker.releasedReservations.isEmpty())
+        running = false
+        service.pollOperation(instance.instanceId)
+        assertNotNull(instance.runtimeWorkloadId)
+        assertNull(instance.runtimeOperationId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertTrue(broker.releasedReservations.isEmpty())
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(0, newCreates)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-accepted-create"), broker.releasedReservations)
+    }
+
+    @Test
+    fun `reconciliation outage retains cleanup and reservation`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newCleanupPending().apply {
+            runtimeWorkloadId = null
+            reservationId = "reservation-reconcile-outage"
+        })
+        val runtime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID) = RuntimeStatusResult.NotStored
+            override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted =
+                throw HttpServerErrorException(HttpStatus.BAD_GATEWAY)
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+        service.submitDelete(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals("reservation-reconcile-outage", instance.reservationId)
+        assertNull(instance.runtimeOperationId)
+        assertTrue(broker.releasedReservations.isEmpty())
+        assertTrue(instance.nextPollAt!!.isAfter(clock.instant()))
+    }
+
+    @Test
+    fun `ignores reconciliation result after cleanup state changes`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newCleanupPending().apply { runtimeWorkloadId = null })
+        val runtime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID) = RuntimeStatusResult.NotStored
+            override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted {
+                instance.runtimeOperationId = "another-operation"
+                return RuntimeSubmitResult.Accepted("stale-reconciliation", 0)
+            }
+        }
+        newService(repository, runtimeClient = runtime).submitDelete(instance.instanceId)
+        assertEquals("another-operation", instance.runtimeOperationId)
+    }
+
+    @Test
+    fun `ignores reconciliation result after create failure is confirmed`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newCleanupPending().apply { runtimeWorkloadId = null })
+        val runtime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun getRuntimeStatus(instanceId: UUID) = RuntimeStatusResult.NotStored
+            override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted {
+                instance.createFailureConfirmed = true
+                return RuntimeSubmitResult.Accepted("stale-reconciliation", 0)
+            }
+        }
+        newService(repository, runtimeClient = runtime).submitDelete(instance.instanceId)
+        assertNull(instance.runtimeOperationId)
+        assertTrue(instance.createFailureConfirmed)
     }
 
     private fun newService(

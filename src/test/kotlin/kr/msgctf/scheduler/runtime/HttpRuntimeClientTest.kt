@@ -28,6 +28,42 @@ import org.springframework.web.client.RestClient
 class HttpRuntimeClientTest {
 
     @Test
+    fun `reconciles with the original request identity and reads the accepted operation`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/reconcile_create"))
+            .andExpect(method(HttpMethod.POST))
+            .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer test-token"))
+            .andExpect(jsonPath("$.request_id").value("runtime-create-$instanceId"))
+            .andExpect(jsonPath("$.instance_id").value(instanceId.toString()))
+            .andExpect(jsonPath("$.workload.containers[0].run_as_user").value(10001))
+            .andRespond(withStatus(HttpStatus.ACCEPTED).contentType(MediaType.APPLICATION_JSON)
+                .body("""{"operation_id":"original-or-fenced","status":"FAILED","cleanup_completed":true}"""))
+        assertEquals("original-or-fenced", client.reconcileCreate(createRequest(instanceId))?.operationId)
+    }
+
+    @Test
+    fun `old runtime reconciliation route does not prove cleanup`() {
+        val instanceId = UUID.randomUUID()
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/reconcile_create"))
+            .andRespond(withStatus(HttpStatus.NOT_FOUND))
+        assertNull(client.reconcileCreate(createRequest(instanceId)))
+    }
+
+    @Test
+    fun `reconciliation conflict and server failure remain unknown`() {
+        for (status in listOf(HttpStatus.CONFLICT, HttpStatus.BAD_GATEWAY)) {
+            val instanceId = UUID.randomUUID()
+            server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/reconcile_create"))
+                .andRespond(withStatus(status))
+            assertFailsWith<org.springframework.web.client.RestClientResponseException> {
+                client.reconcileCreate(createRequest(instanceId))
+            }
+            server.verify()
+            server.reset()
+        }
+    }
+
+    @Test
     fun `reads cleanup proof and defaults old responses to unconfirmed`() {
         for (confirmed in listOf(false, true)) {
             server.expect(requestTo("http://runtime.test/internal/v1/operations/op-cleanup"))

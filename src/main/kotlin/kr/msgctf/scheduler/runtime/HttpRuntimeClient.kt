@@ -67,6 +67,21 @@ class HttpRuntimeClient(
             )
         }
 
+    override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted? =
+        try {
+            val response = restClient.post()
+                .uri("/internal/v1/instances/{instance_id}/reconcile_create", request.instanceId)
+                .header(HttpHeaders.AUTHORIZATION, "Bearer $token")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
+                .retrieve()
+                .toEntity(RuntimeOperationAcceptedResponse::class.java)
+            accepted(response)
+        } catch (exception: HttpClientErrorException.NotFound) {
+            // 먼저 배포된 스케줄러가 구버전 런타임의 404를 정리 완료로 읽지 않게 한다
+            null
+        }
+
     // INSTANCE_NOT_FOUND를 명시한 404만 저장된 정보 없음으로 읽는다
     // 그 밖의 실패는 무엇이 있는지 모르는 상태라 전파해서 호출자가 판단을 미루게 한다
     override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
@@ -115,7 +130,7 @@ class HttpRuntimeClient(
         )
     }
 
-    private fun accepted(response: ResponseEntity<RuntimeOperationAcceptedResponse>): RuntimeSubmitResult {
+    private fun accepted(response: ResponseEntity<RuntimeOperationAcceptedResponse>): RuntimeSubmitResult.Accepted {
         val body = checkNotNull(response.body) { "accepted response body missing" }
         return RuntimeSubmitResult.Accepted(
             operationId = body.operationId,
