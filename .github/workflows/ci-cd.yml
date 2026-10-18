@@ -30,6 +30,8 @@ jobs:
       - name: Verify Docker and deployment recovery
         run: |
           docker info > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx
           python3 -m unittest discover -s deploy -p 'test_*.py' -v
       - name: Test with real PostgreSQL and Redis and build the release JAR
         run: |
