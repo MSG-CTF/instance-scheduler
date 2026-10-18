@@ -253,46 +253,7 @@ class InstanceOperationService(
         firstSubmit: Boolean,
     ) {
         val submitted = try {
-            runtimeClient.submitCreate(
-                RuntimeCreateRequest(
-                    // 같은 instance에는 같은 request_id를 쓴다, 재접수가 workload를 새로 만들지 않는 근거다
-                    requestId = "runtime-create-$instanceId",
-                    instanceId = instanceId,
-                    teamId = spec.teamId,
-                    isolationProfile = spec.isolationProfile,
-                    target = target,
-                    workload = RuntimeWorkload(
-                        containers = spec.containers.map { container ->
-                            RuntimeContainer(
-                                name = container.name,
-                                image = container.image,
-                                ports = container.ports,
-                                expose = container.expose,
-                                exposedPorts = container.exposedPorts,
-                                env = container.env,
-                                secretRef = container.secretRef,
-                                // 실행 UID와 쓰기 경로가 실행 스펙에 아직 없어 기본값으로 보낸다
-                                // PWN은 쓰기 경로가 /tmp 아래여야 해서 요청에서 받게 되면 정책별로 갈라야 한다
-                                runAsUser = DEFAULT_RUN_AS_USER,
-                                writablePaths = ContainerSpecRules.CONTAINER_WRITABLE_PATHS
-                                    .map { (path, sizeMib) ->
-                                        RuntimeWritablePath(path = path, sizeMib = sizeMib)
-                                    },
-                            )
-                        },
-                        healthcheck = spec.healthcheck
-                            ?.takeIf { forwardHealthcheck }
-                            ?.let { check ->
-                                RuntimeHealthcheck(container = check.container, port = check.port, path = check.path)
-                            },
-                        resourceLimits = RuntimeResourceLimits(
-                            cpuMillicores = spec.resourceProfile.cpuMillicores,
-                            memoryMib = spec.resourceProfile.memoryMib,
-                            ephemeralStorageMib = spec.resourceProfile.ephemeralStorageMib,
-                        ),
-                    ),
-                ),
-            )
+            runtimeClient.submitCreate(createRequest(instanceId, spec, target, forwardHealthcheck))
         } catch (exception: Exception) {
             handleSubmitFailure(instanceId, exception, firstSubmit)
             return
@@ -309,6 +270,45 @@ class InstanceOperationService(
             }
         }
     }
+
+    // 첫 접수와 정리 중 접수 확인은 같은 입력을 보내야 request_id 바인딩이 유지된다
+    private fun createRequest(
+        instanceId: UUID,
+        spec: WorkloadSpec,
+        target: RuntimeTarget,
+        forwardHealthcheck: Boolean,
+    ): RuntimeCreateRequest = RuntimeCreateRequest(
+        requestId = "runtime-create-$instanceId",
+        instanceId = instanceId,
+        teamId = spec.teamId,
+        isolationProfile = spec.isolationProfile,
+        target = target,
+        workload = RuntimeWorkload(
+            containers = spec.containers.map { container ->
+                RuntimeContainer(
+                    name = container.name,
+                    image = container.image,
+                    ports = container.ports,
+                    expose = container.expose,
+                    exposedPorts = container.exposedPorts,
+                    env = container.env,
+                    secretRef = container.secretRef,
+                    runAsUser = DEFAULT_RUN_AS_USER,
+                    writablePaths = ContainerSpecRules.CONTAINER_WRITABLE_PATHS.map { (path, sizeMib) ->
+                        RuntimeWritablePath(path = path, sizeMib = sizeMib)
+                    },
+                )
+            },
+            healthcheck = spec.healthcheck?.takeIf { forwardHealthcheck }?.let { check ->
+                RuntimeHealthcheck(container = check.container, port = check.port, path = check.path)
+            },
+            resourceLimits = RuntimeResourceLimits(
+                cpuMillicores = spec.resourceProfile.cpuMillicores,
+                memoryMib = spec.resourceProfile.memoryMib,
+                ephemeralStorageMib = spec.resourceProfile.ephemeralStorageMib,
+            ),
+        ),
+    )
 
     fun submitDelete(instanceId: UUID) {
         var reservationToRelease: PendingRelease? = null
@@ -527,6 +527,8 @@ class InstanceOperationService(
             return
         }
 
+        if (status == RuntimeStatusResult.NotStored && reconcileUnknownCreate(instanceId)) return
+
         var reservationToRelease: PendingRelease? = null
         var waitStarted = false
         var alerted = false
@@ -603,6 +605,38 @@ class InstanceOperationService(
                 cleanupProperties.resolveTimeout,
             )
         }
+    }
+
+    private fun reconcileUnknownCreate(instanceId: UUID): Boolean {
+        val request = tx.execute {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
+            if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null ||
+                instance.runtimeWorkloadId != null || instance.createFailureConfirmed
+            ) return@execute null
+            val spec = toWorkloadSpec(instance) ?: return@execute null
+            val runtimeType = instance.runtimeType ?: return@execute null
+            val targetId = instance.runtimeTargetId ?: return@execute null
+            createRequest(
+                instanceId, spec, RuntimeTarget(runtimeType, targetId),
+                forwardHealthcheck = instance.healthcheckForwarded == true,
+            )
+        } ?: return false
+
+        val accepted = try {
+            runtimeClient.reconcileCreate(request) ?: return false
+        } catch (exception: Exception) {
+            retryCleanupLater(instanceId, "create acceptance reconciliation failed, ${failureDetail(exception)}")
+            return true
+        }
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null ||
+                instance.runtimeWorkloadId != null || instance.createFailureConfirmed
+            ) return@executeWithoutResult
+            storeAcceptedOperation(instance, accepted)
+            instance.cleanupRetryCount = 0
+        }
+        return true
     }
 
     // 저장된 정보가 없다는 답을 받은 행에 다시 묻기까지 기다릴 간격을 정한다

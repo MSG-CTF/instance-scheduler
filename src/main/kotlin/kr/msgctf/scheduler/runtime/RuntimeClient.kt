@@ -14,4 +14,7 @@ interface RuntimeClient {
 
     // 접수 응답을 못 받아 workload id를 모르는 행을 정리할 때 쓴다
     fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult
+
+    // null이면 구버전 런타임이라 접수 여부를 확정할 수 없다
+    fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted? = null
 }
