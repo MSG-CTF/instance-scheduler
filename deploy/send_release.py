@@ -49,7 +49,9 @@ def main():
         for line in safe_lines:
             prefix, value = line.split("=", 1)
             report = json.loads(value)
-            print(prefix + "=" + json.dumps({key: report[key] for key in ("component", "source_commit", "artifact_sha256", "status", "authentication_verified") if key in report}))
+            if prefix == "DEPLOYMENT_RESULT" and args.component == "scheduler" and report.get("deployment_strategy") not in {"verified_api_bridge", "initial_start"}:
+                raise RuntimeError("Administrator must upgrade the scheduler deployment helper")
+            print(prefix + "=" + json.dumps({key: report[key] for key in ("component", "source_commit", "artifact_sha256", "status", "authentication_verified", "deployment_strategy") if key in report}))
         if completed.returncode or not any(line.startswith("DEPLOYMENT_RESULT=") for line in safe_lines):
             raise RuntimeError("Deployment failed; inspect the server through the administrator account")
 
