@@ -34,6 +34,7 @@ class ProxyService(Service):
         self.ports = {8080: primary, BRIDGE_PORT: bridge}
         self.servers = {}
         self.process = None
+        self.proxy_ready = threading.Event()
         self.prefix = root / "nginx-test"
         self.prefix.mkdir()
         self.start_application(8080)
@@ -116,6 +117,9 @@ http {{
                     with socket.create_connection(("127.0.0.1", self.proxy_port), timeout=.2): break
                 except OSError: time.sleep(.02)
             else: raise AssertionError("Isolated proxy did not start")
+            # 첫 리스너가 열리기 전은 배포 중 연결 유지 검사의 시작점이 아니다
+            # reload 때는 지우지 않아 배포·롤백 중의 연결 실패는 계속 잡는다
+            self.proxy_ready.set()
         else:
             workers = proxy_workers(self.process.pid)
             if not workers: raise AssertionError("Isolated proxy has no workers")
@@ -141,7 +145,7 @@ class ProxyAvailabilityTests(unittest.TestCase):
             results = []; stop = threading.Event()
             def observe():
                 while not stop.is_set():
-                    if service.process:
+                    if service.proxy_ready.is_set():
                         request = urllib.request.Request(f"http://127.0.0.1:{service.proxy_port}/api/instances?limit=1", headers={"Authorization":"Bearer " + TOKEN})
                         try:
                             with urllib.request.urlopen(request,timeout=2) as response:
