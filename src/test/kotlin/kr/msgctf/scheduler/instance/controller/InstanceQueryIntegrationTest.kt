@@ -94,7 +94,7 @@ class InstanceQueryIntegrationTest {
     @Test
     fun `detail and list return the stored expiry reason in snake case`() {
         for ((index, reason) in listOf(RuntimeDeleteReason.TTL_EXPIRED, RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED).withIndex()) {
-            val id = createInstance(teamId = testUuid(801 + index))
+            val id = createInstance(teamId = testUuid(801L + index))
             val instance = instanceRepository.findById(id).orElseThrow()
             instance.status = InstanceStatus.CLEANED
             instance.deleteReason = reason
