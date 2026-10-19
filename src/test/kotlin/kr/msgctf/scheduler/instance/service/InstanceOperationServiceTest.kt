@@ -137,6 +137,7 @@ class InstanceOperationServiceTest {
         assertNull(instance.pollDeadlineAt)
         assertNull(instance.reservationId)
         assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, events.saved.single().errorCode)
+        assertNull(instance.deleteReason)
     }
 
     @Test
@@ -152,8 +153,27 @@ class InstanceOperationServiceTest {
         movingClock.advance(Duration.ofSeconds(5))
         service.progressRequested(instance.instanceId)
         assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(RuntimeDeleteReason.TTL_EXPIRED, instance.deleteReason)
         assertTrue(broker.reservationRequests.isEmpty())
         assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+    }
+
+    @Test
+    fun `replacement records hard timeout when it expires before inherited ttl`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending())
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId).apply {
+            hardExpiresAt = clock.instant().plusSeconds(5)
+        })
+        val movingClock = MutableClock(clock.instant())
+        val broker = FakeBrokerClient()
+        val service = newService(repository, brokerClient = broker, clock = movingClock)
+        service.progressRequested(instance.instanceId)
+        movingClock.advance(Duration.ofSeconds(5))
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
+        assertTrue(broker.reservationRequests.isEmpty())
     }
 
     @Test

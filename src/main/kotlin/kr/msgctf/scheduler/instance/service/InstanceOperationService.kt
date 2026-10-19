@@ -222,6 +222,14 @@ class InstanceOperationService(
             !minOf(checkNotNull(instance.pollDeadlineAt), instance.expiresAt, instance.hardExpiresAt).isAfter(clock.instant())
 
     private fun failReplacement(instance: Instance, errorCode: SchedulerErrorCode, detail: String) {
+        if (errorCode == SchedulerErrorCode.RESOURCE_UNAVAILABLE && instance.deleteReason == null) {
+            val now = clock.instant()
+            instance.deleteReason = when {
+                !instance.hardExpiresAt.isAfter(now) -> RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
+                !instance.expiresAt.isAfter(now) -> RuntimeDeleteReason.TTL_EXPIRED
+                else -> null
+            }
+        }
         move(instance, InstanceStatus.FAILED)
         instance.nextPollAt = null
         instance.pollDeadlineAt = null
