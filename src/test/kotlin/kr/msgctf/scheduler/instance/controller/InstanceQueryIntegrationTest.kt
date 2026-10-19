@@ -105,12 +105,12 @@ class InstanceQueryIntegrationTest {
                     jsonPath("$.data.delete_reason") { value(reason.name) }
                     jsonPath("$.data.deleteReason") { doesNotExist() }
                 }
-            mockMvc.get("/api/instances") {
-                param("team_id", instance.teamId.toString())
-            }.andExpect {
+            mockMvc.get("/api/instances").andExpect {
                 status { isOk() }
-                jsonPath("$.data.items[0].delete_reason") { value(reason.name) }
-                jsonPath("$.data.items[0].deleteReason") { doesNotExist() }
+                jsonPath("$.data.items[?(@.instance_id == '$id')].delete_reason") {
+                    value(org.hamcrest.Matchers.hasItem(reason.name))
+                }
+                jsonPath("$.data.items[*].deleteReason") { doesNotExist() }
             }
         }
     }
