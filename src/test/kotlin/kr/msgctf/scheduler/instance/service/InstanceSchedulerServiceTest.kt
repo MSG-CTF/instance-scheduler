@@ -143,6 +143,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(RuntimeDeleteReason.USER_REQUESTED, previous.deleteReason)
         assertEquals(previous.instanceId, result.replacedInstanceId)
         assertEquals(InstanceStatus.REQUESTED, result.status)
+        assertEquals(previous.instanceId, instanceRepository.savedInstances.last().replacedInstanceId)
     }
 
     // 이전 인스턴스가 아직 만들어지는 중이면 교체하지 않고 거절하는지 확인
@@ -305,6 +306,7 @@ class InstanceSchedulerServiceTest {
         // 새 인스턴스는 스펙과 만료 시각을 그대로 물려받는다
         val fresh = instanceRepository.savedInstances.single { it.status == InstanceStatus.REQUESTED }
         assertEquals(fresh.instanceId, result.instanceId)
+        assertEquals(previous.instanceId, fresh.replacedInstanceId)
         assertEquals(previous.teamId, fresh.teamId)
         assertEquals(previous.userId, fresh.userId)
         assertEquals(previous.challengeId, fresh.challengeId)

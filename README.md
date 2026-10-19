@@ -12,3 +12,5 @@ MSG CTF 문제 인스턴스의 생성과 정리를 맡는 스케줄러다.
 - `scheduler.instance-policy.healthcheck-enabled`는 기본이 `false`다. 런타임이 `workload.healthcheck`를 받게 된 뒤 `true`로 켠다. 꺼져 있어도 `healthcheck` 검증과 저장은 하고 런타임 요청에만 싣지 않는다. 그래서 잘못된 `healthcheck`는 꺼져 있어도 400이다
 
 실행 설정 계약: [환경변수와 비밀값](docs/execution-settings.md)
+
+초기화 동작과 대기 설정: [이전 실행 정리와 용량 관측 대기](docs/replacement-wait.md)
