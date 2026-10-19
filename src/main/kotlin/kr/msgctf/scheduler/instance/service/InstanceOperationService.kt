@@ -87,6 +87,7 @@ class InstanceOperationService(
                 InstanceStatus.SCHEDULING -> Unit
                 else -> return@execute null
             }
+            if (!replacementReady(instance)) return@execute null
             val spec = toWorkloadSpec(instance)
             if (spec == null) {
                 move(instance, InstanceStatus.FAILED)
@@ -137,6 +138,11 @@ class InstanceOperationService(
                 reservationTaken = instance.reservationId == reservation.reservationId
                 return@execute null
             }
+            // 후보 조회와 예약 왕복 중에도 기존 만료 시각을 넘을 수 있다
+            if (replacementWaitExpired(instance)) {
+                failReplacement(instance, SchedulerErrorCode.RESOURCE_UNAVAILABLE, "replacement wait expired during reservation")
+                return@execute null
+            }
             instance.provider = placement.provider
             instance.accountId = placement.accountId
             instance.region = placement.region
@@ -175,6 +181,53 @@ class InstanceOperationService(
         }
 
         submitCreateAndStore(instanceId, spec, target, forwardHealthcheck, firstSubmit = true)
+    }
+
+    // 이전 실행을 지우는 동안 워커와 DB 잠금을 붙잡지 않고 다음 주기로 미룬다
+    // 기한과 의존성은 DB에 남아 프로세스가 재시작해도 처음부터 기다리지 않는다
+    private fun replacementReady(instance: Instance): Boolean {
+        val previousId = instance.replacedInstanceId ?: return true
+        val now = clock.instant()
+        if (instance.pollDeadlineAt == null) {
+            instance.pollDeadlineAt = minOf(
+                now.plus(operationProperties.replacementWaitTimeout), instance.expiresAt, instance.hardExpiresAt,
+            )
+        }
+        if (replacementWaitExpired(instance)) {
+            failReplacement(instance, SchedulerErrorCode.RESOURCE_UNAVAILABLE, "replacement wait expired, previousInstanceId=$previousId")
+            return false
+        }
+        // 다른 워커가 이미 처리 중이거나 대기 시각을 정했으면 같은 요청을 다시 보내지 않는다
+        if (instance.nextPollAt?.isAfter(now) == true) return false
+        val previous = instanceRepository.findById(previousId).orElse(null)
+        if (previous == null || previous.userId != instance.userId) {
+            failReplacement(instance, SchedulerErrorCode.INTERNAL_ERROR, "replacement predecessor missing or ownership mismatch, previousInstanceId=$previousId")
+            return false
+        }
+        if (previous.status == InstanceStatus.FAILED) {
+            failReplacement(instance, SchedulerErrorCode.RUNTIME_DELETE_FAILED, "previous cleanup failed, previousInstanceId=$previousId")
+            return false
+        }
+        if (previous.status != InstanceStatus.CLEANED) {
+            instance.nextPollAt = clampToDeadline(now.plus(operationProperties.backoffMax), instance.pollDeadlineAt)
+            return false
+        }
+        // 외부 호출이 진행 중인 동안 다른 노드가 같은 행을 다시 집지 않게 미룬다
+        instance.nextPollAt = clampToDeadline(now.plus(operationProperties.resubmitDelay), instance.pollDeadlineAt)
+        return true
+    }
+
+    private fun replacementWaitExpired(instance: Instance): Boolean =
+        instance.replacedInstanceId != null &&
+            !minOf(checkNotNull(instance.pollDeadlineAt), instance.expiresAt, instance.hardExpiresAt).isAfter(clock.instant())
+
+    private fun failReplacement(instance: Instance, errorCode: SchedulerErrorCode, detail: String) {
+        move(instance, InstanceStatus.FAILED)
+        instance.nextPollAt = null
+        instance.pollDeadlineAt = null
+        instance.pendingReservation = null
+        recordError(instance, errorCode, detail)
+        log.warn("replacement scheduling failed: instanceId={}, code={}, reason={}", instance.instanceId, errorCode, detail)
     }
 
     // PROVISIONING인데 operation을 접수하지 못한 행을 다시 접수한다
@@ -1395,10 +1448,28 @@ class InstanceOperationService(
             // broker를 부르는 사이 다른 워커가 상태를 바꿨으면 재시도하지 않는다
             if (instance.status != InstanceStatus.SCHEDULING) return@executeWithoutResult
             pendingReservation?.let { instance.pendingReservation = PendingReservationCodec.encode(it) }
+            // 삭제 직후의 용량 관측은 아직 이전 실행을 포함할 수 있다
+            // 정상적인 용량 부족 응답은 통신 장애 재시도 예산을 쓰지 않고 정해진 기한까지 기다린다
+            val capacityUnavailable = errorCode == SchedulerErrorCode.RESOURCE_UNAVAILABLE ||
+                (exception is BrokerRejectedException && exception.definite && exception.brokerCode == "INSUFFICIENT_CAPACITY")
+            if (instance.replacedInstanceId != null && capacityUnavailable) {
+                if (replacementWaitExpired(instance)) {
+                    failReplacement(instance, SchedulerErrorCode.RESOURCE_UNAVAILABLE, "replacement capacity wait expired, reason=${failureDetail(exception)}")
+                } else {
+                    instance.attemptCount = 0
+                    instance.nextPollAt = clampToDeadline(clock.instant().plus(operationProperties.backoffMax), instance.pollDeadlineAt)
+                    log.info(
+                        "replacement waiting for capacity observation: instanceId={}, deadline={}, reason={}",
+                        instanceId, instance.pollDeadlineAt, failureDetail(exception),
+                    )
+                }
+                return@executeWithoutResult
+            }
             instance.attemptCount += 1
             if (instance.attemptCount >= operationProperties.brokerRetryLimit) {
                 move(instance, InstanceStatus.FAILED)
                 instance.nextPollAt = null
+                instance.pollDeadlineAt = null
                 // FAILED로 끝난 행은 더 확인하지 않는다, 예약이 만들어졌다면 브로커에서 시간이 지나 만료된다
                 instance.pendingReservation = null
                 recordError(instance, errorCode, "attempts=${instance.attemptCount}, reason=${failureDetail(exception)}")

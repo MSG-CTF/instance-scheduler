@@ -80,6 +80,157 @@ class InstanceOperationServiceTest {
     // broker 가짜가 돌려주는 cluster-main과 달라야 저장된 target을 썼는지 가려진다
     private val STALLED_TARGET_ID = "cluster-stale"
 
+    @Test
+    fun `replacement waits for previous cleanup without reserving capacity`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending())
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val broker = FakeBrokerClient()
+        val service = newService(repository, brokerClient = broker)
+
+        repeat(4) { service.progressRequested(instance.instanceId) }
+
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertEquals(0, instance.attemptCount)
+        assertTrue(broker.reservationRequests.isEmpty())
+        assertNull(instance.runtimeOperationId)
+        assertEquals(clock.instant().plusSeconds(600), instance.pollDeadlineAt)
+        assertEquals(clock.instant().plusSeconds(30), instance.nextPollAt)
+    }
+
+    @Test
+    fun `replacement survives three empty observations and service restart`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending().apply { status = InstanceStatus.CLEANED })
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val movingClock = MutableClock(clock.instant())
+        val empty = FakeBrokerClient(FakeBrokerMode.EMPTY)
+        repeat(5) {
+            // 서비스 객체를 다시 만들어도 DB에 남은 대기 기한을 이어야 한다
+            newService(repository, brokerClient = empty, clock = movingClock).progressRequested(instance.instanceId)
+            assertEquals(InstanceStatus.SCHEDULING, instance.status)
+            movingClock.advance(Duration.between(movingClock.instant(), instance.nextPollAt))
+        }
+        assertEquals(clock.instant().plusSeconds(600), instance.pollDeadlineAt)
+        val runtime = CapturingRuntimeClient()
+        val service = newService(repository, runtimeClient = runtime, clock = movingClock)
+        service.progressRequested(instance.instanceId)
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(1, runtime.creates.size)
+        assertEquals(0, instance.attemptCount)
+    }
+
+    @Test
+    fun `replacement stops waiting at capacity deadline`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending().apply { status = InstanceStatus.CLEANED })
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val movingClock = MutableClock(clock.instant())
+        val events = TestInstanceEventRepository()
+        val service = newService(repository, brokerClient = FakeBrokerClient(FakeBrokerMode.EMPTY), events = events, clock = movingClock)
+        service.progressRequested(instance.instanceId)
+        movingClock.advance(Duration.ofMinutes(10))
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.nextPollAt)
+        assertNull(instance.pollDeadlineAt)
+        assertNull(instance.reservationId)
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, events.saved.single().errorCode)
+    }
+
+    @Test
+    fun `replacement waits no longer than inherited expiry even when cleanup stalls`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending())
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId).apply { expiresAt = clock.instant().plusSeconds(5) })
+        val movingClock = MutableClock(clock.instant())
+        val broker = FakeBrokerClient()
+        val service = newService(repository, brokerClient = broker, clock = movingClock)
+        service.progressRequested(instance.instanceId)
+        assertEquals(instance.expiresAt, instance.nextPollAt)
+        movingClock.advance(Duration.ofSeconds(5))
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertTrue(broker.reservationRequests.isEmpty())
+        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+    }
+
+    @Test
+    fun `replacement refuses missing or failed cleanup evidence`() {
+        for (previousStatus in listOf(null, InstanceStatus.FAILED)) {
+            val repository = TestInstanceRepository()
+            val previousId = previousStatus?.let {
+                repository.save(newCleanupPending().apply { status = it }).instanceId
+            } ?: UUID.randomUUID()
+            val instance = repository.save(newRequested(previousId, repository.savedInstances.firstOrNull()?.userId ?: UUID.randomUUID()))
+            val broker = FakeBrokerClient()
+            newService(repository, brokerClient = broker).progressRequested(instance.instanceId)
+            assertEquals(InstanceStatus.FAILED, instance.status)
+            assertTrue(broker.reservationRequests.isEmpty())
+        }
+    }
+
+    @Test
+    fun `replacement retains normal retry limit for broker outage`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending().apply { status = InstanceStatus.CLEANED })
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val movingClock = MutableClock(clock.instant())
+        val broker = object : BrokerClient by FakeBrokerClient() {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse =
+                throw IllegalStateException("broker offline")
+        }
+        val events = TestInstanceEventRepository()
+        val service = newService(repository, brokerClient = broker, events = events, clock = movingClock)
+        repeat(3) {
+            service.progressRequested(instance.instanceId)
+            instance.nextPollAt?.let { movingClock.advance(Duration.between(movingClock.instant(), it)) }
+        }
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(SchedulerErrorCode.BROKER_CALL_FAILED, events.saved.single().errorCode)
+    }
+
+    @Test
+    fun `replacement waits for definite insufficient capacity reservation rejection`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending().apply { status = InstanceStatus.CLEANED })
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val movingClock = MutableClock(clock.instant())
+        val broker = object : BrokerClient by FakeBrokerClient() {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse = throw capacityRejection(request)
+        }
+        val service = newService(repository, brokerClient = broker, clock = movingClock)
+        repeat(4) {
+            service.progressRequested(instance.instanceId)
+            assertEquals(InstanceStatus.SCHEDULING, instance.status)
+            movingClock.advance(Duration.between(movingClock.instant(), instance.nextPollAt))
+        }
+        assertNull(instance.reservationId)
+        assertNull(instance.runtimeOperationId)
+    }
+
+    @Test
+    fun `replacement releases reservation returned after wait deadline without runtime create`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending().apply { status = InstanceStatus.CLEANED })
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val movingClock = MutableClock(clock.instant())
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                val reservation = delegate.createReservation(request)
+                movingClock.advance(Duration.ofMinutes(11))
+                return reservation
+            }
+        }
+        val runtime = CapturingRuntimeClient()
+        newService(repository, brokerClient = broker, runtimeClient = runtime, clock = movingClock).progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertTrue(runtime.creates.isEmpty())
+        assertEquals(1, delegate.releasedReservations.size)
+    }
+
     // REQUESTED가 broker 선택과 접수를 거쳐 PROVISIONING까지 가는지 확인
     @Test
     fun `progresses requested instance to provisioning with operation id`() {
@@ -4459,12 +4610,13 @@ class InstanceOperationServiceTest {
             deleteReason = RuntimeDeleteReason.TTL_EXPIRED
         }
 
-    private fun newRequested(): Instance {
+    private fun newRequested(replacedInstanceId: UUID? = null, userId: UUID = UUID.randomUUID()): Instance {
         val now = clock.instant()
         return Instance(
             teamId = testUuid(7),
-            userId = UUID.randomUUID(),
+            userId = userId,
             challengeId = testUuid(100),
+            replacedInstanceId = replacedInstanceId,
             status = InstanceStatus.REQUESTED,
             isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,

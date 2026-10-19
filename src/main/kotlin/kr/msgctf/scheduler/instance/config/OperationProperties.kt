@@ -18,6 +18,9 @@ data class OperationProperties(
     val backoffMax: Duration = Duration.ofSeconds(30),
     // broker 후보 조회를 이 횟수만큼 실패하면 FAILED로 확정한다
     val brokerRetryLimit: Int = 3,
+    // 교체 시 이전 실행 정리와 브로커의 다음 용량 관측을 기다리는 상한
+    // 기존 expiresAt과 hardExpiresAt을 넘겨 기다리지 않는다
+    val replacementWaitTimeout: Duration = Duration.ofMinutes(10),
     // PROVISIONING인데 operation을 접수하지 못한 행을 다시 접수하기까지 기다리는 시간
     // 런타임 호출이 연결 2초와 읽기 5초로 최대 7초라 정상 접수 중인 행이 걸리지 않을 만큼 둔다
     val resubmitDelay: Duration = Duration.ofSeconds(30),
@@ -40,6 +43,7 @@ data class OperationProperties(
     val minPollInterval: Duration = Duration.ZERO,
 ) {
     init {
+        require(replacementWaitTimeout.isPositive) { "scheduler.operation.replacement-wait-timeout 설정은 0보다 커야 한다" }
         require(parallelism >= 1) { "scheduler.operation.parallelism 설정은 1 이상이어야 한다" }
         require(batchSize >= 0) { "scheduler.operation.batch-size 설정은 0 이상이어야 한다" }
         require(maxBurst.isPositive) { "scheduler.operation.max-burst 설정은 0보다 커야 한다" }

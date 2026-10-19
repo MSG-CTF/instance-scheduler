@@ -102,6 +102,10 @@ class Instance(
     @Column(name = "release_id")
     var releaseId: UUID? = null,
 
+    // 이 실행을 시작하기 전에 정리를 마쳐야 하는 이전 인스턴스
+    @Column(name = "replaced_instance_id", updatable = false)
+    val replacedInstanceId: UUID? = null,
+
     // Runtime에 그대로 넘길 격리 정책, 생성 요청이 반드시 값을 보낸다
     @Enumerated(EnumType.STRING)
     @Column(name = "isolation_profile", nullable = false)
@@ -142,6 +146,7 @@ class Instance(
 
     // 이 시각까지 안 끝난 operation은 폴링을 멈추고 실패로 처리한다
     // operation 없이 정리에 들어간 구간에서는 runtime에 저장된 정보를 기다리는 상한이다
+    // 교체 인스턴스의 SCHEDULING에서는 이전 실행 정리와 용량 관측을 기다리는 상한이다
     @Column(name = "poll_deadline_at")
     var pollDeadlineAt: Instant? = null,
 

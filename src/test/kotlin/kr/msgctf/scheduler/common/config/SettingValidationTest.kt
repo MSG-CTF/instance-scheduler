@@ -15,6 +15,13 @@ import kr.msgctf.scheduler.runtime.RuntimeClientProperties
 class SettingValidationTest {
 
     @Test
+    fun `rejects non positive replacement wait timeout`() {
+        for (timeout in listOf(Duration.ZERO, Duration.ofSeconds(-1))) {
+            assertFailsWith<IllegalArgumentException> { OperationProperties(replacementWaitTimeout = timeout) }
+        }
+    }
+
+    @Test
     fun `rejects blank value`() {
         assertFailsWith<IllegalArgumentException> {
             RuntimeClientProperties(baseUrl = " ", token = "token-value")

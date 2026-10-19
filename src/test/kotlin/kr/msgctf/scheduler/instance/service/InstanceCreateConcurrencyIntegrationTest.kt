@@ -17,10 +17,12 @@ import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
+import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.testContainers
+import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
@@ -46,10 +48,53 @@ class InstanceCreateConcurrencyIntegrationTest {
     @Autowired
     private lateinit var instanceEventRepository: InstanceEventRepository
 
+    @Autowired
+    private lateinit var operationService: InstanceOperationService
+
     @BeforeEach
     fun setUp() {
         instanceEventRepository.deleteAll()
         instanceRepository.deleteAll()
+    }
+
+    @Test
+    fun `concurrent resets persist one replacement and its cleanup wait`() {
+        val previous = instanceRepository.saveAndFlush(runningInstance(testUuid(701)).apply {
+            containers = testContainersJson()
+            architecture = Architecture.AMD64
+            cpuMillicores = 500
+            memoryMib = 512
+            ephemeralStorageMib = 1024
+        })
+        val executor = Executors.newFixedThreadPool(2)
+        val start = CountDownLatch(1)
+        val outcomes = try {
+            val futures = (1..2).map {
+                executor.submit<Throwable?> {
+                    start.await()
+                    runCatching { instanceSchedulerService.resetInstance(ResetInstanceCommand(previous.instanceId)) }.exceptionOrNull()
+                }
+            }
+            start.countDown()
+            futures.map { it.get(30, TimeUnit.SECONDS) }
+        } finally {
+            executor.shutdownNow()
+        }
+        assertEquals(1, outcomes.count { it == null })
+        assertEquals(SchedulerErrorCode.INVALID_STATE_TRANSITION, outcomes.filterIsInstance<SchedulerException>().single().errorCode)
+        val replacement = instanceRepository.findAll().single { it.instanceId != previous.instanceId }
+        assertEquals(previous.instanceId, replacement.replacedInstanceId)
+        operationService.progressRequested(replacement.instanceId)
+        val waiting = instanceRepository.findById(replacement.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.SCHEDULING, waiting.status)
+        assertEquals(0, waiting.attemptCount)
+        assertEquals(null, waiting.reservationId)
+        assertEquals(null, waiting.runtimeOperationId)
+        val deadline = waiting.pollDeadlineAt
+        kotlin.test.assertNotNull(deadline)
+        kotlin.test.assertTrue(deadline.isAfter(Instant.now()))
+        operationService.progressRequested(replacement.instanceId)
+        assertEquals(deadline, instanceRepository.findById(replacement.instanceId).orElseThrow().pollDeadlineAt)
     }
 
     @Test
