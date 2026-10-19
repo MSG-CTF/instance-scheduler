@@ -20,6 +20,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testEndpointsJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
@@ -88,6 +89,30 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.data.expires_at") { exists() }
                 jsonPath("$.data.hard_expires_at") { exists() }
             }
+    }
+
+    @Test
+    fun `detail and list return the stored expiry reason in snake case`() {
+        for ((index, reason) in listOf(RuntimeDeleteReason.TTL_EXPIRED, RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED).withIndex()) {
+            val id = createInstance(teamId = testUuid(801L + index))
+            val instance = instanceRepository.findById(id).orElseThrow()
+            instance.status = InstanceStatus.CLEANED
+            instance.deleteReason = reason
+            instanceRepository.saveAndFlush(instance)
+            mockMvc.get("/api/instances/$id")
+                .andExpect {
+                    status { isOk() }
+                    jsonPath("$.data.delete_reason") { value(reason.name) }
+                    jsonPath("$.data.deleteReason") { doesNotExist() }
+                }
+            mockMvc.get("/api/instances").andExpect {
+                status { isOk() }
+                jsonPath("$.data.items[?(@.instance_id == '$id')].delete_reason") {
+                    value(org.hamcrest.Matchers.hasItem(reason.name))
+                }
+                jsonPath("$.data.items[*].deleteReason") { doesNotExist() }
+            }
+        }
     }
 
     // 저장된 주소 목록이 계약대로 snake_case 배열로 나가는지 확인

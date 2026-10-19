@@ -166,6 +166,7 @@ class InstanceCleanupServiceTest {
 
         // then
         assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
     }
 
     // 워커가 못 집어간 REQUESTED도 하드타임아웃이 지나면 FAILED로 끝나는지 확인
@@ -181,6 +182,7 @@ class InstanceCleanupServiceTest {
 
         // then
         assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
     }
 
     // 이미 저장된 삭제 사유는 하드타임아웃 처리가 덮어쓰지 않는지 확인

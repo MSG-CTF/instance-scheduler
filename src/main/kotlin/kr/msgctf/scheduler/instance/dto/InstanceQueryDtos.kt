@@ -10,6 +10,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
 // 단건 조회 서비스가 돌려주는 결과 값
 // 운영자가 실행 위치와 수명을 함께 확인할 수 있도록 runtime 정보까지 담는다
@@ -36,6 +37,7 @@ data class InstanceDetailResult(
     val idleExpiresAt: Instant?,
     val hardExpiresAt: Instant,
     val lastAccessedAt: Instant?,
+    val deleteReason: RuntimeDeleteReason? = null,
 ) {
 
     companion object {
@@ -64,6 +66,7 @@ data class InstanceDetailResult(
                 idleExpiresAt = instance.idleExpiresAt,
                 hardExpiresAt = instance.hardExpiresAt,
                 lastAccessedAt = instance.lastAccessedAt,
+                deleteReason = instance.deleteReason,
             )
     }
 }
