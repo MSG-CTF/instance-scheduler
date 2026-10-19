@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Instance detail expiry metadata",
+  "type": "object",
+  "required": ["instance_id", "team_id", "challenge_id", "status"],
+  "properties": {
+    "instance_id": {"type": "string", "format": "uuid"},
+    "team_id": {"type": "string", "format": "uuid"},
+    "challenge_id": {"type": "string", "format": "uuid"},
+    "status": {"type": "string"},
+    "delete_reason": {
+      "type": ["string", "null"],
+      "enum": ["USER_REQUESTED", "TTL_EXPIRED", "IDLE_EXPIRED", "HARD_TIMEOUT_EXPIRED", "CREATE_FAILED_CLEANUP", "ADMIN_FORCED", null]
+    }
+  }
+}

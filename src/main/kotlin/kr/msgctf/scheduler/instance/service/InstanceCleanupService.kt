@@ -48,6 +48,9 @@ class InstanceCleanupService(
 
     // runtime을 아직 안 부른 REQUESTED와 SCHEDULING은 지울 게 없어 FAILED로, workload가 남았을 수 있는 나머지는 CLEANUP_PENDING으로 보낸다
     private fun routeHardTimeout(instance: Instance) {
+        if (instance.deleteReason == null) {
+            instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
+        }
         if (instance.status == InstanceStatus.REQUESTED || instance.status == InstanceStatus.SCHEDULING) {
             move(instance, InstanceStatus.FAILED)
             // broker 재시도에 쓰던 값이라 더 진행하지 않는 행에는 지운다
@@ -69,9 +72,6 @@ class InstanceCleanupService(
             instance.attemptCount = 0
         }
         instance.action = InstanceAction.CLEANUP
-        if (instance.deleteReason == null) {
-            instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
-        }
         move(instance, InstanceStatus.CLEANUP_PENDING)
     }
 

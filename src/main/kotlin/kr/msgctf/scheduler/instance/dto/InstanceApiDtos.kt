@@ -265,6 +265,7 @@ data class InstanceDetailResponse(
     val idleExpiresAt: Instant?,
     val hardExpiresAt: Instant,
     val lastAccessedAt: Instant?,
+    val deleteReason: RuntimeDeleteReason? = null,
 ) {
 
     companion object {
@@ -292,6 +293,7 @@ data class InstanceDetailResponse(
                 idleExpiresAt = result.idleExpiresAt,
                 hardExpiresAt = result.hardExpiresAt,
                 lastAccessedAt = result.lastAccessedAt,
+                deleteReason = result.deleteReason,
             )
     }
 }
