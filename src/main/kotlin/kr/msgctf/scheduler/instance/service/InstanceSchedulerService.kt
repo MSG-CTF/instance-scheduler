@@ -41,6 +41,10 @@ class InstanceSchedulerService(
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
         instancePolicyService.validateExposedPorts(command.containers)
+        instancePolicyService.validateImages(
+            command.containers,
+            context = "teamId=${command.teamId}, challengeId=${command.challengeId}",
+        )
 
         // 팀 잠금을 행 잠금보다 먼저 잡아 같은 팀의 create끼리 잠금 순서를 통일한다
         instanceRepository.lockTeam(command.teamId.toString())
@@ -233,6 +237,7 @@ class InstanceSchedulerService(
                 )
             }
         instancePolicyService.validateExposedPorts(storedContainers)
+        instancePolicyService.validateImages(storedContainers, context = "instanceId=${command.instanceId}, path=reset")
 
         val replacedInstanceId = replaceOwnInstance(previous)
 
