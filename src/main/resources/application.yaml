@@ -1,6 +1,12 @@
 spring:
   application:
     name: scheduler
+  profiles:
+    # 실연동 설정(real)은 개발 서버와 대회 운영이 함께 쓴다
+    # dev는 데모 화면과 API 문서를 더 열고, prod는 둘 다 닫은 채 기본값을 쓴다
+    group:
+      dev: real
+      prod: real
   jackson:
     property-naming-strategy: SNAKE_CASE
   task:

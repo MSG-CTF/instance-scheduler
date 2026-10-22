@@ -3,10 +3,15 @@ package kr.msgctf.scheduler.instance.service
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
+import kr.msgctf.scheduler.instance.domain.ContainerSpec
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.FOREIGN_DIGEST_IMAGE
+import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testUuid
@@ -167,6 +172,127 @@ class InstancePolicyServiceTest {
 
         // when & then (예외가 발생하지 않아야 한다)
         enabledService.validateExposedPorts(exposedPortsContainers())
+    }
+
+    // 토큰이 새도 다른 소유자의 이미지를 띄우지 못하게 기본값은 대회 문제 저장소만 받는다
+    @Test
+    fun `rejects image outside allowed prefixes`() {
+        // given
+        val containers = listOf(ContainerSpec(name = "web", image = FOREIGN_DIGEST_IMAGE, ports = listOf(8080), expose = true))
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateImages(containers, context = "test")
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+    }
+
+    // 기본 허용 범위 안의 이미지는 통과한다
+    @Test
+    fun `allows image under default prefix`() {
+        // when & then (예외가 발생하지 않아야 한다)
+        instancePolicyService.validateImages(testContainers(), context = "test")
+    }
+
+    // 개발 서버 E2E처럼 설정으로 범위를 넓히면 그 범위의 이미지도 통과한다
+    @Test
+    fun `allows image under configured prefix`() {
+        // given
+        val service = InstancePolicyService(
+            policyProperties = InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/attacker/")),
+        )
+        val containers = listOf(ContainerSpec(name = "web", image = FOREIGN_DIGEST_IMAGE, ports = listOf(8080), expose = true))
+
+        // when & then (예외가 발생하지 않아야 한다)
+        service.validateImages(containers, context = "test")
+    }
+
+    // 컨테이너마다 본다, 허용 이미지 뒤에 다른 소유자의 보조 컨테이너를 끼워도 거절한다
+    @Test
+    fun `rejects when any container image is outside allowed prefixes`() {
+        // given
+        val containers = listOf(
+            ContainerSpec(name = "web", image = TEST_DIGEST_IMAGE, ports = listOf(8080), expose = true),
+            ContainerSpec(name = "sidecar", image = FOREIGN_DIGEST_IMAGE, ports = listOf(9000)),
+        )
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateImages(containers, context = "test")
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+        assertTrue("sidecar" in assertNotNull(exception.adminDetail))
+    }
+
+    // 접두어가 여럿이면 어느 하나에만 맞아도 통과한다, dev 설정이 이 모양이다
+    @Test
+    fun `allows images matching different configured prefixes`() {
+        // given
+        val service = InstancePolicyService(
+            policyProperties = InstancePolicyProperties(
+                allowedImagePrefixes = listOf("ghcr.io/msg-ctf/challenges/", "ghcr.io/attacker/"),
+            ),
+        )
+        val containers = listOf(
+            ContainerSpec(name = "web", image = TEST_DIGEST_IMAGE, ports = listOf(8080), expose = true),
+            ContainerSpec(name = "sidecar", image = FOREIGN_DIGEST_IMAGE, ports = listOf(9000)),
+        )
+
+        // when & then (예외가 발생하지 않아야 한다)
+        service.validateImages(containers, context = "test")
+    }
+
+    // 접두어 뒤에서 ..로 올라가면 다른 저장소를 가리키므로 거절한다
+    @Test
+    fun `rejects image climbing out of allowed prefix`() {
+        // given
+        val image = "ghcr.io/msg-ctf/challenges/../../attacker/web@sha256:" +
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val containers = listOf(ContainerSpec(name = "web", image = image, ports = listOf(8080), expose = true))
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateImages(containers, context = "test")
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+    }
+
+    // 슬래시로 끝나지 않으면 ghcr.io/msg-ctf가 ghcr.io/msg-ctf-evil/까지 통과시키므로 기동에서 막는다
+    @Test
+    fun `rejects prefix without trailing slash`() {
+        assertFailsWith<IllegalArgumentException> {
+            InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/msg-ctf"))
+        }
+    }
+
+    // ghcr.io/처럼 소유자가 없는 접두어는 허용 목록을 사실상 끄므로 기동에서 막는다
+    @Test
+    fun `rejects prefix without owner`() {
+        assertFailsWith<IllegalArgumentException> {
+            InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/"))
+        }
+    }
+
+    // 이미지 이름은 소문자만 받으므로 대문자가 섞인 접두어는 모든 생성을 거절하게 된다, 기동에서 알린다
+    @Test
+    fun `rejects prefix with uppercase letters`() {
+        assertFailsWith<IllegalArgumentException> {
+            InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/MSG-CTF/challenges/"))
+        }
+    }
+
+    // 목록이 비면 모든 생성이 거절되므로 기동에서 막는다
+    @Test
+    fun `rejects empty allowed prefixes`() {
+        assertFailsWith<IllegalArgumentException> {
+            InstancePolicyProperties(allowedImagePrefixes = emptyList())
+        }
     }
 
     // inactive 상태는 active 조회 대상에 포함되지 않는지 확인
