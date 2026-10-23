@@ -42,13 +42,27 @@ data class InstancePolicyProperties(
                 "scheduler.instance-policy.allowed-image-prefixes must end with /: $prefix"
             }
             // ghcr.io/처럼 소유자가 없으면 그 저장소 전체를 받게 되어 허용 목록이 사실상 꺼진다
-            require(prefix.count { it == '/' } >= 2) {
+            val segments = prefix.removeSuffix("/").split('/')
+            require(segments.size >= 2) {
                 "scheduler.instance-policy.allowed-image-prefixes must include an owner: $prefix"
             }
             // 이미지 이름은 소문자만 받으므로 대문자가 섞이면 어떤 이미지도 맞지 않는다
             require(prefix == prefix.lowercase()) {
                 "scheduler.instance-policy.allowed-image-prefixes must be lowercase: $prefix"
             }
+            // ghcr.io//, ghcr.io/../, https://ghcr.io/ 같은 값은 위 검사를 모두 통과하지만 정상 이미지와 하나도 맞지 않는다
+            // 요청 검사가 빈 조각과 . 조각을 거절하므로 기동은 되는데 모든 생성이 400으로 막힌다
+            require(REGISTRY.matches(segments.first()) && segments.drop(1).all { PATH_COMPONENT.matches(it) }) {
+                "scheduler.instance-policy.allowed-image-prefixes must be a valid image repository path: $prefix"
+            }
         }
+    }
+
+    private companion object {
+        // 이미지 참조 문법의 레지스트리 호스트, 포트를 붙일 수 있다
+        val REGISTRY = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]+)?")
+
+        // 이미지 참조 문법의 경로 조각, 빈 조각과 ., ..은 맞지 않는다
+        val PATH_COMPONENT = Regex("[a-z0-9]+((\\.|_|__|-+)[a-z0-9]+)*")
     }
 }

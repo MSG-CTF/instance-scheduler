@@ -329,16 +329,63 @@ class InstancePolicyServiceTest {
     // ghcr.io/처럼 소유자가 없는 접두어는 허용 목록을 사실상 끄므로 기동에서 막는다
     @Test
     fun `rejects prefix without owner`() {
-        assertFailsWith<IllegalArgumentException> {
+        val exception = assertFailsWith<IllegalArgumentException> {
             InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/"))
         }
+
+        assertTrue("must include an owner" in assertNotNull(exception.message))
     }
 
     // 이미지 이름은 소문자만 받으므로 대문자가 섞인 접두어는 모든 생성을 거절하게 된다, 기동에서 알린다
     @Test
     fun `rejects prefix with uppercase letters`() {
-        assertFailsWith<IllegalArgumentException> {
+        val exception = assertFailsWith<IllegalArgumentException> {
             InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/MSG-CTF/challenges/"))
+        }
+
+        assertTrue("must be lowercase" in assertNotNull(exception.message))
+    }
+
+    // 슬래시 개수와 끝 슬래시는 맞지만 정상 이미지와 하나도 맞지 않는 접두어다
+    // 기동이 되면 health는 UP인데 모든 생성이 IMAGE_NOT_ALLOWED로 막히므로 기동에서 막는다
+    @Test
+    fun `rejects prefix with invalid path segments`() {
+        listOf(
+            "ghcr.io//",
+            "ghcr.io/msg-ctf//",
+            "ghcr.io/./",
+            "ghcr.io/../",
+            "ghcr.io/msg-ctf/../",
+            "/ghcr.io/msg-ctf/",
+            "https://ghcr.io/msg-ctf/",
+            " ghcr.io/msg-ctf/",
+            "ghcr.io/msg ctf/",
+            "ghcr.io/-msg-ctf/",
+            "ghcr.io/msg-ctf@sha256/",
+            "ghcr-.io/msg-ctf/",
+            "ghcr.io/msg-ctf-/",
+            "ghcr.io/a___b/",
+        ).forEach { prefix ->
+            val exception = assertFailsWith<IllegalArgumentException>(prefix) {
+                InstancePolicyProperties(allowedImagePrefixes = listOf(prefix))
+            }
+
+            assertTrue("must be a valid image repository path" in assertNotNull(exception.message), prefix)
+        }
+    }
+
+    // 문법 검사가 정상 접두어까지 막으면 운영 설정을 바꿀 때 기동이 실패한다
+    @Test
+    fun `accepts valid prefixes`() {
+        listOf(
+            "ghcr.io/msg-ctf/challenges/",
+            "ghcr.io/nginxinc/",
+            "localhost:5000/msg-ctf/",
+            "registry.example.com/team_a/web-app/v1.0/",
+            "docker.io/library/",
+            "my-registry.example.com/a__b/c--d/",
+        ).forEach { prefix ->
+            assertEquals(listOf(prefix), InstancePolicyProperties(allowedImagePrefixes = listOf(prefix)).allowedImagePrefixes)
         }
     }
 
