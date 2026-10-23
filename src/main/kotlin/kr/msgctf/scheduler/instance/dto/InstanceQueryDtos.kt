@@ -96,11 +96,13 @@ data class InstanceEventResult(
     val errorCode: SchedulerErrorCode?,
     val adminDetail: String?,
     val createdAt: Instant?,
+    // 직전 상태에 머문 시간, 저장하지 않고 조회할 때 앞 전환과의 시각 차이로 계산한다
+    val previousStatusDurationMs: Long? = null,
 ) {
 
     companion object {
 
-        fun from(event: InstanceEvent): InstanceEventResult =
+        fun from(event: InstanceEvent, previousStatusDurationMs: Long? = null): InstanceEventResult =
             InstanceEventResult(
                 eventId = event.eventId,
                 eventType = event.eventType,
@@ -109,6 +111,7 @@ data class InstanceEventResult(
                 errorCode = event.errorCode,
                 adminDetail = event.adminDetail,
                 createdAt = event.createdAt,
+                previousStatusDurationMs = previousStatusDurationMs,
             )
     }
 }

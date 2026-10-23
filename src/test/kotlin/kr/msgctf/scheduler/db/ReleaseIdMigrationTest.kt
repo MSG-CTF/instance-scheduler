@@ -35,10 +35,27 @@ class ReleaseIdMigrationTest {
                 statement.setString(5, settings)
                 statement.executeUpdate()
             }
+            // V21 전에 남은 이벤트도 순서 번호를 받아야 조회 정렬에서 빠지지 않는다
+            // 시각이 늦은 이벤트를 먼저 넣어서, 번호가 테이블 순서가 아니라 시각 순서로 매겨지는지 본다
+            listOf("later" to "2026-10-20T00:00:02Z", "earlier" to "2026-10-20T00:00:01Z").forEach { (detail, at) ->
+                connection.prepareStatement(
+                    """
+                    INSERT INTO challenge_instance_event (event_id, instance_id, event_type, admin_detail, created_at)
+                    VALUES (?, ?, 'STATE_CHANGED', ?, ?::timestamptz)
+                    """.trimIndent(),
+                ).use { statement ->
+                    statement.setObject(1, UUID.randomUUID())
+                    statement.setObject(2, instanceId)
+                    statement.setString(3, detail)
+                    statement.setString(4, at)
+                    statement.executeUpdate()
+                }
+            }
         }
 
         val current = flyway()
-        assertEquals(2, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq
+        assertEquals(3, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
@@ -51,6 +68,27 @@ class ReleaseIdMigrationTest {
                     assertEquals(settings, result.getString("containers"))
                     assertTrue(result.getBoolean("create_failure_confirmed"))
                     assertNull(result.getObject("release_id"))
+                }
+            }
+            // 새 이벤트는 기존 번호 다음을 받는다, identity 시작값을 옮기지 않으면 1부터 다시 매겨 기존 번호와 겹친다
+            connection.prepareStatement(
+                """
+                INSERT INTO challenge_instance_event (event_id, instance_id, event_type, admin_detail, created_at)
+                VALUES (?, ?, 'STATE_CHANGED', 'new', now())
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setObject(1, UUID.randomUUID())
+                statement.setObject(2, instanceId)
+                statement.executeUpdate()
+            }
+            connection.prepareStatement(
+                "SELECT admin_detail, event_seq FROM challenge_instance_event WHERE instance_id = ? ORDER BY event_seq",
+            ).use { statement ->
+                statement.setObject(1, instanceId)
+                statement.executeQuery().use { result ->
+                    val rows = generateSequence { if (result.next()) result.getString(1) to result.getLong(2) else null }.toList()
+                    assertEquals(listOf("earlier", "later", "new"), rows.map { it.first })
+                    assertEquals(rows.map { it.second }.distinct().size, rows.size)
                 }
             }
         }

@@ -364,6 +364,8 @@ data class InstanceEventResponse(
     val errorCode: SchedulerErrorCode?,
     val adminDetail: String?,
     val createdAt: Instant?,
+    // 상태 전환 이벤트에서 직전 상태에 머문 시간(밀리초), 앞 기록이 없거나 이어지지 않으면 null
+    val previousStatusDurationMs: Long?,
 ) {
 
     companion object {
@@ -377,6 +379,7 @@ data class InstanceEventResponse(
                 errorCode = result.errorCode,
                 adminDetail = result.adminDetail,
                 createdAt = result.createdAt,
+                previousStatusDurationMs = result.previousStatusDurationMs,
             )
     }
 }

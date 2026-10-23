@@ -6,11 +6,15 @@ import jakarta.persistence.EntityListeners
 import jakarta.persistence.EnumType
 import jakarta.persistence.Enumerated
 import jakarta.persistence.Id
+import jakarta.persistence.PostLoad
+import jakarta.persistence.PostPersist
 import jakarta.persistence.Table
+import jakarta.persistence.Transient
 import java.time.Instant
 import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import org.springframework.data.annotation.CreatedDate
+import org.springframework.data.domain.Persistable
 import org.springframework.data.jpa.domain.support.AuditingEntityListener
 
 // 인스턴스에서 발생한 상태 변경, 에러 같은 이력을 저장
@@ -50,4 +54,25 @@ class InstanceEvent(
     @CreatedDate
     @Column(name = "created_at", nullable = false, updatable = false)
     var createdAt: Instant? = null,
-)
+
+    // DB가 저장할 때 매기는 순서 번호, 시각이 같은 이벤트의 순서를 정하는 데만 쓴다
+    @Column(name = "event_seq", insertable = false, updatable = false)
+    val eventSeq: Long? = null,
+) : Persistable<UUID> {
+
+    // id를 코드에서 미리 만들어서 save()가 기존 이벤트로 보고 merge한다, merge는 저장 전에 같은 id를 SELECT한다
+    // 이벤트는 새로 쓰기만 하므로 신규 여부를 직접 알려 INSERT만 나가게 한다
+    @Transient
+    private var newEvent: Boolean = true
+
+    override fun getId(): UUID = eventId
+
+    override fun isNew(): Boolean = newEvent
+
+    // 밖에서 부르면 다음 저장이 merge로 가서 SELECT가 되살아나므로 JPA 콜백으로만 부른다
+    @PostPersist
+    @PostLoad
+    protected fun markNotNew() {
+        newEvent = false
+    }
+}

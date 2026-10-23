@@ -899,10 +899,12 @@ class InstanceCommandIntegrationTest {
             }
         assertEquals(InstanceStatus.FAILED, instanceRepository.findById(instanceId).orElseThrow().status)
         // 운영자가 나중에 이벤트 API로 FAILED가 된 이유를 볼 수 있어야 한다
-        val event = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(instanceId).single()
-        assertEquals(InstanceEventType.ERROR_RECORDED, event.eventType)
-        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, event.errorCode)
-        assertEquals(InstanceStatus.FAILED, event.toStatus)
+        val (transition, error) = instanceEventRepository.findAllByInstanceIdOrderByEventSeqAsc(instanceId)
+        assertEquals(InstanceEventType.STATE_CHANGED, transition.eventType)
+        assertEquals(InstanceStatus.CLEANUP_PENDING to InstanceStatus.FAILED, transition.fromStatus to transition.toStatus)
+        assertEquals(InstanceEventType.ERROR_RECORDED, error.eventType)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, error.errorCode)
+        assertEquals(InstanceStatus.FAILED, error.toStatus)
     }
 
     // 막 정리로 넘어온 행은 생성이 진행 중일 수 있어 받지 않는다

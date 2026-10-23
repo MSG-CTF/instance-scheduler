@@ -12,6 +12,7 @@ import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
+import kr.msgctf.scheduler.instance.service.TestInstanceEventRepository
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
 import kr.msgctf.scheduler.testUuid
 
@@ -94,7 +95,7 @@ class InstanceCleanupWorkerTest {
 
     // cleanup 호출만 기록하는 대역
     private class RecordingCleanupService(repo: TestInstanceRepository) : InstanceCleanupService(
-        InstanceStateTransitionService(), repo.repository, Clock.fixed(NOW, ZoneOffset.UTC),
+        InstanceStateTransitionService(TestInstanceEventRepository().repository), repo.repository, Clock.fixed(NOW, ZoneOffset.UTC),
     ) {
         val cleaned = mutableListOf<UUID>()
         var failOn: UUID? = null
