@@ -72,7 +72,7 @@ class InstanceOperationFailureIntegrationTest {
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, found.deleteReason)
         // 전환과 접수 실패 기록이 일어난 순서대로 남는다
         // 정리 진입과 실패 기록은 같은 처리 안에서 남아 시각이 같을 수 있어 실제 DB에서 순서를 확인한다
-        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(saved.instanceId)
+        val events = instanceEventRepository.findAllByInstanceIdOrderByEventSeqAsc(saved.instanceId)
         assertEquals(
             listOf(
                 Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),

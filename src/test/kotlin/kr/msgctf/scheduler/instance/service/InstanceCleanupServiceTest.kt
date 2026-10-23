@@ -254,10 +254,10 @@ class InstanceCleanupServiceTest {
         // then
         val event = transitionEvents.saved.single()
         assertEquals(InstanceStatus.PROVISIONING to InstanceStatus.CLEANUP_PENDING, event.fromStatus to event.toStatus)
-        assertEquals("reason=HARD_TIMEOUT_EXPIRED", event.adminDetail)
+        assertEquals("reason=HARD_TIMEOUT_EXPIRED, hardTimeout=true, hardExpiresAt=${NOW.minusSeconds(60)}", event.adminDetail)
     }
 
-    // 런타임을 부르기 전에 끝나는 FAILED는 정리 진입이 아니라 사유를 붙이지 않는다
+    // 런타임을 부르기 전에 끝나는 FAILED는 사유를 붙이지 않지만 하드타임아웃으로 끝났다는 사실은 남긴다
     @Test
     fun `records hard timeout failure before runtime without reason`() {
         // given
@@ -272,7 +272,29 @@ class InstanceCleanupServiceTest {
         // then
         val event = transitionEvents.saved.single()
         assertEquals(InstanceStatus.REQUESTED to InstanceStatus.FAILED, event.fromStatus to event.toStatus)
-        assertEquals(null, event.adminDetail)
+        assertEquals("hardTimeout=true, hardExpiresAt=${NOW.minusSeconds(60)}", event.adminDetail)
+    }
+
+    // 사용자 삭제 중에 하드타임아웃이 걸리면 사유는 사용자 삭제로 남고, 하드타임아웃이 정리로 옮겼다는 사실을 함께 남긴다
+    @Test
+    fun `records hard timeout when moving user deletion to cleanup pending`() {
+        // given
+        val repo = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repo.save(
+            hardTimedOut(status = InstanceStatus.STOPPING).apply {
+                deleteReason = RuntimeDeleteReason.USER_REQUESTED
+            },
+        )
+        val service = newService(repo, transitionEvents)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        val event = transitionEvents.saved.single()
+        assertEquals(InstanceStatus.STOPPING to InstanceStatus.CLEANUP_PENDING, event.fromStatus to event.toStatus)
+        assertEquals("reason=USER_REQUESTED, hardTimeout=true, hardExpiresAt=${NOW.minusSeconds(60)}", event.adminDetail)
     }
 
     private fun newInstance(

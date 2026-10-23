@@ -184,13 +184,21 @@ class InstanceQueryServiceTest {
         assertEquals(SchedulerErrorCode.INSTANCE_NOT_FOUND, exception.errorCode)
     }
 
-    // 이벤트는 발생 시각 순서로 나온다
+    // 이벤트는 저장한 순서로 나온다, 뒤에 남긴 이벤트의 시각이 시계 차이로 더 일러도 순서는 바뀌지 않는다
     @Test
-    fun `finds events by instance id in time order`() {
+    fun `finds events by instance id in saved order`() {
         // given
         val repository = TestInstanceRepository()
         val eventRepository = TestInstanceEventRepository()
         val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        eventRepository.repository.save(
+            InstanceEvent(
+                instanceId = instance.instanceId,
+                eventType = InstanceEventType.STATE_CHANGED,
+                fromStatus = InstanceStatus.REQUESTED,
+                toStatus = InstanceStatus.SCHEDULING,
+            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt },
+        )
         eventRepository.repository.save(
             InstanceEvent(
                 instanceId = instance.instanceId,
@@ -199,14 +207,6 @@ class InstanceQueryServiceTest {
                 errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
                 adminDetail = "requestId=req-01, status=422",
             ).apply { createdAt = this@InstanceQueryServiceTest.createdAt.plusSeconds(10) },
-        )
-        eventRepository.repository.save(
-            InstanceEvent(
-                instanceId = instance.instanceId,
-                eventType = InstanceEventType.STATE_CHANGED,
-                fromStatus = InstanceStatus.REQUESTED,
-                toStatus = InstanceStatus.SCHEDULING,
-            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt },
         )
         val service = newService(repository, eventRepository)
 
@@ -255,6 +255,24 @@ class InstanceQueryServiceTest {
         val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
         saveEvent(eventRepository, instance.instanceId, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING, 0)
         saveEvent(eventRepository, instance.instanceId, InstanceStatus.RUNNING, InstanceStatus.STOPPING, 9_000)
+        val service = newService(repository, eventRepository)
+
+        // when
+        val results = service.getEvents(instance.instanceId)
+
+        // then
+        assertEquals(listOf<Long?>(null, null), results.map { it.previousStatusDurationMs })
+    }
+
+    // 다른 서버가 남긴 뒤 전환의 시각이 시계 차이로 앞 전환보다 이르면 음수 대신 값을 비운다
+    @Test
+    fun `leaves duration empty when clocks disagree`() {
+        // given
+        val repository = TestInstanceRepository()
+        val eventRepository = TestInstanceEventRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING, 5_000)
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING, 3_000)
         val service = newService(repository, eventRepository)
 
         // when

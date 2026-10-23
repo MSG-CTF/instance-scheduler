@@ -1930,7 +1930,7 @@ class InstanceOperationServiceTest {
         // FAILED를 대신하는 유일한 운영자 신호다, 한도를 넘어설 때 한 번만 남는다
         assertEquals(
             listOf(InstanceEventType.ERROR_RECORDED),
-            events.repository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId).map { it.eventType },
+            events.repository.findAllByInstanceIdOrderByEventSeqAsc(instance.instanceId).map { it.eventType },
         )
     }
 
@@ -2486,7 +2486,7 @@ class InstanceOperationServiceTest {
         assertEquals(emptyList(), broker.releasedReservations)
         assertEquals(
             listOf(InstanceEventType.ERROR_RECORDED),
-            events.repository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId).map { it.eventType },
+            events.repository.findAllByInstanceIdOrderByEventSeqAsc(instance.instanceId).map { it.eventType },
         )
 
         // when: 알린 뒤에도 계속 기다린다
@@ -4098,7 +4098,8 @@ class InstanceOperationServiceTest {
         val repository = TestInstanceRepository()
         val transitionEvents = TestInstanceEventRepository()
         val instance = repository.save(newRequested())
-        val service = newService(repository, transitionEvents = transitionEvents)
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(repository, events = transitionEvents, transitionEvents = transitionEvents)
 
         // when
         service.progressRequested(instance.instanceId)
@@ -4174,10 +4175,10 @@ class InstanceOperationServiceTest {
         // then
         val cleaned = deletedEvents.saved.single()
         assertEquals(InstanceStatus.CLEANUP_PENDING to InstanceStatus.CLEANED, cleaned.fromStatus to cleaned.toStatus)
-        assertEquals("forced by operator", cleaned.adminDetail)
+        assertEquals("forced=operator", cleaned.adminDetail)
         val failed = missingEvents.saved.single()
         assertEquals(InstanceStatus.CLEANUP_PENDING to InstanceStatus.FAILED, failed.fromStatus to failed.toStatus)
-        assertEquals("forced by operator", failed.adminDetail)
+        assertEquals("forced=operator", failed.adminDetail)
     }
 
     // 삭제가 끝나면 STOPPING에서 STOPPED, CLEANED가 차례로 남는지 확인
@@ -4187,7 +4188,8 @@ class InstanceOperationServiceTest {
         val repository = TestInstanceRepository()
         val transitionEvents = TestInstanceEventRepository()
         val instance = repository.save(newStopping())
-        val service = newService(repository, transitionEvents = transitionEvents)
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(repository, events = transitionEvents, transitionEvents = transitionEvents)
 
         // when
         service.submitDelete(instance.instanceId)
@@ -4650,6 +4652,226 @@ class InstanceOperationServiceTest {
         newService(repository, runtimeClient = runtime).submitDelete(instance.instanceId)
         assertNull(instance.runtimeOperationId)
         assertTrue(instance.createFailureConfirmed)
+    }
+
+    // 브로커 재시도 한도에 닿으면 SCHEDULING에서 FAILED로 한 번만 옮기고 오류 기록이 그 뒤에 남는지 확인
+    @Test
+    fun `records scheduling to failed once when broker retry limit reached`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(
+            repository,
+            brokerClient = FakeBrokerClient(FakeBrokerMode.EMPTY),
+            events = events,
+            transitionEvents = events,
+        )
+
+        // when
+        repeat(3) { service.progressRequested(instance.instanceId) }
+
+        // then
+        assertEquals(
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.SCHEDULING, InstanceStatus.FAILED),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
+            ),
+            events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+        )
+        // FAILED는 사유를 붙이는 상태가 아니라서 전환 상세가 비어 있다
+        assertNull(events.saved[1].adminDetail)
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, events.saved[2].errorCode)
+        val detail = assertNotNull(events.saved[2].adminDetail)
+        assertTrue(detail.startsWith("attempts=3, reason=requestId="), detail)
+    }
+
+    // 이전 인스턴스 정리가 실패해 교체를 이어갈 수 없으면 FAILED 전환 하나와 오류 기록 하나만 남는지 확인
+    @Test
+    fun `records scheduling to failed once when replacement cannot proceed`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val previous = repository.save(newCleanupPending().apply { status = InstanceStatus.FAILED })
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val broker = FakeBrokerClient()
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(repository, brokerClient = broker, events = events, transitionEvents = events)
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertTrue(broker.reservationRequests.isEmpty())
+        // 이전 인스턴스는 상태가 그대로라 이벤트가 생기지 않는다
+        assertTrue(events.saved.all { it.instanceId == instance.instanceId })
+        assertEquals(
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.SCHEDULING, InstanceStatus.FAILED),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
+            ),
+            events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+        )
+        assertNull(events.saved[1].adminDetail)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[2].errorCode)
+        assertEquals("previous cleanup failed, previousInstanceId=${previous.instanceId}", events.saved[2].adminDetail)
+    }
+
+    // 삭제 접수가 한도에 닿으면 STOPPING에서 정리 대기를 거쳐 FAILED로 가고, 두 전환 뒤에 오류 기록이 남는지 확인
+    // STOPPING에서 FAILED로 바로 갈 수 없어 두 단계를 거치는 경로라 전환이 빠지거나 겹치기 쉽다
+    @Test
+    fun `records stopping to cleanup pending to failed when delete submit retries run out`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping().apply { cleanupRetryCount = 4 })
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(
+            repository,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+            transitionEvents = events,
+        )
+
+        // when
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
+            ),
+            events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+        )
+        // 정리 대기 진입에는 삭제 사유가 붙고, FAILED 전환에는 붙지 않는다
+        assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
+        assertNull(events.saved[1].adminDetail)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[2].errorCode)
+        assertEquals(
+            "retries=5, reason=requestId=runtime-delete-${instance.instanceId}",
+            events.saved[2].adminDetail,
+        )
+    }
+
+    // 생성 폴링 시한이 지나면 PROVISIONING에서 정리 대기로 한 번 옮기고 사유와 오류 기록이 차례로 남는지 확인
+    @Test
+    fun `records provisioning to cleanup pending once when create poll deadline passes`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(repository, events = events, transitionEvents = events)
+        service.progressRequested(instance.instanceId)
+        val operationId = assertNotNull(instance.runtimeOperationId)
+        instance.pollDeadlineAt = clock.instant()
+        // 접수까지의 이벤트는 다른 테스트가 본다, 여기서는 시한 처리로 생긴 이벤트만 본다
+        val before = events.saved.size
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        val added = events.saved.drop(before)
+        assertEquals(
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.PROVISIONING, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.CLEANUP_PENDING),
+            ),
+            added.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+        )
+        assertEquals("reason=CREATE_FAILED_CLEANUP", added[0].adminDetail)
+        assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, added[1].errorCode)
+        assertEquals("operationId=$operationId, reason=poll timeout", added[1].adminDetail)
+    }
+
+    // 삭제 폴링 시한이 지나면 STOPPING에서 정리 대기를 거쳐 FAILED로 가고 오류 기록이 마지막에 남는지 확인
+    @Test
+    fun `records stopping to cleanup pending to failed when delete poll deadline passes`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping())
+        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val service = newService(repository, events = events, transitionEvents = events)
+        service.submitDelete(instance.instanceId)
+        val operationId = assertNotNull(instance.runtimeOperationId)
+        instance.pollDeadlineAt = clock.instant()
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        // 삭제 접수는 상태를 바꾸지 않으므로 시한 처리로 생긴 이벤트만 쌓인다
+        assertEquals(
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
+            ),
+            events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+        )
+        assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
+        assertNull(events.saved[1].adminDetail)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[2].errorCode)
+        assertEquals("operationId=$operationId, reason=poll timeout", events.saved[2].adminDetail)
+    }
+
+    // 삭제 operation이 FAILED로 끝나면 STOPPING은 정리 대기를 거쳐, 정리 대기는 바로 FAILED로 가는지 확인
+    @Test
+    fun `records failed delete operation transitions from stopping and cleanup pending`() {
+        val cases = listOf(
+            newStopping() to listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
+            ),
+            newCleanupPending() to listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
+            ),
+        )
+        for ((initial, expected) in cases) {
+            // given
+            val repository = TestInstanceRepository()
+            val events = TestInstanceEventRepository()
+            val runtimeClient = FakeRuntimeClient()
+            val instance = repository.save(initial)
+            val startStatus = instance.status
+            // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+            val service = newService(repository, runtimeClient = runtimeClient, events = events, transitionEvents = events)
+            service.submitDelete(instance.instanceId)
+            val operationId = assertNotNull(instance.runtimeOperationId)
+            runtimeClient.mode = FakeRuntimeMode.OPERATION_FAIL
+
+            // when
+            service.pollOperation(instance.instanceId)
+
+            // then
+            assertEquals(InstanceStatus.FAILED, instance.status, "start=$startStatus")
+            assertEquals(
+                expected,
+                events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+                "start=$startStatus",
+            )
+            if (startStatus == InstanceStatus.STOPPING) {
+                // 정리 대기 진입에만 삭제 사유가 붙는다
+                assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
+            }
+            val transitions = events.saved.filter { it.eventType == InstanceEventType.STATE_CHANGED }
+            assertNull(transitions.last().adminDetail, "start=$startStatus")
+            val error = events.saved.last()
+            assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, error.errorCode)
+            assertEquals("operationId=$operationId, lastErrorCode=FAKE_FAILURE", error.adminDetail)
+        }
     }
 
     private fun newService(

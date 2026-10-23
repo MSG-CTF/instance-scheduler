@@ -1640,7 +1640,7 @@ class InstanceOperationService(
 
         // 만료된 예약을 보고 번호를 붙여 다시 잡는 횟수, 첫 id를 포함한다
         private const val MAX_RESERVATION_GENERATIONS = 3
-        private const val FORCED_BY_OPERATOR = "forced by operator"
+        private const val FORCED_BY_OPERATOR = "forced=operator"
         private const val DEFAULT_RUN_AS_USER = 10001L
     }
 }

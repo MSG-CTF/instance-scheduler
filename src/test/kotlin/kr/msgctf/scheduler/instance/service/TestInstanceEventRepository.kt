@@ -21,9 +21,10 @@ class TestInstanceEventRepository {
                     saved += event
                     event
                 }
-                "findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc" -> {
+                "findAllByInstanceIdOrderByEventSeqAsc" -> {
                     val instanceId = args?.first() as UUID
-                    saved.filter { it.instanceId == instanceId }.sortedBy { it.createdAt }
+                    // DB가 저장 순서 번호로 정렬하는 것처럼 저장한 순서 그대로 돌려준다
+                    saved.filter { it.instanceId == instanceId }
                 }
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }

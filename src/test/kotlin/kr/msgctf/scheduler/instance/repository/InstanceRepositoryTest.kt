@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.repository
 
+import jakarta.persistence.EntityManagerFactory
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
@@ -16,6 +17,7 @@ import kr.msgctf.scheduler.instance.domain.InstanceEvent
 import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.testUuid
+import org.hibernate.SessionFactory
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
@@ -41,6 +43,9 @@ class InstanceRepositoryTest {
 
     @Autowired
     private lateinit var jdbcTemplate: JdbcTemplate
+
+    @Autowired
+    private lateinit var entityManagerFactory: EntityManagerFactory
 
     // 상태만으로 거르는 조회 테스트가 다른 테스트가 남긴 행과 섞이지 않도록 매 테스트 전 비운다
     // event가 instance를 참조하므로 instance보다 먼저 지운다
@@ -144,7 +149,7 @@ class InstanceRepositoryTest {
 
         // when
         instanceEventRepository.saveAndFlush(event)
-        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId)
+        val events = instanceEventRepository.findAllByInstanceIdOrderByEventSeqAsc(instance.instanceId)
 
         // then
         assertEquals(1, events.size)
@@ -154,25 +159,57 @@ class InstanceRepositoryTest {
         assertNotNull(events[0].createdAt)
     }
 
-    // 이벤트 시각은 밀리초까지라 한 처리 안에서 연달아 남긴 이벤트는 시각이 같다
-    // 그때도 저장한 순서대로 돌려주는지 확인한다
+    // 이벤트는 모든 전환마다 저장되므로 저장 한 번에 INSERT 하나만 나가야 한다
+    // 신규 여부를 알리지 않으면 save()가 merge로 가서 같은 id를 먼저 SELECT한다
     @Test
-    fun `returns events with the same time in saved order`() {
+    fun `saves new event with a single insert`() {
+        // given
+        val instance = instanceRepository.saveAndFlush(newInstance(teamId = testUuid(5), challengeId = testUuid(10)))
+        val statistics = entityManagerFactory.unwrap(SessionFactory::class.java).statistics
+        statistics.clear()
+        statistics.isStatisticsEnabled = true
+
+        try {
+            // when
+            instanceEventRepository.saveAndFlush(
+                InstanceEvent(
+                    instanceId = instance.instanceId,
+                    eventType = InstanceEventType.STATE_CHANGED,
+                    fromStatus = InstanceStatus.REQUESTED,
+                    toStatus = InstanceStatus.SCHEDULING,
+                ),
+            )
+
+            // then
+            assertEquals(1, statistics.prepareStatementCount)
+            assertEquals(1, statistics.entityInsertCount)
+        } finally {
+            statistics.isStatisticsEnabled = false
+        }
+    }
+
+    // 같은 밀리초에 남긴 이벤트도, 서버 시계가 어긋나 뒤 이벤트의 시각이 더 이른 경우도 저장 순서대로 돌려준다
+    @Test
+    fun `returns events in saved order regardless of time`() {
         // given
         val instance = instanceRepository.saveAndFlush(newInstance(teamId = testUuid(4), challengeId = testUuid(10)))
-        val at = Timestamp.from(Instant.parse("2026-10-23T01:00:00.123Z"))
-        // 테이블에 들어가는 순서와 번호를 어긋나게 넣는다
-        // 시각만으로 정렬하면 테이블에 들어간 순서가 나와서 번호 정렬이 빠지면 드러난다
-        listOf("third" to 3L, "first" to 1L, "second" to 2L).forEach { (detail, seq) ->
+        val base = Instant.parse("2026-10-23T01:00:00.123Z")
+        // 번호와 시각을 반대로, 테이블에 들어가는 순서도 섞어서 넣는다
+        // 시각으로 정렬하거나 테이블 순서를 그대로 쓰면 드러난다
+        listOf(
+            Triple("third", 3L, base),
+            Triple("first", 1L, base.plusSeconds(2)),
+            Triple("second", 2L, base.plusSeconds(1)),
+        ).forEach { (detail, seq, at) ->
             jdbcTemplate.update(
                 "insert into challenge_instance_event (event_id, instance_id, event_type, admin_detail, created_at, event_seq) " +
                     "overriding system value values (?, ?, 'STATE_CHANGED', ?, ?, ?)",
-                UUID.randomUUID(), instance.instanceId, detail, at, seq,
+                UUID.randomUUID(), instance.instanceId, detail, Timestamp.from(at), seq,
             )
         }
 
         // when
-        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId)
+        val events = instanceEventRepository.findAllByInstanceIdOrderByEventSeqAsc(instance.instanceId)
 
         // then
         assertEquals(listOf("first", "second", "third"), events.map { it.adminDetail })

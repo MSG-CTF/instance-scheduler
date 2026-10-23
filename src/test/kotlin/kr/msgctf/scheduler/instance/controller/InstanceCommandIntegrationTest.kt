@@ -899,7 +899,7 @@ class InstanceCommandIntegrationTest {
             }
         assertEquals(InstanceStatus.FAILED, instanceRepository.findById(instanceId).orElseThrow().status)
         // 운영자가 나중에 이벤트 API로 FAILED가 된 이유를 볼 수 있어야 한다
-        val (transition, error) = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instanceId)
+        val (transition, error) = instanceEventRepository.findAllByInstanceIdOrderByEventSeqAsc(instanceId)
         assertEquals(InstanceEventType.STATE_CHANGED, transition.eventType)
         assertEquals(InstanceStatus.CLEANUP_PENDING to InstanceStatus.FAILED, transition.fromStatus to transition.toStatus)
         assertEquals(InstanceEventType.ERROR_RECORDED, error.eventType)

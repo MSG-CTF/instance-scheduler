@@ -56,7 +56,7 @@ class InstanceQueryService(
             )
 
         var lastTransition: InstanceEvent? = null
-        return instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instanceId).map { event ->
+        return instanceEventRepository.findAllByInstanceIdOrderByEventSeqAsc(instanceId).map { event ->
             val duration = previousStatusDuration(event, lastTransition)
             if (event.eventType == InstanceEventType.STATE_CHANGED) lastTransition = event
             InstanceEventResult.from(event, duration)
@@ -70,7 +70,8 @@ class InstanceQueryService(
         if (previous == null || previous.toStatus != event.fromStatus) return null
         val start = previous.createdAt ?: return null
         val end = event.createdAt ?: return null
-        return Duration.between(start, end).toMillis()
+        // 두 전환을 다른 서버가 남겼고 시계가 어긋나면 음수가 나온다, 지어내지 않고 비워 둔다
+        return Duration.between(start, end).toMillis().takeIf { it >= 0 }
     }
 
     // 데모 감시 화면용 최근 인스턴스 목록 조회

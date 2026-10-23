@@ -48,11 +48,14 @@ class InstanceCleanupService(
 
     // runtime을 아직 안 부른 REQUESTED와 SCHEDULING은 지울 게 없어 FAILED로, workload가 남았을 수 있는 나머지는 CLEANUP_PENDING으로 보낸다
     private fun routeHardTimeout(instance: Instance) {
+        // 하드타임아웃이 옮긴 전환이라는 표시를 상세에 남긴다
+        // 사유만으로는 알 수 없다, 사용자 삭제 중이면 사유가 USER_REQUESTED이고 FAILED에는 사유가 붙지 않는다
+        val detail = "hardTimeout=true, hardExpiresAt=${instance.hardExpiresAt}"
         if (instance.deleteReason == null) {
             instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
         }
         if (instance.status == InstanceStatus.REQUESTED || instance.status == InstanceStatus.SCHEDULING) {
-            transitionService.move(instance, InstanceStatus.FAILED)
+            transitionService.move(instance, InstanceStatus.FAILED, detail)
             // broker 재시도에 쓰던 값이라 더 진행하지 않는 행에는 지운다
             instance.nextPollAt = null
             instance.attemptCount = 0
@@ -72,7 +75,7 @@ class InstanceCleanupService(
             instance.attemptCount = 0
         }
         instance.action = InstanceAction.CLEANUP
-        transitionService.move(instance, InstanceStatus.CLEANUP_PENDING)
+        transitionService.move(instance, InstanceStatus.CLEANUP_PENDING, detail)
     }
 
     private fun isExpired(at: Instant, now: Instant): Boolean = !at.isAfter(now)
