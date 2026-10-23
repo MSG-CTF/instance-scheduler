@@ -61,6 +61,8 @@ import kr.msgctf.scheduler.runtime.RuntimeStatusResult
 import kr.msgctf.scheduler.runtime.RuntimeSubmitResult
 import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
+import kr.msgctf.scheduler.runtime.RuntimeEndpoint
+import kr.msgctf.scheduler.runtime.EndpointProtocol
 import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.extension.ExtendWith
@@ -74,6 +76,160 @@ import org.springframework.web.client.HttpServerErrorException
 
 @ExtendWith(OutputCaptureExtension::class)
 class InstanceOperationServiceTest {
+
+    @Test
+    fun `gateway transport reaches stored participant endpoints`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeRuntimeClient()
+        val runtime = object : RuntimeClient by delegate {
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot {
+                val snapshot = delegate.getOperation(operationId)
+                return snapshot.copy(result = snapshot.result!!.copy(endpoints = listOf(
+                    RuntimeEndpoint("challenge", 8080, EndpointProtocol.TCP, "tls://random.gate.msgctf.kr:443",
+                        hostname = "random.gate.msgctf.kr", connectionPort = 443, tls = true,
+                        serverName = "random.gate.msgctf.kr"),
+                )))
+            }
+        }
+        val service = newService(repository, runtimeClient = runtime)
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        val stored = ServiceEndpointCodec().decodeOrEmpty(instance.endpoints, instance.instanceId).single()
+        assertEquals("random.gate.msgctf.kr", stored.hostname)
+        assertEquals(443, stored.connectionPort)
+        assertEquals(true, stored.tls)
+        assertEquals("random.gate.msgctf.kr", stored.serverName)
+    }
+
+    @Test
+    fun `failed deletion releases reservation only with explicit cleanup proof`() {
+        for (confirmed in listOf(false, true)) {
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val instance = repository.save(newStopping().apply { reservationId = "held" })
+            val runtime = object : RuntimeClient by FakeRuntimeClient() {
+                override fun getOperation(operationId: String) = RuntimeOperationSnapshot(
+                    operationId, RuntimeOperationType.DELETE, RuntimeOperationState.FAILED, null, null,
+                    "GATEWAY_DELETE_PENDING", cleanupCompleted = confirmed)
+            }
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+            service.submitDelete(instance.instanceId)
+            service.pollOperation(instance.instanceId)
+            assertEquals(if (confirmed) InstanceStatus.CLEANED else InstanceStatus.FAILED, instance.status)
+            assertEquals(if (confirmed) null else "held", instance.reservationId)
+            assertEquals(if (confirmed) listOf("held") else emptyList(), broker.releasedReservations)
+        }
+    }
+
+    @Test
+    fun `deletion poll timeout keeps capacity reserved`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "held" })
+        val service = newService(repository, brokerClient = broker)
+        service.submitDelete(instance.instanceId)
+        instance.pollDeadlineAt = clock.instant()
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals("held", instance.reservationId)
+        assertTrue(broker.releasedReservations.isEmpty())
+    }
+
+    @Test
+    fun `deletion submit exhaustion keeps capacity reserved`() {
+        for (attempts in listOf(4, 5)) {
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val instance = repository.save(newStopping().apply { reservationId = "held"; cleanupRetryCount = attempts })
+            val service = newService(repository, brokerClient = broker, runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL))
+            service.submitDelete(instance.instanceId)
+            assertEquals(InstanceStatus.FAILED, instance.status)
+            assertEquals("held", instance.reservationId)
+            assertTrue(broker.releasedReservations.isEmpty())
+        }
+    }
+
+    @Test
+    fun `operator cleanup retry persists new generation and keeps uncertain submissions identical`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newCleanupPending().apply {
+            status = InstanceStatus.FAILED; reservationId = "held"; cleanupRetryCount = 5
+        })
+        val requests = mutableListOf<String>()
+        val runtime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                requests += request.requestId
+                if (requests.size == 1) throw IllegalStateException("response lost")
+                return RuntimeSubmitResult.Accepted("cleanup-retry-operation", null)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+        val retried = service.retryCleanup(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, retried.status)
+        assertEquals(1, instance.cleanupGeneration)
+        assertEquals(0, instance.cleanupRetryCount)
+        assertEquals("held", instance.reservationId)
+        assertEquals(clock.instant(), instance.nextPollAt)
+        service.submitDelete(instance.instanceId)
+        // A new service represents restart; the identity comes from persisted generation.
+        newService(repository, brokerClient = broker, runtimeClient = runtime).submitDelete(instance.instanceId)
+        assertEquals(listOf("runtime-delete-${instance.instanceId}-retry-1", "runtime-delete-${instance.instanceId}-retry-1"), requests)
+        assertTrue(broker.releasedReservations.isEmpty())
+    }
+
+    @Test
+    fun `operator cannot retry active or cleaned instances or unrelated failures`() {
+        for (status in listOf(InstanceStatus.RUNNING, InstanceStatus.CLEANED, InstanceStatus.FAILED)) {
+            val repository = TestInstanceRepository()
+            val instance = repository.save(newRequested().apply { this.status = status; reservationId = "held" })
+            assertFailsWith<SchedulerException> { newService(repository).retryCleanup(instance.instanceId) }
+            assertEquals(status, instance.status)
+            assertEquals(0, instance.cleanupGeneration)
+            assertEquals("held", instance.reservationId)
+        }
+    }
+
+    @Test
+    fun `delete submission target missing does not prove gateway cleanup`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "held" })
+        val runtime = object : RuntimeClient by FakeRuntimeClient() {
+            override fun submitDelete(request: RuntimeDeleteRequest) = RuntimeSubmitResult.TargetMissing
+        }
+        newService(repository, brokerClient = broker, runtimeClient = runtime).submitDelete(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals("held", instance.reservationId)
+        assertTrue(broker.releasedReservations.isEmpty())
+    }
+
+    @Test
+    fun `late delete submit result or failure cannot overwrite an operator retry generation`() {
+        for (lateFailure in listOf(false, true)) {
+            val repository = TestInstanceRepository()
+            val instance = repository.save(newCleanupPending().apply { reservationId = "held" })
+            lateinit var service: InstanceOperationService
+            val runtime = object : RuntimeClient by FakeRuntimeClient() {
+                override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                    // Another replica completed generation zero and an operator resumed cleanup
+                    // while this network call was still in flight.
+                    instance.status = InstanceStatus.FAILED
+                    service.retryCleanup(instance.instanceId)
+                    if (lateFailure) throw IllegalStateException("late response lost")
+                    return RuntimeSubmitResult.Accepted("old-generation-operation", null)
+                }
+            }
+            service = newService(repository, runtimeClient = runtime)
+            service.submitDelete(instance.instanceId)
+            assertEquals(1, instance.cleanupGeneration)
+            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+            assertEquals(0, instance.cleanupRetryCount)
+            assertNull(instance.runtimeOperationId)
+            assertEquals("held", instance.reservationId)
+        }
+    }
 
     private val clock = Clock.fixed(Instant.parse("2026-08-12T00:00:00Z"), ZoneOffset.UTC)
 
@@ -4266,9 +4422,9 @@ class InstanceOperationServiceTest {
         assertEquals(InstanceStatus.CLEANED, instance.status)
     }
 
-    // 접수 404는 지울 것이 없다는 뜻이라 CLEANED로 종결하는지 확인
+    // 접수 404만으로 Gateway 삭제 완료를 추론하지 않는다
     @Test
-    fun `cleans instance when delete target is missing`() {
+    fun `holds instance when delete target is missing`() {
         // given
         val repository = TestInstanceRepository()
         val instance = repository.save(newStopping())
@@ -4278,7 +4434,7 @@ class InstanceOperationServiceTest {
         service.submitDelete(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(InstanceStatus.FAILED, instance.status)
     }
 
     // 접수 실패가 한도 전이면 다음 시도 시각을 늦추는지 확인
@@ -4341,9 +4497,9 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.size)
     }
 
-    // 삭제 실패 사유가 not-found면 이미 지워진 것이라 CLEANED로 종결하는지 확인
+    // not-found 오류만으로 Gateway 삭제 확인을 대신할 수 없다
     @Test
-    fun `cleans instance when delete operation failed with instance not found`() {
+    fun `holds instance when delete operation failed with instance not found without cleanup proof`() {
         // given
         val repository = TestInstanceRepository()
         val runtimeClient = FakeRuntimeClient()
@@ -4357,7 +4513,7 @@ class InstanceOperationServiceTest {
         service.pollOperation(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(InstanceStatus.FAILED, instance.status)
     }
 
     // 폴링 조회 중에 하드타임아웃 정리가 끼어들면 낡은 생성 결과를 반영하지 않는지 확인

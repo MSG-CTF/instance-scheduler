@@ -184,6 +184,10 @@ class Instance(
     @Column(name = "cleanup_retry_count", nullable = false)
     var cleanupRetryCount: Int = 0,
 
+    // 운영자가 정리를 다시 시작한 세대. 응답 유실 재전송 동안에는 바꾸지 않는다.
+    @Column(name = "cleanup_generation", nullable = false)
+    var cleanupGeneration: Int = 0,
+
     // 단계 안에서 실패한 횟수, 재시도 간격 계산에 쓰고 단계가 바뀌면 0으로 되돌린다
     // broker 후보 조회, 생성 재접수, operation 폴링 단계에서 각각 센다
     @Column(name = "attempt_count", nullable = false)

@@ -368,6 +368,7 @@ class InstanceOperationService(
     fun submitDelete(instanceId: UUID) {
         var reservationToRelease: PendingRelease? = null
         var workloadUnknown = false
+        var submissionGeneration = 0
         val request = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             if (instance.status !in DELETE_SUBMIT_STATES || instance.runtimeOperationId != null) return@execute null
@@ -376,7 +377,6 @@ class InstanceOperationService(
             // FAILED는 워커가 보는 상태가 아니라서 런타임이 돌아와도 정리가 다시 시작되지 않는다
             if (instance.runtimeWorkloadId != null && instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
                 parkFailed(instance, "retries=${instance.cleanupRetryCount}")
-                reservationToRelease = takeReservation(instance)
                 return@execute null
             }
             val runtimeType = instance.runtimeType
@@ -396,8 +396,10 @@ class InstanceOperationService(
                 // 사유 저장 전에 만들어진 행 폴백
                 instance.deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
             }
+            submissionGeneration = instance.cleanupGeneration
             RuntimeDeleteRequest(
-                requestId = "runtime-delete-$instanceId",
+                requestId = "runtime-delete-$instanceId" +
+                    if (instance.cleanupGeneration == 0) "" else "-retry-${instance.cleanupGeneration}",
                 instanceId = instanceId,
                 teamId = instance.teamId,
                 target = RuntimeTarget(runtimeType = runtimeType, targetId = runtimeTargetId),
@@ -421,35 +423,55 @@ class InstanceOperationService(
                 request.requestId,
                 failureDetail(exception),
             )
-            var failedReservation: PendingRelease? = null
             tx.executeWithoutResult {
                 val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+                if (!isCurrentDeleteSubmission(instance, submissionGeneration)) return@executeWithoutResult
                 instance.cleanupRetryCount += 1
                 if (instance.cleanupRetryCount >= cleanupProperties.retryLimit) {
                     parkFailed(instance, "retries=${instance.cleanupRetryCount}, reason=${failureDetail(exception)}")
-                    failedReservation = takeReservation(instance)
                 } else {
                     // 실패 횟수에 따라 다음 접수 시도를 늦춘다
                     instance.nextPollAt = clock.instant().plus(backoffDelay(instance.cleanupRetryCount))
                 }
             }
-            releaseReservationQuietly(failedReservation)
             return
         }
 
-        var missingReservation: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
+            if (!isCurrentDeleteSubmission(instance, submissionGeneration)) return@executeWithoutResult
             when (submitted) {
                 is RuntimeSubmitResult.Accepted -> storeAcceptedOperation(instance, submitted)
                 RuntimeSubmitResult.TargetMissing -> {
-                    completeDelete(instance)
-                    missingReservation = takeReservation(instance)
+                    parkFailed(instance, "delete target missing without confirmed cleanup")
                 }
             }
         }
-        releaseReservationQuietly(missingReservation)
     }
+
+    private fun isCurrentDeleteSubmission(instance: Instance, generation: Int): Boolean =
+        instance.status in DELETE_SUBMIT_STATES && instance.runtimeOperationId == null &&
+            instance.cleanupGeneration == generation
+
+    // 실패는 정리 완료 증명이 아니다. 예약을 유지한 채 명시적으로 새 삭제 세대를 시작한다.
+    fun retryCleanup(instanceId: UUID): InstanceResult = checkNotNull(tx.execute {
+        val instance = instanceRepository.findByIdForUpdate(instanceId) ?: throw instanceNotFound(instanceId)
+        if (instance.status != InstanceStatus.FAILED || instance.deleteReason == null ||
+            instance.runtimeType == null || instance.runtimeTargetId == null) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
+                adminDetail = "instanceId=$instanceId, status=${instance.status}, reason=not a failed runtime cleanup",
+            )
+        }
+        val generation = Math.incrementExact(instance.cleanupGeneration)
+        transitionService.move(instance, InstanceStatus.CLEANUP_PENDING, "operator cleanup retry, generation=$generation")
+        instance.cleanupGeneration = generation
+        instance.cleanupRetryCount = 0
+        instance.action = InstanceAction.CLEANUP
+        clearOperation(instance)
+        instance.nextPollAt = clock.instant()
+        InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
+    })
 
     // 정리 워커가 끝내지 못하는 행을 운영자가 끝낸다
     // 워커는 런타임이 정보를 저장하지 않았다는 답만으로는 끝내지 않는다, 생성이 진행 중일 때도 같은 답이 오기 때문이다
@@ -918,15 +940,15 @@ class InstanceOperationService(
                         )
                         return@executeWithoutResult
                     }
-                    if (snapshot.lastErrorCode == NOT_FOUND_ERROR_CODE) {
+                    if (snapshot.cleanupCompleted) {
                         completeDelete(instance)
+                        reservationToRelease = takeReservation(instance)
                     } else {
                         parkFailed(
                             instance,
                             "operationId=${snapshot.operationId}, lastErrorCode=${snapshot.lastErrorCode}",
                         )
                     }
-                    reservationToRelease = takeReservation(instance)
                 }
                 else -> return@executeWithoutResult
             }
@@ -960,7 +982,7 @@ class InstanceOperationService(
                     null
                 } else {
                     parkFailed(instance, detail)
-                    takeReservation(instance)
+                    null
                 }
             else -> {
                 clearOperation(instance)
@@ -989,7 +1011,7 @@ class InstanceOperationService(
         recordError(instance, SchedulerErrorCode.RUNTIME_DELETE_FAILED, detail)
     }
 
-    // 예약은 여기서 반납하지 않는다, 정리 흐름이 끝나는 completeDelete나 parkFailed에서 반납한다
+    // 예약은 여기서 반납하지 않는다, 정리 완료가 확인된 호출자가 반납한다
     // 생성 접수가 실패했을 때 다시 시도할지 접을지 가른다
     // HttpRuntimeClient는 런타임이 4xx로 거부한 경우만 SchedulerException으로 바꾼다
     // 5xx와 전송 실패는 그대로 전파되며, 접수가 런타임에 닿았는지 알 수 없는 경우다
@@ -1559,6 +1581,10 @@ class InstanceOperationService(
                     port = endpoint.port,
                     protocol = endpoint.protocol,
                     serviceUrl = endpoint.serviceUrl,
+                    hostname = endpoint.hostname,
+                    connectionPort = endpoint.connectionPort,
+                    tls = endpoint.tls,
+                    serverName = endpoint.serverName,
                 )
             },
         )
@@ -1627,7 +1653,6 @@ class InstanceOperationService(
         )
         // 기본 설정에서는 만든 지 5분 안 된 행에 backoff-max인 30초마다 묻고, 100분이 지난 행부터 상한인 10분마다 묻는다
         private const val STATUS_CHECK_AGE_DIVISOR = 10L
-        private const val NOT_FOUND_ERROR_CODE = "INSTANCE_NOT_FOUND"
         private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
 
         // 예약이 이 이유로 거절되면 같은 주기에 다음 후보로 넘어간다
