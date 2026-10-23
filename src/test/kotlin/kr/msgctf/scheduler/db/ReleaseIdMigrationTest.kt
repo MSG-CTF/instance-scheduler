@@ -54,12 +54,12 @@ class ReleaseIdMigrationTest {
         }
 
         val current = flyway()
-        // V19 release_id, V20 replaced_instance_id, V21 event_seq
-        assertEquals(3, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V22 cleanup_generation
+        assertEquals(4, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
-                "SELECT status, containers, create_failure_confirmed, release_id FROM challenge_instance WHERE instance_id = ?",
+                "SELECT status, containers, create_failure_confirmed, release_id, cleanup_generation FROM challenge_instance WHERE instance_id = ?",
             ).use { statement ->
                 statement.setObject(1, instanceId)
                 statement.executeQuery().use { result ->
@@ -68,6 +68,7 @@ class ReleaseIdMigrationTest {
                     assertEquals(settings, result.getString("containers"))
                     assertTrue(result.getBoolean("create_failure_confirmed"))
                     assertNull(result.getObject("release_id"))
+                    assertEquals(0, result.getInt("cleanup_generation"))
                 }
             }
             // 새 이벤트는 기존 번호 다음을 받는다, identity 시작값을 옮기지 않으면 1부터 다시 매겨 기존 번호와 겹친다
