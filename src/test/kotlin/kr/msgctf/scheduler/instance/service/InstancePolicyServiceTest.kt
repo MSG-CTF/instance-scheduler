@@ -17,6 +17,8 @@ import kr.msgctf.scheduler.testContainers
 import kr.msgctf.scheduler.testUuid
 import org.junit.jupiter.api.BeforeEach
 
+private const val TEST_DIGEST = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 class InstancePolicyServiceTest {
 
     private lateinit var transitionService: InstanceStateTransitionService
@@ -250,8 +252,58 @@ class InstancePolicyServiceTest {
     @Test
     fun `rejects image climbing out of allowed prefix`() {
         // given
-        val image = "ghcr.io/msg-ctf/challenges/../../attacker/web@sha256:" +
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val image = "ghcr.io/msg-ctf/challenges/../../attacker/web@$TEST_DIGEST"
+        val containers = listOf(ContainerSpec(name = "web", image = image, ports = listOf(8080), expose = true))
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateImages(containers, context = "test")
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+    }
+
+    // .과 빈 경로 조각도 접두어가 가리키는 저장소를 바꿀 수 있어 거절한다
+    // 요청 검증은 이 둘을 막지 않으므로 여기서만 걸러진다
+    @Test
+    fun `rejects image with dot or empty path segment`() {
+        listOf(
+            "ghcr.io/msg-ctf/challenges/./web",
+            "ghcr.io/msg-ctf/challenges//web",
+        ).forEach { name ->
+            val containers = listOf(ContainerSpec(name = "web", image = "$name@$TEST_DIGEST", ports = listOf(8080), expose = true))
+
+            val exception = assertFailsWith<SchedulerException>(name) {
+                instancePolicyService.validateImages(containers, context = "test")
+            }
+
+            assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode, name)
+        }
+    }
+
+    // 허용 접두어가 중간에만 들어 있으면 다른 소유자의 저장소다, 앞에서부터 맞는지 본다
+    // ghcr.io/로 시작해서 요청 검증은 통과하는 모양이다
+    @Test
+    fun `rejects image containing allowed prefix only in the middle`() {
+        // given
+        val image = "ghcr.io/attacker/ghcr.io/msg-ctf/challenges/web@$TEST_DIGEST"
+        val containers = listOf(ContainerSpec(name = "web", image = image, ports = listOf(8080), expose = true))
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instancePolicyService.validateImages(containers, context = "test")
+        }
+
+        // then
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+    }
+
+    // 기본 접두어와 이름 앞부분만 같은 저장소는 받지 않는다, 기본값이 슬래시로 끝나는지 지킨다
+    @Test
+    fun `rejects lookalike repository under default prefix`() {
+        // given
+        val image = "ghcr.io/msg-ctf/challenges-evil/web@$TEST_DIGEST"
         val containers = listOf(ContainerSpec(name = "web", image = image, ports = listOf(8080), expose = true))
 
         // when
@@ -264,11 +316,14 @@ class InstancePolicyServiceTest {
     }
 
     // 슬래시로 끝나지 않으면 ghcr.io/msg-ctf가 ghcr.io/msg-ctf-evil/까지 통과시키므로 기동에서 막는다
+    // 다른 규칙은 모두 지키는 접두어로 확인해야 이 규칙만 빠졌을 때 실패한다
     @Test
     fun `rejects prefix without trailing slash`() {
-        assertFailsWith<IllegalArgumentException> {
-            InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/msg-ctf"))
+        val exception = assertFailsWith<IllegalArgumentException> {
+            InstancePolicyProperties(allowedImagePrefixes = listOf("ghcr.io/msg-ctf/challenges"))
         }
+
+        assertTrue("must end with /" in assertNotNull(exception.message))
     }
 
     // ghcr.io/처럼 소유자가 없는 접두어는 허용 목록을 사실상 끄므로 기동에서 막는다

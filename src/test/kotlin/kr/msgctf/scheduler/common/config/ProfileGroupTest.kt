@@ -4,8 +4,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import org.springframework.boot.WebApplicationType
 import org.springframework.boot.builder.SpringApplicationBuilder
+import org.springframework.boot.context.properties.bind.Binder
 import org.springframework.context.ConfigurableApplicationContext
 import org.springframework.core.env.Profiles
 
@@ -54,23 +56,50 @@ class ProfileGroupTest {
         }
     }
 
+    // 실연동 설정이 real로 옮겨 가면서 빠지면 dev와 prod 모두 조용히 기본값으로 돈다
+    // 정리 워커는 기본이 꺼짐이라 빠지면 끝난 인스턴스가 정리되지 않는다
+    @Test
+    fun `dev and prod both get real integration settings`() {
+        listOf("dev", "prod").forEach { profile ->
+            run(profile).use { context ->
+                val environment = context.environment
+
+                listOf(
+                    "scheduler.broker.token",
+                    "scheduler.runtime.base-url",
+                    "scheduler.runtime.token",
+                ).forEach { key -> assertTrue(environment.containsProperty(key), "$profile, $key") }
+                assertEquals("true", environment.getProperty("scheduler.cleanup.enabled"), profile)
+                assertEquals("8", environment.getProperty("scheduler.operation.parallelism"), profile)
+                assertEquals("20", environment.getProperty("spring.datasource.hikari.maximum-pool-size"), profile)
+            }
+        }
+    }
+
     // 개발 서버 E2E가 쓰는 공개 이미지는 dev에서만 허용한다
+    // 설정 클래스로 실제로 묶어 봐야 키 이름이 어긋나거나 접두어 규칙을 어긴 값을 잡는다
     @Test
     fun `only dev allows the e2e image prefix`() {
         run("dev").use { context ->
             assertEquals(
-                "ghcr.io/nginxinc/",
-                context.environment.getProperty("scheduler.instance-policy.allowed-image-prefixes[1]"),
+                listOf("ghcr.io/msg-ctf/challenges/", "ghcr.io/nginxinc/"),
+                bindPolicy(context).allowedImagePrefixes,
             )
         }
         run("prod").use { context ->
-            assertEquals(null, context.environment.getProperty("scheduler.instance-policy.allowed-image-prefixes[1]"))
+            assertEquals(listOf("ghcr.io/msg-ctf/challenges/"), bindPolicy(context).allowedImagePrefixes)
         }
     }
 
+    private fun bindPolicy(context: ConfigurableApplicationContext): InstancePolicyProperties =
+        Binder.get(context.environment)
+            .bind("scheduler.instance-policy", InstancePolicyProperties::class.java)
+            .orElseGet { InstancePolicyProperties() }
+
+    // profiles()는 이미 켜진 프로파일에 더하므로 SPRING_PROFILES_ACTIVE가 있는 환경에서 섞인다
+    // 명령줄 인자는 환경변수보다 우선해서 지정한 프로파일만 켜진다
     private fun run(profile: String): ConfigurableApplicationContext =
         SpringApplicationBuilder(Any::class.java)
-            .profiles(profile)
             .web(WebApplicationType.NONE)
-            .run()
+            .run("--spring.profiles.active=$profile")
 }
