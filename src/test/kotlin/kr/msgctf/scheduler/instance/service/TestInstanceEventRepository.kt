@@ -21,7 +21,7 @@ class TestInstanceEventRepository {
                     saved += event
                     event
                 }
-                "findAllByInstanceIdOrderByCreatedAtAsc" -> {
+                "findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc" -> {
                     val instanceId = args?.first() as UUID
                     saved.filter { it.instanceId == instanceId }.sortedBy { it.createdAt }
                 }

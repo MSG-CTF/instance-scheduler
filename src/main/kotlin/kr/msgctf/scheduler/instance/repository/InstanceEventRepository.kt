@@ -6,5 +6,5 @@ import org.springframework.data.jpa.repository.JpaRepository
 
 interface InstanceEventRepository : JpaRepository<InstanceEvent, UUID> {
 
-    fun findAllByInstanceIdOrderByCreatedAtAsc(instanceId: UUID): List<InstanceEvent>
+    fun findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instanceId: UUID): List<InstanceEvent>
 }

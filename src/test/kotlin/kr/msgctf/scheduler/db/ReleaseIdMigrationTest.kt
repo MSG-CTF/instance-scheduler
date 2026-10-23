@@ -35,10 +35,22 @@ class ReleaseIdMigrationTest {
                 statement.setString(5, settings)
                 statement.executeUpdate()
             }
+            // V21 전에 남은 이벤트도 순서 번호를 받아야 조회 정렬에서 빠지지 않는다
+            connection.prepareStatement(
+                """
+                INSERT INTO challenge_instance_event (event_id, instance_id, event_type, created_at)
+                VALUES (?, ?, 'STATE_CHANGED', now())
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setObject(1, UUID.randomUUID())
+                statement.setObject(2, instanceId)
+                statement.executeUpdate()
+            }
         }
 
         val current = flyway()
-        assertEquals(2, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq
+        assertEquals(3, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
@@ -51,6 +63,15 @@ class ReleaseIdMigrationTest {
                     assertEquals(settings, result.getString("containers"))
                     assertTrue(result.getBoolean("create_failure_confirmed"))
                     assertNull(result.getObject("release_id"))
+                }
+            }
+            connection.prepareStatement(
+                "SELECT event_seq FROM challenge_instance_event WHERE instance_id = ?",
+            ).use { statement ->
+                statement.setObject(1, instanceId)
+                statement.executeQuery().use { result ->
+                    assertTrue(result.next())
+                    assertTrue(result.getLong("event_seq") > 0)
                 }
             }
         }

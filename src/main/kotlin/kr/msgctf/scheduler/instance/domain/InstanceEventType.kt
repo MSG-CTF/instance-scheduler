@@ -7,4 +7,7 @@ enum class InstanceEventType {
     ERROR_RECORDED,
     CLEANUP_REQUESTED,
     MONITOR_SIGNAL_RECEIVED,
+
+    // 만료 시각을 늘렸다, 상태는 바뀌지 않는다
+    EXPIRY_EXTENDED,
 }

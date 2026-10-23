@@ -27,7 +27,7 @@ class InstancePolicyServiceTest {
 
     @BeforeEach
     fun setUp() {
-        transitionService = InstanceStateTransitionService()
+        transitionService = InstanceStateTransitionService(TestInstanceEventRepository().repository)
         policyProperties = InstancePolicyProperties()
         instancePolicyService = InstancePolicyService(
             policyProperties = policyProperties,

@@ -22,6 +22,7 @@ import kr.msgctf.scheduler.instance.domain.ContainerSpecRules
 import kr.msgctf.scheduler.instance.domain.Healthcheck
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.dto.CreateInstanceCommand
 import kr.msgctf.scheduler.instance.dto.DeleteInstanceCommand
@@ -146,6 +147,96 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.instanceId, result.replacedInstanceId)
         assertEquals(InstanceStatus.REQUESTED, result.status)
         assertEquals(previous.instanceId, instanceRepository.savedInstances.last().replacedInstanceId)
+    }
+
+    // 생성 이벤트가 이전 상태 없이 남고, 자기 교체면 교체한 인스턴스와 그 정리 전환이 함께 남는지 확인
+    @Test
+    fun `records creation and the replaced instance cleanup`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val service = newService(instanceRepository.repository, transitionEvents = transitionEvents)
+
+        // when
+        val result = service.createInstance(newCommand(teamId = testUuid(301)))
+
+        // then
+        val (cleanup, created) = transitionEvents.saved
+        assertEquals(previous.instanceId, cleanup.instanceId)
+        assertEquals(InstanceStatus.RUNNING to InstanceStatus.CLEANUP_PENDING, cleanup.fromStatus to cleanup.toStatus)
+        assertEquals("reason=USER_REQUESTED", cleanup.adminDetail)
+        assertEquals(result.instanceId, created.instanceId)
+        assertEquals(null to InstanceStatus.REQUESTED, created.fromStatus to created.toStatus)
+        assertEquals("path=create, replaced=${previous.instanceId}", created.adminDetail)
+    }
+
+    @Test
+    fun `records creation without replacement`() {
+        // given
+        val transitionEvents = TestInstanceEventRepository()
+        val service = newService(TestInstanceRepository().repository, transitionEvents = transitionEvents)
+
+        // when
+        service.createInstance(newCommand(teamId = testUuid(302)))
+
+        // then
+        assertEquals("path=create", transitionEvents.saved.single().adminDetail)
+    }
+
+    // 초기화로 생긴 인스턴스는 무엇을 교체했는지 남는지 확인
+    @Test
+    fun `records reset replacement creation`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val previous = instanceRepository.save(newRunningInstance())
+        val service = newService(instanceRepository.repository, transitionEvents = transitionEvents)
+
+        // when
+        val result = service.resetInstance(ResetInstanceCommand(instanceId = previous.instanceId))
+
+        // then
+        val cleanup = transitionEvents.saved.single { it.instanceId == previous.instanceId }
+        assertEquals(InstanceStatus.RUNNING to InstanceStatus.CLEANUP_PENDING, cleanup.fromStatus to cleanup.toStatus)
+        assertEquals("reason=USER_REQUESTED", cleanup.adminDetail)
+        val created = transitionEvents.saved.single { it.instanceId == result.instanceId }
+        assertEquals("path=reset, replaced=${previous.instanceId}", created.adminDetail)
+    }
+
+    @Test
+    fun `records delete request as stopping transition`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val running = instanceRepository.save(newRunningInstance())
+        val service = newService(instanceRepository.repository, transitionEvents = transitionEvents)
+
+        // when
+        service.deleteInstance(DeleteInstanceCommand(instanceId = running.instanceId))
+
+        // then
+        val event = transitionEvents.saved.single()
+        assertEquals(InstanceStatus.RUNNING to InstanceStatus.STOPPING, event.fromStatus to event.toStatus)
+        assertEquals("reason=USER_REQUESTED", event.adminDetail)
+    }
+
+    @Test
+    fun `records expiry extension`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val running = instanceRepository.save(newRunningInstance())
+        val before = running.expiresAt
+        val service = newService(instanceRepository.repository, transitionEvents = transitionEvents)
+
+        // when
+        service.extendInstance(ExtendInstanceCommand(instanceId = running.instanceId, extendMinutes = 30))
+
+        // then
+        val event = transitionEvents.saved.single()
+        assertEquals(InstanceEventType.EXPIRY_EXTENDED, event.eventType)
+        assertEquals("extendMinutes=30, expiresAt=$before->${running.expiresAt}", event.adminDetail)
     }
 
     // 이전 인스턴스가 아직 만들어지는 중이면 교체하지 않고 거절하는지 확인
@@ -990,12 +1081,13 @@ class InstanceSchedulerServiceTest {
     private fun newService(
         instanceRepository: InstanceRepository,
         policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
+        transitionEvents: TestInstanceEventRepository = TestInstanceEventRepository(),
     ): InstanceSchedulerService =
         InstanceSchedulerService(
             instancePolicyService = InstancePolicyService(
                 policyProperties = policyProperties,
             ),
-            transitionService = InstanceStateTransitionService(),
+            transitionService = InstanceStateTransitionService(transitionEvents.repository),
             instanceRepository = instanceRepository,
             containerSpecCodec = ContainerSpecCodec(),
             healthcheckCodec = HealthcheckCodec(),

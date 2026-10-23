@@ -86,6 +86,7 @@ class InstanceSchedulerService(
                 hardExpiresAt = now.plusMinutesOrReject(command.hardTimeoutMinutes),
             ),
         )
+        transitionService.recordCreated(instance, creationDetail("create", replacedInstanceId))
 
         return InstanceResult.from(
             instance = instance,
@@ -108,12 +109,16 @@ class InstanceSchedulerService(
 
         previous.action = InstanceAction.DELETE
         previous.deleteReason = RuntimeDeleteReason.USER_REQUESTED
-        move(previous, InstanceStatus.CLEANUP_PENDING)
+        transitionService.move(previous, InstanceStatus.CLEANUP_PENDING)
         // 교체 표시를 먼저 flush해야 새 행 INSERT가 유니크 인덱스에 걸리지 않는다
         instanceRepository.flush()
 
         return previous.instanceId
     }
+
+    // 어느 요청으로 생겼는지와 교체한 인스턴스를 남긴다, 생성과 초기화 모두 교체가 있을 수 있다
+    private fun creationDetail(path: String, replacedInstanceId: UUID?): String =
+        listOfNotNull("path=$path", replacedInstanceId?.let { "replaced=$it" }).joinToString(", ")
 
     // REQUESTED를 바로 flush해 중복 active 인스턴스 차단
     private fun saveRequestedInstance(instance: Instance): Instance =
@@ -157,7 +162,7 @@ class InstanceSchedulerService(
 
         instance.action = InstanceAction.DELETE
         instance.deleteReason = command.reason
-        move(instance, InstanceStatus.STOPPING)
+        transitionService.move(instance, InstanceStatus.STOPPING)
 
         return InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
     }
@@ -266,6 +271,7 @@ class InstanceSchedulerService(
                 hardExpiresAt = previous.hardExpiresAt,
             ),
         )
+        transitionService.recordCreated(instance, creationDetail("reset", replacedInstanceId))
 
         return InstanceResult.from(
             instance = instance,
@@ -301,8 +307,10 @@ class InstanceSchedulerService(
         )
 
         // 상태는 그대로 두고 만료 시각과 수행한 작업만 갱신한다
+        val before = instance.expiresAt
         instance.expiresAt = extended
         instance.action = InstanceAction.EXTEND
+        transitionService.recordExtended(instance, before, extended, command.extendMinutes)
 
         return InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
     }
@@ -362,11 +370,6 @@ class InstanceSchedulerService(
             adminDetail = "instanceId=$instanceId, extendMinutes=$minutes, hardExpiresAt=$hardExpiresAt",
             cause = cause,
         )
-
-    private fun move(instance: Instance, to: InstanceStatus) {
-        transitionService.validateTransition(instance.status, to)
-        instance.status = to
-    }
 }
 
 private const val SECONDS_PER_MINUTE = 60L

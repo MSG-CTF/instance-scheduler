@@ -206,12 +206,74 @@ class InstanceCleanupServiceTest {
         assertEquals(RuntimeDeleteReason.USER_REQUESTED, instance.deleteReason)
     }
 
-    private fun newService(repo: TestInstanceRepository): InstanceCleanupService =
+    private fun newService(
+        repo: TestInstanceRepository,
+        transitionEvents: TestInstanceEventRepository = TestInstanceEventRepository(),
+    ): InstanceCleanupService =
         InstanceCleanupService(
-            transitionService = InstanceStateTransitionService(),
+            transitionService = InstanceStateTransitionService(transitionEvents.repository),
             instanceRepository = repo.repository,
             clock = Clock.fixed(NOW, ZoneOffset.UTC),
         )
+
+    // TTL 만료는 RUNNING에서 EXPIRED, CLEANUP_PENDING으로 이어지고 정리 진입에 사유가 남는다
+    @Test
+    fun `records ttl expiry transitions with reason`() {
+        // given
+        val repo = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repo.save(newInstance(InstanceStatus.RUNNING, NOW.minusSeconds(1)))
+        val service = newService(repo, transitionEvents)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        assertEquals(
+            listOf(
+                InstanceStatus.RUNNING to InstanceStatus.EXPIRED,
+                InstanceStatus.EXPIRED to InstanceStatus.CLEANUP_PENDING,
+            ),
+            transitionEvents.saved.map { it.fromStatus to it.toStatus },
+        )
+        assertEquals(listOf(null, "reason=TTL_EXPIRED"), transitionEvents.saved.map { it.adminDetail })
+    }
+
+    // 하드타임아웃 사유는 전환보다 먼저 넣어야 정리 진입 이벤트에 남는다
+    @Test
+    fun `records hard timeout reason when routing to cleanup pending`() {
+        // given
+        val repo = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repo.save(hardTimedOut(status = InstanceStatus.PROVISIONING))
+        val service = newService(repo, transitionEvents)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        val event = transitionEvents.saved.single()
+        assertEquals(InstanceStatus.PROVISIONING to InstanceStatus.CLEANUP_PENDING, event.fromStatus to event.toStatus)
+        assertEquals("reason=HARD_TIMEOUT_EXPIRED", event.adminDetail)
+    }
+
+    // 런타임을 부르기 전에 끝나는 FAILED는 정리 진입이 아니라 사유를 붙이지 않는다
+    @Test
+    fun `records hard timeout failure before runtime without reason`() {
+        // given
+        val repo = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repo.save(hardTimedOutBeforeRuntime(InstanceStatus.REQUESTED))
+        val service = newService(repo, transitionEvents)
+
+        // when
+        service.cleanup(instance.instanceId)
+
+        // then
+        val event = transitionEvents.saved.single()
+        assertEquals(InstanceStatus.REQUESTED to InstanceStatus.FAILED, event.fromStatus to event.toStatus)
+        assertEquals(null, event.adminDetail)
+    }
 
     private fun newInstance(
         status: InstanceStatus,

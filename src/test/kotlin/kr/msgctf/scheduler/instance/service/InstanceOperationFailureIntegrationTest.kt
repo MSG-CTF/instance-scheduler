@@ -70,11 +70,18 @@ class InstanceOperationFailureIntegrationTest {
         val found = instanceRepository.findById(saved.instanceId).orElseThrow()
         assertEquals(InstanceStatus.CLEANED, found.status)
         assertEquals(RuntimeDeleteReason.CREATE_FAILED_CLEANUP, found.deleteReason)
-        // broker 통과 기록과 접수 실패 기록이 순서대로 남는다
-        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(saved.instanceId)
+        // 전환과 접수 실패 기록이 일어난 순서대로 남는다
+        // 정리 진입과 실패 기록은 같은 처리 안에서 남아 시각이 같을 수 있어 실제 DB에서 순서를 확인한다
+        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(saved.instanceId)
         assertEquals(
-            listOf(InstanceEventType.STATE_CHANGED, InstanceEventType.ERROR_RECORDED),
-            events.map { it.eventType },
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.PROVISIONING, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.CLEANED),
+            ),
+            events.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
         )
     }
 

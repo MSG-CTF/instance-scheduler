@@ -1,17 +1,119 @@
 package kr.msgctf.scheduler.instance.service
 
+import java.time.Instant
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.domain.Instance
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 
 class InstanceStateTransitionServiceTest {
 
-    private val transitionService = InstanceStateTransitionService()
+    private val events = TestInstanceEventRepository()
+    private val transitionService = InstanceStateTransitionService(events.repository)
+
+    @Test
+    fun `move changes status and records the transition`() {
+        val instance = instance(InstanceStatus.PROVISIONING)
+
+        transitionService.move(instance, InstanceStatus.RUNNING)
+
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        val event = events.saved.single()
+        assertEquals(instance.instanceId, event.instanceId)
+        assertEquals(InstanceEventType.STATE_CHANGED, event.eventType)
+        assertEquals(InstanceStatus.PROVISIONING, event.fromStatus)
+        assertEquals(InstanceStatus.RUNNING, event.toStatus)
+        assertNull(event.adminDetail)
+    }
+
+    @Test
+    fun `move rejects a disallowed transition without changing anything`() {
+        val instance = instance(InstanceStatus.CLEANED)
+
+        assertFailsWith<SchedulerException> { transitionService.move(instance, InstanceStatus.RUNNING) }
+
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertTrue(events.saved.isEmpty())
+    }
+
+    // 정리로 들어가는 기록에는 사유가 있어야 사용자 삭제와 만료, 생성 실패 정리를 가를 수 있다
+    @Test
+    fun `move into cleanup states records the delete reason`() {
+        val stopping = instance(InstanceStatus.RUNNING).apply { deleteReason = RuntimeDeleteReason.USER_REQUESTED }
+        val pending = instance(InstanceStatus.PROVISIONING).apply {
+            deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+        }
+
+        transitionService.move(stopping, InstanceStatus.STOPPING)
+        transitionService.move(pending, InstanceStatus.CLEANUP_PENDING, "operationId=op-1")
+
+        assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
+        assertEquals("reason=CREATE_FAILED_CLEANUP, operationId=op-1", events.saved[1].adminDetail)
+    }
+
+    // 사유는 정리로 들어갈 때만 붙인다, 이미 정리 중인 인스턴스의 다음 전환에 같은 사유가 반복되지 않게 한다
+    @Test
+    fun `move outside cleanup states keeps only the given detail`() {
+        val instance = instance(InstanceStatus.STOPPING).apply { deleteReason = RuntimeDeleteReason.USER_REQUESTED }
+
+        transitionService.move(instance, InstanceStatus.STOPPED)
+        transitionService.move(instance, InstanceStatus.CLEANED, "workload=w-1")
+
+        assertNull(events.saved[0].adminDetail)
+        assertEquals("workload=w-1", events.saved[1].adminDetail)
+    }
+
+    @Test
+    fun `records creation without a previous status`() {
+        val instance = instance(InstanceStatus.REQUESTED)
+
+        transitionService.recordCreated(instance, "path=create")
+
+        val event = events.saved.single()
+        assertEquals(InstanceEventType.STATE_CHANGED, event.eventType)
+        assertNull(event.fromStatus)
+        assertEquals(InstanceStatus.REQUESTED, event.toStatus)
+        assertEquals("path=create", event.adminDetail)
+    }
+
+    @Test
+    fun `records an expiry extension`() {
+        val instance = instance(InstanceStatus.RUNNING)
+        val before = Instant.parse("2026-10-23T01:00:00Z")
+        val after = Instant.parse("2026-10-23T01:30:00Z")
+
+        transitionService.recordExtended(instance, before, after, 30)
+
+        val event = events.saved.single()
+        assertEquals(InstanceEventType.EXPIRY_EXTENDED, event.eventType)
+        assertEquals(InstanceStatus.RUNNING, event.fromStatus)
+        assertEquals(InstanceStatus.RUNNING, event.toStatus)
+        assertEquals(
+            "extendMinutes=30, expiresAt=2026-10-23T01:00:00Z->2026-10-23T01:30:00Z",
+            event.adminDetail,
+        )
+    }
+
+    private fun instance(status: InstanceStatus): Instance =
+        Instance(
+            teamId = UUID.randomUUID(),
+            userId = UUID.randomUUID(),
+            challengeId = UUID.randomUUID(),
+            status = status,
+            isolationProfile = IsolationProfile.WEB,
+            expiresAt = Instant.parse("2026-10-23T02:00:00Z"),
+            hardExpiresAt = Instant.parse("2026-10-23T03:00:00Z"),
+        )
 
     // 정상 생성-만료 상태 이동 허용 확인
     @Test

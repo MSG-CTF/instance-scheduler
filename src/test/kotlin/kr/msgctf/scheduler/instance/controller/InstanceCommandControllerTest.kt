@@ -23,6 +23,7 @@ import kr.msgctf.scheduler.instance.service.HealthcheckCodec
 import kr.msgctf.scheduler.instance.service.InstancePolicyService
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
+import kr.msgctf.scheduler.instance.service.TestInstanceEventRepository
 import kr.msgctf.scheduler.instance.service.ServiceEndpointCodec
 import kr.msgctf.scheduler.instance.service.TestInstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
@@ -130,7 +131,7 @@ class InstanceCommandControllerTest {
             instancePolicyService = InstancePolicyService(
                 policyProperties = InstancePolicyProperties(),
             ),
-            transitionService = InstanceStateTransitionService(),
+            transitionService = InstanceStateTransitionService(TestInstanceEventRepository().repository),
             instanceRepository = repository.repository,
             containerSpecCodec = ContainerSpecCodec(),
             healthcheckCodec = HealthcheckCodec(),

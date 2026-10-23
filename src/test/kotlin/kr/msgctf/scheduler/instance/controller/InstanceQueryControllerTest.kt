@@ -127,7 +127,7 @@ class InstanceQueryControllerTest {
         InstanceQueryService(
             instanceRepository = repository.repository,
             instanceEventRepository = eventRepository.repository,
-            transitionService = InstanceStateTransitionService(),
+            transitionService = InstanceStateTransitionService(TestInstanceEventRepository().repository),
             serviceEndpointCodec = ServiceEndpointCodec(),
         )
 

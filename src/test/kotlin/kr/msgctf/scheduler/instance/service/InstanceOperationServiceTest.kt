@@ -705,19 +705,22 @@ class InstanceOperationServiceTest {
     }
 
     // broker 단계를 지나면 후보 심사 근거가 전이 이벤트로 남는지 확인
+    // 공통 전환 기록과 따로 남기던 기록이 합쳐져 한 번만 남아야 한다
     @Test
     fun `records candidate summary event when moving to provisioning`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
+        val transitionEvents = TestInstanceEventRepository()
         val instance = repository.save(newRequested())
-        val service = newService(repository, events = events)
+        val service = newService(repository, events = events, transitionEvents = transitionEvents)
 
         // when
         service.progressRequested(instance.instanceId)
 
         // then
-        val event = events.saved.single { it.eventType == InstanceEventType.STATE_CHANGED }
+        assertTrue(events.saved.none { it.eventType == InstanceEventType.STATE_CHANGED })
+        val event = transitionEvents.saved.single { it.toStatus == InstanceStatus.PROVISIONING }
         assertEquals(InstanceStatus.SCHEDULING, event.fromStatus)
         assertEquals(InstanceStatus.PROVISIONING, event.toStatus)
         assertEquals(true, event.adminDetail?.contains("candidates=["))
@@ -1927,7 +1930,7 @@ class InstanceOperationServiceTest {
         // FAILED를 대신하는 유일한 운영자 신호다, 한도를 넘어설 때 한 번만 남는다
         assertEquals(
             listOf(InstanceEventType.ERROR_RECORDED),
-            events.repository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId).map { it.eventType },
+            events.repository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId).map { it.eventType },
         )
     }
 
@@ -2483,7 +2486,7 @@ class InstanceOperationServiceTest {
         assertEquals(emptyList(), broker.releasedReservations)
         assertEquals(
             listOf(InstanceEventType.ERROR_RECORDED),
-            events.repository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId).map { it.eventType },
+            events.repository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId).map { it.eventType },
         )
 
         // when: 알린 뒤에도 계속 기다린다
@@ -3081,7 +3084,7 @@ class InstanceOperationServiceTest {
     // 손으로 값을 따라 만들지 않고 실제 처리를 불러야 그 처리가 바뀔 때 이 테스트도 함께 따라간다
     private fun hardTimeOutDuringSubmit(repository: TestInstanceRepository, instance: Instance) {
         instance.hardExpiresAt = clock.instant()
-        InstanceCleanupService(InstanceStateTransitionService(), repository.repository, clock)
+        InstanceCleanupService(InstanceStateTransitionService(TestInstanceEventRepository().repository), repository.repository, clock)
             .cleanup(instance.instanceId)
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
         assertEquals(RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED, instance.deleteReason)
@@ -4088,6 +4091,118 @@ class InstanceOperationServiceTest {
         assertEquals(clock.instant().plusSeconds(60), instance.nextPollAt)
     }
 
+    // 생성부터 RUNNING까지 지나는 전환이 빠짐없이 한 번씩 남는지 확인
+    @Test
+    fun `records every transition from request to running once`() {
+        // given
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(repository, transitionEvents = transitionEvents)
+
+        // when
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(
+            listOf(
+                InstanceStatus.REQUESTED to InstanceStatus.SCHEDULING,
+                InstanceStatus.SCHEDULING to InstanceStatus.PROVISIONING,
+                InstanceStatus.PROVISIONING to InstanceStatus.RUNNING,
+            ),
+            transitionEvents.saved.map { it.fromStatus to it.toStatus },
+        )
+        assertTrue(transitionEvents.saved.all { it.eventType == InstanceEventType.STATE_CHANGED })
+    }
+
+    // 생성 거부는 정리 진입에 사유가 남고, 전환과 오류 기록이 일어난 순서대로 쌓이는지 확인
+    // 서비스와 전환 서비스에 같은 대역을 넘겨 두 기록의 순서를 함께 본다
+    @Test
+    fun `records create failure cleanup with reason in order`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val service = newService(
+            repository,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+            transitionEvents = events,
+        )
+
+        // when
+        service.progressRequested(instance.instanceId)
+
+        // then
+        assertEquals(
+            listOf(
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.PROVISIONING, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.CLEANUP_PENDING),
+                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.CLEANED),
+            ),
+            events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
+        )
+        assertEquals("reason=CREATE_FAILED_CLEANUP", events.saved[2].adminDetail)
+    }
+
+    // 운영자가 끝낸 전환은 워커가 끝낸 전환과 구분되게 상세가 남는지 확인
+    @Test
+    fun `marks force cleanup transitions as done by operator`() {
+        // given
+        val repository = TestInstanceRepository()
+        val deletedEvents = TestInstanceEventRepository()
+        val missingEvents = TestInstanceEventRepository()
+        val deleted = repository.save(stuckCleanupPending())
+        val missing = repository.save(stuckCleanupPending())
+
+        // when
+        newService(
+            repository,
+            runtimeClient = statusRuntime(RuntimeStatusResult.AlreadyDeleted("cluster-main/ns/gone")),
+            transitionEvents = deletedEvents,
+        ).forceCleanup(deleted.instanceId)
+        newService(
+            repository,
+            runtimeClient = statusRuntime(RuntimeStatusResult.NotStored),
+            transitionEvents = missingEvents,
+        ).forceCleanup(missing.instanceId)
+
+        // then
+        val cleaned = deletedEvents.saved.single()
+        assertEquals(InstanceStatus.CLEANUP_PENDING to InstanceStatus.CLEANED, cleaned.fromStatus to cleaned.toStatus)
+        assertEquals("forced by operator", cleaned.adminDetail)
+        val failed = missingEvents.saved.single()
+        assertEquals(InstanceStatus.CLEANUP_PENDING to InstanceStatus.FAILED, failed.fromStatus to failed.toStatus)
+        assertEquals("forced by operator", failed.adminDetail)
+    }
+
+    // 삭제가 끝나면 STOPPING에서 STOPPED, CLEANED가 차례로 남는지 확인
+    @Test
+    fun `records stopping to cleaned when delete succeeds`() {
+        // given
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repository.save(newStopping())
+        val service = newService(repository, transitionEvents = transitionEvents)
+
+        // when
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(
+            listOf(
+                InstanceStatus.STOPPING to InstanceStatus.STOPPED,
+                InstanceStatus.STOPPED to InstanceStatus.CLEANED,
+            ),
+            transitionEvents.saved.map { it.fromStatus to it.toStatus },
+        )
+    }
+
     // 삭제를 접수하고 SUCCEEDED 폴링으로 CLEANED까지 가는지 확인
     @Test
     fun `submits delete and completes stopping instance on succeeded`() {
@@ -4547,9 +4662,10 @@ class InstanceOperationServiceTest {
         tx: TransactionOperations = TransactionOperations.withoutTransaction(),
         clock: Clock = this.clock,
         policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
+        transitionEvents: TestInstanceEventRepository = TestInstanceEventRepository(),
     ): InstanceOperationService =
         InstanceOperationService(
-            transitionService = InstanceStateTransitionService(),
+            transitionService = InstanceStateTransitionService(transitionEvents.repository),
             instanceRepository = repository.repository,
             instanceEventRepository = events.repository,
             brokerClient = brokerClient,

@@ -611,7 +611,7 @@ class InstanceOperationWorkerTest {
 
     // 단계별 호출을 기록하는 대역, 진행 단계는 gate가 있으면 다른 건들이 들어올 때까지 기다린다
     private class RecordingOperationService(repo: TestInstanceRepository) : InstanceOperationService(
-        transitionService = InstanceStateTransitionService(),
+        transitionService = InstanceStateTransitionService(TestInstanceEventRepository().repository),
         instanceRepository = repo.repository,
         instanceEventRepository = TestInstanceEventRepository().repository,
         brokerClient = FakeBrokerClient(),

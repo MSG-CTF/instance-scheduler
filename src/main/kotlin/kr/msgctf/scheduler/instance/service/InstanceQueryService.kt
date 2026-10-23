@@ -1,5 +1,6 @@
 package kr.msgctf.scheduler.instance.service
 
+import java.time.Duration
 import java.time.Instant
 import java.time.format.DateTimeParseException
 import java.time.temporal.ChronoUnit
@@ -8,6 +9,8 @@ import java.util.UUID
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.Instance
+import kr.msgctf.scheduler.instance.domain.InstanceEvent
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 import kr.msgctf.scheduler.instance.dto.InstanceDetailResult
@@ -52,8 +55,22 @@ class InstanceQueryService(
                 adminDetail = "instanceId=$instanceId",
             )
 
-        return instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(instanceId)
-            .map(InstanceEventResult::from)
+        var lastTransition: InstanceEvent? = null
+        return instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instanceId).map { event ->
+            val duration = previousStatusDuration(event, lastTransition)
+            if (event.eventType == InstanceEventType.STATE_CHANGED) lastTransition = event
+            InstanceEventResult.from(event, duration)
+        }
+    }
+
+    // 바로 앞 전환이 지금 전환의 출발 상태로 들어간 기록일 때만 계산한다
+    // 앞 기록이 없거나 상태가 이어지지 않으면 지어내지 않고 null로 둔다
+    private fun previousStatusDuration(event: InstanceEvent, previous: InstanceEvent?): Long? {
+        if (event.eventType != InstanceEventType.STATE_CHANGED || event.fromStatus == null) return null
+        if (previous == null || previous.toStatus != event.fromStatus) return null
+        val start = previous.createdAt ?: return null
+        val end = event.createdAt ?: return null
+        return Duration.between(start, end).toMillis()
     }
 
     // 데모 감시 화면용 최근 인스턴스 목록 조회

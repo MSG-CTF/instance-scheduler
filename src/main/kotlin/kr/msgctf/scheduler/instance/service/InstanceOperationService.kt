@@ -82,7 +82,7 @@ class InstanceOperationService(
         val spec = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             when (instance.status) {
-                InstanceStatus.REQUESTED -> move(instance, InstanceStatus.SCHEDULING)
+                InstanceStatus.REQUESTED -> transitionService.move(instance, InstanceStatus.SCHEDULING)
                 // 이미 SCHEDULING인 행은 재시도이거나 진행 도중 끊긴 것이라 상태 이동 없이 이어간다
                 InstanceStatus.SCHEDULING -> Unit
                 else -> return@execute null
@@ -90,7 +90,7 @@ class InstanceOperationService(
             if (!replacementReady(instance)) return@execute null
             val spec = toWorkloadSpec(instance)
             if (spec == null) {
-                move(instance, InstanceStatus.FAILED)
+                transitionService.move(instance, InstanceStatus.FAILED)
                 // 스펙 저장 전에 만들어진 행과 저장값을 못 읽는 행을 이벤트에서 구분한다
                 val detail =
                     if (instance.containers == null) "workload spec missing"
@@ -150,23 +150,17 @@ class InstanceOperationService(
             instance.runtimeTargetId = placement.runtimeTargetId
             instance.pendingReservation = null
             instance.healthcheckForwarded = forwardHealthcheck
-            move(instance, InstanceStatus.PROVISIONING)
+            transitionService.move(
+                instance,
+                InstanceStatus.PROVISIONING,
+                "$candidateSummary, reservation=${reservation.reservationId}, target=${placement.runtimeTargetId}",
+            )
             // broker 단계가 끝났으므로 재시도 횟수를 0에서 다시 센다
             instance.attemptCount = 0
             // 접수에 성공하면 storeAcceptedOperation이 폴링 시각으로 덮어쓴다
             // 접수 도중 끊겨 덮어쓰지 못한 행은 이 시각이 지난 뒤 워커가 다시 접수한다
             instance.nextPollAt = clock.instant().plus(operationProperties.resubmitDelay)
             instance.reservationId = reservation.reservationId
-            instanceEventRepository.save(
-                InstanceEvent(
-                    instanceId = instance.instanceId,
-                    eventType = InstanceEventType.STATE_CHANGED,
-                    fromStatus = InstanceStatus.SCHEDULING,
-                    toStatus = InstanceStatus.PROVISIONING,
-                    adminDetail = "$candidateSummary, reservation=${reservation.reservationId}" +
-                        ", target=${placement.runtimeTargetId}",
-                ),
-            )
             RuntimeTarget(runtimeType = placement.runtimeType, targetId = placement.runtimeTargetId)
         }
         // 행이 사라졌거나 상태가 바뀌어 저장하지 못한 예약은 고아가 되므로 바로 반납한다
@@ -230,7 +224,7 @@ class InstanceOperationService(
                 else -> null
             }
         }
-        move(instance, InstanceStatus.FAILED)
+        transitionService.move(instance, InstanceStatus.FAILED)
         instance.nextPollAt = null
         instance.pollDeadlineAt = null
         instance.pendingReservation = null
@@ -506,21 +500,22 @@ class InstanceOperationService(
                     // 이미 지워졌으면 정리를 확인한 것이라 사실대로 CLEANED로 둔다, 워커와 같은 처리다
                     is RuntimeStatusResult.AlreadyDeleted -> {
                         instance.runtimeWorkloadId = status.runtimeWorkloadId
-                        completeDelete(instance)
+                        completeDelete(instance, FORCED_BY_OPERATOR)
                     }
                     // 정리를 확인하지 못했으므로 CLEANED가 아니라 FAILED로 끝낸다
                     RuntimeStatusResult.NotStored ->
                         parkFailed(
                             instance,
                             "forced by operator, create failed in runtime and runtime has not stored the instance",
+                            FORCED_BY_OPERATOR,
                         )
                 }
                 reservationToRelease = takeReservation(instance)
                 InstanceResult.from(instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId))
             },
         )
-        // CLEANED로 끝난 행은 이벤트가 남지 않아 워커가 끝낸 행과 구분되지 않는다, 운영자가 끝냈다는 것은 로그로 남긴다
-        // FAILED로 끝난 행은 정리를 확인하지 못한 채 끝낸 것이라 경고로 남긴다
+        // 운영자가 끝냈다는 것은 전환 이벤트 상세에도 남는다, 로그는 서버에서 바로 보기 위해 남긴다
+        // FAILED로 끝난 인스턴스는 정리를 확인하지 못한 채 끝낸 것이라 경고로 남긴다
         if (result.status == InstanceStatus.FAILED) {
             log.warn(
                 "instance force cleaned by operator without confirming cleanup, runtime had no record: " +
@@ -839,7 +834,7 @@ class InstanceOperationService(
                     // 백엔드는 service_url이 채워지는 것으로 생성 완료를 판정해서 비워두면 완료를 못 알아챈다
                     instance.serviceUrl = result.serviceUrl ?: result.endpoints?.firstOrNull()?.serviceUrl
                     applyEndpoints(instance, result.endpoints)
-                    move(instance, InstanceStatus.RUNNING)
+                    transitionService.move(instance, InstanceStatus.RUNNING)
                     instance.action = null
                     clearOperation(instance)
                     // 확정한 예약은 만료되지 않는다, 정리가 끝날 때 반납해야 하므로 id를 비우지 않는다
@@ -974,20 +969,22 @@ class InstanceOperationService(
         }
     }
 
-    private fun completeDelete(instance: Instance) {
+    // transitionDetail은 CLEANED 전환 이벤트에 남길 상세다, 누가 끝냈는지 구분할 때 쓴다
+    private fun completeDelete(instance: Instance, transitionDetail: String? = null) {
         if (instance.status == InstanceStatus.STOPPING) {
-            move(instance, InstanceStatus.STOPPED)
+            transitionService.move(instance, InstanceStatus.STOPPED)
         }
-        move(instance, InstanceStatus.CLEANED)
+        transitionService.move(instance, InstanceStatus.CLEANED, transitionDetail)
         instance.action = null
         clearOperation(instance)
     }
 
-    private fun parkFailed(instance: Instance, detail: String?) {
+    // detail은 오류 이벤트에, transitionDetail은 FAILED 전환 이벤트에 남긴다
+    private fun parkFailed(instance: Instance, detail: String?, transitionDetail: String? = null) {
         if (instance.status == InstanceStatus.STOPPING) {
-            move(instance, InstanceStatus.CLEANUP_PENDING)
+            transitionService.move(instance, InstanceStatus.CLEANUP_PENDING)
         }
-        move(instance, InstanceStatus.FAILED)
+        transitionService.move(instance, InstanceStatus.FAILED, transitionDetail)
         clearOperation(instance)
         recordError(instance, SchedulerErrorCode.RUNTIME_DELETE_FAILED, detail)
     }
@@ -1104,7 +1101,7 @@ class InstanceOperationService(
     private fun parkForCreateCleanup(instance: Instance, keepOperation: Boolean = false) {
         instance.action = InstanceAction.CLEANUP
         instance.deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
-        move(instance, InstanceStatus.CLEANUP_PENDING)
+        transitionService.move(instance, InstanceStatus.CLEANUP_PENDING)
         if (!keepOperation || instance.runtimeOperationId == null) {
             clearOperation(instance)
             return
@@ -1475,7 +1472,7 @@ class InstanceOperationService(
             }
             instance.attemptCount += 1
             if (instance.attemptCount >= operationProperties.brokerRetryLimit) {
-                move(instance, InstanceStatus.FAILED)
+                transitionService.move(instance, InstanceStatus.FAILED)
                 instance.nextPollAt = null
                 instance.pollDeadlineAt = null
                 // FAILED로 끝난 행은 더 확인하지 않는다, 예약이 만들어졌다면 브로커에서 시간이 지나 만료된다
@@ -1539,11 +1536,6 @@ class InstanceOperationService(
                 adminDetail = detail,
             ),
         )
-    }
-
-    private fun move(instance: Instance, to: InstanceStatus) {
-        transitionService.validateTransition(instance.status, to)
-        instance.status = to
     }
 
     // Runtime이 endpoints를 안 보내면 비워둔다
@@ -1648,6 +1640,7 @@ class InstanceOperationService(
 
         // 만료된 예약을 보고 번호를 붙여 다시 잡는 횟수, 첫 id를 포함한다
         private const val MAX_RESERVATION_GENERATIONS = 3
+        private const val FORCED_BY_OPERATOR = "forced by operator"
         private const val DEFAULT_RUN_AS_USER = 10001L
     }
 }

@@ -224,6 +224,100 @@ class InstanceQueryServiceTest {
         assertEquals(createdAt.plusSeconds(10), results[1].createdAt)
     }
 
+    // 상태 전환 이벤트마다 직전 상태에 머문 시간을 앞 전환과의 시각 차이로 계산한다
+    // 사이에 오류 이벤트가 끼어도 앞 전환을 찾고, 생성과 오류 이벤트는 값이 없다
+    @Test
+    fun `computes how long each status lasted`() {
+        // given
+        val repository = TestInstanceRepository()
+        val eventRepository = TestInstanceEventRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        saveEvent(eventRepository, instance.instanceId, null, InstanceStatus.REQUESTED, 0)
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING, 2_000)
+        saveError(eventRepository, instance.instanceId, 3_000)
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING, 5_000)
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.PROVISIONING, InstanceStatus.RUNNING, 20_000)
+        val service = newService(repository, eventRepository)
+
+        // when
+        val results = service.getEvents(instance.instanceId)
+
+        // then
+        assertEquals(listOf(null, 2_000L, null, 3_000L, 15_000L), results.map { it.previousStatusDurationMs })
+    }
+
+    // 이 기능 전에 만든 인스턴스처럼 앞 기록이 없거나 상태가 이어지지 않으면 값을 지어내지 않는다
+    @Test
+    fun `leaves duration empty when the previous transition does not connect`() {
+        // given
+        val repository = TestInstanceRepository()
+        val eventRepository = TestInstanceEventRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.SCHEDULING, InstanceStatus.PROVISIONING, 0)
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.RUNNING, InstanceStatus.STOPPING, 9_000)
+        val service = newService(repository, eventRepository)
+
+        // when
+        val results = service.getEvents(instance.instanceId)
+
+        // then
+        assertEquals(listOf<Long?>(null, null), results.map { it.previousStatusDurationMs })
+    }
+
+    // 연장은 상태가 바뀌지 않는 기록이라 값이 없고, 뒤 전환의 계산에도 끼지 않는다
+    @Test
+    fun `skips expiry extension when computing durations`() {
+        // given
+        val repository = TestInstanceRepository()
+        val eventRepository = TestInstanceEventRepository()
+        val instance = repository.save(newRunningInstance(teamId = testUuid(1)))
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.PROVISIONING, InstanceStatus.RUNNING, 0)
+        eventRepository.repository.save(
+            InstanceEvent(
+                instanceId = instance.instanceId,
+                eventType = InstanceEventType.EXPIRY_EXTENDED,
+                fromStatus = InstanceStatus.RUNNING,
+                toStatus = InstanceStatus.RUNNING,
+            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt.plusMillis(1_000) },
+        )
+        saveEvent(eventRepository, instance.instanceId, InstanceStatus.RUNNING, InstanceStatus.STOPPING, 4_000)
+        val service = newService(repository, eventRepository)
+
+        // when
+        val results = service.getEvents(instance.instanceId)
+
+        // then
+        assertEquals(listOf(null, null, 4_000L), results.map { it.previousStatusDurationMs })
+    }
+
+    private fun saveEvent(
+        eventRepository: TestInstanceEventRepository,
+        instanceId: UUID,
+        from: InstanceStatus?,
+        to: InstanceStatus,
+        afterMillis: Long,
+    ) {
+        eventRepository.repository.save(
+            InstanceEvent(
+                instanceId = instanceId,
+                eventType = InstanceEventType.STATE_CHANGED,
+                fromStatus = from,
+                toStatus = to,
+            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt.plusMillis(afterMillis) },
+        )
+    }
+
+    private fun saveError(eventRepository: TestInstanceEventRepository, instanceId: UUID, afterMillis: Long) {
+        eventRepository.repository.save(
+            InstanceEvent(
+                instanceId = instanceId,
+                eventType = InstanceEventType.ERROR_RECORDED,
+                toStatus = InstanceStatus.SCHEDULING,
+                errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
+            ).apply { createdAt = this@InstanceQueryServiceTest.createdAt.plusMillis(afterMillis) },
+        )
+    }
+
     // 인스턴스는 있는데 이벤트가 없으면 빈 목록으로 나온다
     @Test
     fun `returns empty events for instance without events`() {
@@ -450,7 +544,7 @@ class InstanceQueryServiceTest {
         InstanceQueryService(
             instanceRepository = repository.repository,
             instanceEventRepository = eventRepository.repository,
-            transitionService = InstanceStateTransitionService(),
+            transitionService = InstanceStateTransitionService(TestInstanceEventRepository().repository),
             serviceEndpointCodec = ServiceEndpointCodec(),
         )
 

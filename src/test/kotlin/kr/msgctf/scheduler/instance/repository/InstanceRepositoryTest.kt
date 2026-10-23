@@ -144,7 +144,7 @@ class InstanceRepositoryTest {
 
         // when
         instanceEventRepository.saveAndFlush(event)
-        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId)
+        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId)
 
         // then
         assertEquals(1, events.size)
@@ -152,6 +152,30 @@ class InstanceRepositoryTest {
         assertEquals(SchedulerErrorCode.RUNTIME_CREATE_FAILED, events[0].errorCode)
         assertEquals("runtime create returned timeout", events[0].adminDetail)
         assertNotNull(events[0].createdAt)
+    }
+
+    // 이벤트 시각은 밀리초까지라 한 처리 안에서 연달아 남긴 이벤트는 시각이 같다
+    // 그때도 저장한 순서대로 돌려주는지 확인한다
+    @Test
+    fun `returns events with the same time in saved order`() {
+        // given
+        val instance = instanceRepository.saveAndFlush(newInstance(teamId = testUuid(4), challengeId = testUuid(10)))
+        val at = Timestamp.from(Instant.parse("2026-10-23T01:00:00.123Z"))
+        // 테이블에 들어가는 순서와 번호를 어긋나게 넣는다
+        // 시각만으로 정렬하면 테이블에 들어간 순서가 나와서 번호 정렬이 빠지면 드러난다
+        listOf("third" to 3L, "first" to 1L, "second" to 2L).forEach { (detail, seq) ->
+            jdbcTemplate.update(
+                "insert into challenge_instance_event (event_id, instance_id, event_type, admin_detail, created_at, event_seq) " +
+                    "overriding system value values (?, ?, 'STATE_CHANGED', ?, ?, ?)",
+                UUID.randomUUID(), instance.instanceId, detail, at, seq,
+            )
+        }
+
+        // when
+        val events = instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId)
+
+        // then
+        assertEquals(listOf("first", "second", "third"), events.map { it.adminDetail })
     }
 
     // 저장한 JSON이 그대로 읽히고 없는 값은 null로 남는지 확인

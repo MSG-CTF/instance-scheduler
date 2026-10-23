@@ -50,4 +50,8 @@ class InstanceEvent(
     @CreatedDate
     @Column(name = "created_at", nullable = false, updatable = false)
     var createdAt: Instant? = null,
+
+    // DB가 저장할 때 매기는 순서 번호, 시각이 같은 이벤트의 순서를 정하는 데만 쓴다
+    @Column(name = "event_seq", insertable = false, updatable = false)
+    val eventSeq: Long? = null,
 )

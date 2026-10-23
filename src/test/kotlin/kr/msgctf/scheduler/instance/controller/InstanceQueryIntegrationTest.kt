@@ -23,6 +23,7 @@ import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testEndpointsJson
 import kr.msgctf.scheduler.testUuid
+import org.hamcrest.Matchers.hasKey
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -418,6 +419,9 @@ class InstanceQueryIntegrationTest {
                 jsonPath("$.data[1].to_status") { value("FAILED") }
                 jsonPath("$.data[1].error_code") { value("BROKER_CALL_FAILED") }
                 jsonPath("$.data[1].admin_detail") { value("requestId=req-01, status=422") }
+                // 값이 null이어도 키는 있어야 한다, doesNotExist는 null인 키를 통과시켜서 키를 직접 본다
+                jsonPath("$.data[0]") { value(hasKey("previous_status_duration_ms")) }
+                jsonPath("$.data[1]") { value(hasKey("previous_status_duration_ms")) }
             }
     }
 

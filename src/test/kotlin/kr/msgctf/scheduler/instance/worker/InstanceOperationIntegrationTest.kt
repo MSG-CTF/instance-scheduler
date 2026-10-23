@@ -253,7 +253,7 @@ class InstanceOperationIntegrationTest {
         }
         val found = saved.map { instanceRepository.findById(it.instanceId).orElseThrow() }
         val failedWithReason = found.filter { it.status == InstanceStatus.FAILED }.count { instance ->
-            instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAsc(instance.instanceId).any {
+            instanceEventRepository.findAllByInstanceIdOrderByCreatedAtAscEventSeqAsc(instance.instanceId).any {
                 it.errorCode == SchedulerErrorCode.RESOURCE_UNAVAILABLE || it.errorCode == SchedulerErrorCode.BROKER_CALL_FAILED
             }
         }

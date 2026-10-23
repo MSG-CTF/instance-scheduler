@@ -1,13 +1,45 @@
 package kr.msgctf.scheduler.instance.service
 
+import java.time.Instant
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
+import kr.msgctf.scheduler.instance.domain.Instance
+import kr.msgctf.scheduler.instance.domain.InstanceEvent
+import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
+import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import org.springframework.stereotype.Service
 
-// 인스턴스 상태 변경이 가능한지 검사한다
+// 인스턴스 상태 변경이 가능한지 검사하고, 바꾼 사실을 이벤트로 남긴다
+// 상태 변경과 이벤트 저장을 한곳에 둬서 기록이 빠진 전환이 생기지 않게 한다
 @Service
-class InstanceStateTransitionService {
+class InstanceStateTransitionService(
+    private val eventRepository: InstanceEventRepository,
+) {
+
+    // 호출자의 트랜잭션 안에서 부른다, 상태 변경과 이벤트가 함께 저장되거나 함께 취소된다
+    fun move(instance: Instance, to: InstanceStatus, detail: String? = null) {
+        val from = instance.status
+        validateTransition(from, to)
+        instance.status = to
+        save(instance, InstanceEventType.STATE_CHANGED, from, to, transitionDetail(instance, to, detail))
+    }
+
+    // 생성 이벤트는 이전 상태가 없다, 인스턴스를 저장한 뒤에 불러야 이벤트가 가리킬 인스턴스가 있다
+    fun recordCreated(instance: Instance, detail: String) {
+        save(instance, InstanceEventType.STATE_CHANGED, null, instance.status, detail)
+    }
+
+    // 연장은 상태가 바뀌지 않아 전환 기록에 남지 않으므로 따로 남긴다
+    fun recordExtended(instance: Instance, before: Instant, after: Instant, minutes: Long) {
+        save(
+            instance,
+            InstanceEventType.EXPIRY_EXTENDED,
+            instance.status,
+            instance.status,
+            "extendMinutes=$minutes, expiresAt=$before->$after",
+        )
+    }
 
     fun canTransition(from: InstanceStatus, to: InstanceStatus): Boolean =
         allowedTransitions[from]?.contains(to) == true
@@ -25,7 +57,34 @@ class InstanceStateTransitionService {
 
     fun activeStatuses(): Set<InstanceStatus> = activeStatuses
 
+    // STOPPING, CLEANUP_PENDING으로 들어갈 때마다 사유를 붙인다, 사용자 삭제, 만료, 생성 실패 정리를 가를 수 있다
+    // 그 밖의 전환에는 붙이지 않는다, 같은 사유가 기록마다 반복된다
+    private fun transitionDetail(instance: Instance, to: InstanceStatus, detail: String?): String? {
+        val reason = instance.deleteReason?.takeIf { to in REASON_STATES }?.let { "reason=$it" }
+        return listOfNotNull(reason, detail).joinToString(", ").ifEmpty { null }
+    }
+
+    private fun save(
+        instance: Instance,
+        type: InstanceEventType,
+        from: InstanceStatus?,
+        to: InstanceStatus,
+        detail: String?,
+    ) {
+        eventRepository.save(
+            InstanceEvent(
+                instanceId = instance.instanceId,
+                eventType = type,
+                fromStatus = from,
+                toStatus = to,
+                adminDetail = detail,
+            ),
+        )
+    }
+
     companion object {
+        private val REASON_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
+
         // 표에 적어둔 상태 이동만 허용
         private val allowedTransitions = mapOf(
             InstanceStatus.REQUESTED to setOf(

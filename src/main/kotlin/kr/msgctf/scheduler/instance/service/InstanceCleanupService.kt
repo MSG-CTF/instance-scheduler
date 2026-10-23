@@ -29,7 +29,7 @@ class InstanceCleanupService(
         val now = clock.instant()
 
         if (instance.status == InstanceStatus.RUNNING && isExpired(instance.expiresAt, now)) {
-            move(instance, InstanceStatus.EXPIRED)
+            transitionService.move(instance, InstanceStatus.EXPIRED)
         }
 
         // 전이 상태로 멈춘 채 하드타임아웃이 지난 인스턴스도 정리한다
@@ -42,7 +42,7 @@ class InstanceCleanupService(
             if (instance.deleteReason == null) {
                 instance.deleteReason = RuntimeDeleteReason.TTL_EXPIRED
             }
-            move(instance, InstanceStatus.CLEANUP_PENDING)
+            transitionService.move(instance, InstanceStatus.CLEANUP_PENDING)
         }
     }
 
@@ -52,7 +52,7 @@ class InstanceCleanupService(
             instance.deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
         }
         if (instance.status == InstanceStatus.REQUESTED || instance.status == InstanceStatus.SCHEDULING) {
-            move(instance, InstanceStatus.FAILED)
+            transitionService.move(instance, InstanceStatus.FAILED)
             // broker 재시도에 쓰던 값이라 더 진행하지 않는 행에는 지운다
             instance.nextPollAt = null
             instance.attemptCount = 0
@@ -72,15 +72,10 @@ class InstanceCleanupService(
             instance.attemptCount = 0
         }
         instance.action = InstanceAction.CLEANUP
-        move(instance, InstanceStatus.CLEANUP_PENDING)
+        transitionService.move(instance, InstanceStatus.CLEANUP_PENDING)
     }
 
     private fun isExpired(at: Instant, now: Instant): Boolean = !at.isAfter(now)
-
-    private fun move(instance: Instance, to: InstanceStatus) {
-        transitionService.validateTransition(instance.status, to)
-        instance.status = to
-    }
 
     companion object {
         // 하드타임아웃으로 정리하는 전이 상태 (RUNNING은 TTL 경로가 맡아 제외)
