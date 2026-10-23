@@ -380,12 +380,31 @@ class InstancePolicyServiceTest {
         listOf(
             "ghcr.io/msg-ctf/challenges/",
             "ghcr.io/nginxinc/",
+            "ghcr.io/team_a/web-app/v1.0/",
+            "ghcr.io/a__b/c--d/",
+        ).forEach { prefix ->
+            assertEquals(listOf(prefix), InstancePolicyProperties(allowedImagePrefixes = listOf(prefix)).allowedImagePrefixes)
+        }
+    }
+
+    // 문법이 맞아도 생성 API가 받지 않는 레지스트리는 기동에서 거절한다
+    @Test
+    fun `rejects prefixes outside the supported ghcr registry`() {
+        listOf(
             "localhost:5000/msg-ctf/",
             "registry.example.com/team_a/web-app/v1.0/",
             "docker.io/library/",
             "my-registry.example.com/a__b/c--d/",
+            "ghcr.io:443/msg-ctf/",
+            "ghcr.io.evil.example/msg-ctf/",
         ).forEach { prefix ->
-            assertEquals(listOf(prefix), InstancePolicyProperties(allowedImagePrefixes = listOf(prefix)).allowedImagePrefixes)
+            listOf(listOf(prefix), listOf("ghcr.io/msg-ctf/challenges/", prefix)).forEach { prefixes ->
+                val exception = assertFailsWith<IllegalArgumentException>(prefix) {
+                    InstancePolicyProperties(allowedImagePrefixes = prefixes)
+                }
+
+                assertTrue("must use ghcr.io" in assertNotNull(exception.message), prefix)
+            }
         }
     }
 

@@ -55,11 +55,15 @@ data class InstancePolicyProperties(
             require(REGISTRY.matches(segments.first()) && segments.drop(1).all { PATH_COMPONENT.matches(it) }) {
                 "scheduler.instance-policy.allowed-image-prefixes must be a valid image repository path: $prefix"
             }
+            // 생성 요청도 ghcr.io만 받으므로 설정이 다른 레지스트리를 허용하면 모든 생성이 막힌다
+            require(segments.first() == "ghcr.io") {
+                "scheduler.instance-policy.allowed-image-prefixes must use ghcr.io: $prefix"
+            }
         }
     }
 
     private companion object {
-        // 이미지 참조 문법의 레지스트리 호스트, 포트를 붙일 수 있다
+        // GHCR 전용 조건을 적용하기 전에 레지스트리 호스트의 문법 오류를 구분한다
         val REGISTRY = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]+)?")
 
         // 이미지 참조 문법의 경로 조각, 빈 조각과 ., ..은 맞지 않는다
