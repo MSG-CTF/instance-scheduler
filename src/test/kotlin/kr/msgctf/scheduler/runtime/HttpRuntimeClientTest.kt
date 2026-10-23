@@ -28,6 +28,32 @@ import org.springframework.web.client.RestClient
 class HttpRuntimeClientTest {
 
     @Test
+    fun `preserves gateway TCP TLS and SNI transport metadata`() {
+        server.expect(requestTo("http://runtime.test/internal/v1/operations/op-gateway"))
+            .andRespond(withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON).body(
+                """{"operation_id":"op-gateway","type":"CREATE","status":"SUCCEEDED","result":{"runtime_workload_id":"node/ns","service_url":"tls://random.gate.msgctf.kr:443","endpoints":[{"container_name":"shell","port":31337,"protocol":"TCP","service_url":"tls://random.gate.msgctf.kr:443","hostname":"random.gate.msgctf.kr","connection_port":443,"tls":true,"server_name":"random.gate.msgctf.kr"}]}}""",
+            ))
+
+        val endpoint = client.getOperation("op-gateway").result!!.endpoints!!.single()
+        assertEquals(31337, endpoint.port)
+        assertEquals(EndpointProtocol.TCP, endpoint.protocol)
+        assertEquals("random.gate.msgctf.kr", endpoint.hostname)
+        assertEquals(443, endpoint.connectionPort)
+        assertEquals(true, endpoint.tls)
+        assertEquals("random.gate.msgctf.kr", endpoint.serverName)
+    }
+
+    @Test
+    fun `unknown delete 404 does not prove missing workload`() {
+        server.expect(requestTo("http://runtime.test/internal/v1/instances/${testUuid(1)}"))
+            .andRespond(withStatus(HttpStatus.NOT_FOUND).contentType(MediaType.TEXT_HTML).body("proxy route missing"))
+        assertFailsWith<org.springframework.web.client.RestClientResponseException> {
+            client.submitDelete(RuntimeDeleteRequest("delete-unknown", testUuid(1), testUuid(7),
+                RuntimeTarget(RuntimeType.KUBERNETES, "node"), "node/ns", RuntimeDeleteReason.USER_REQUESTED))
+        }
+    }
+
+    @Test
     fun `reconciles with the original request identity and reads the accepted operation`() {
         val instanceId = UUID.randomUUID()
         server.expect(requestTo("http://runtime.test/internal/v1/instances/$instanceId/reconcile_create"))
