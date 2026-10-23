@@ -56,6 +56,7 @@ class HttpRuntimeClient(
                 .toEntity(RuntimeOperationAcceptedResponse::class.java)
             accepted(response)
         } catch (exception: HttpClientErrorException.NotFound) {
+            if (errorCodeOf(exception) != INSTANCE_NOT_FOUND) throw exception
             RuntimeSubmitResult.TargetMissing
         } catch (exception: RestClientResponseException) {
             // 삭제는 생성과 달리 4xx와 5xx를 가르지 않는다, 호출자가 어느 쪽이든 재시도 예산을 쓰기 때문이다

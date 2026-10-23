@@ -15,6 +15,16 @@ class ServiceEndpointCodecTest {
     private val instanceId = testUuid(1)
 
     @Test
+    fun `round trips optional transport metadata without changing legacy endpoint JSON`() {
+        val endpoint = ServiceEndpoint("shell", 31337, EndpointProtocol.TCP, "tls://random.gate.msgctf.kr:443",
+            hostname = "random.gate.msgctf.kr", connectionPort = 443, tls = true,
+            serverName = "random.gate.msgctf.kr")
+        assertEquals(listOf(endpoint), codec.decodeOrEmpty(codec.encode(listOf(endpoint)), instanceId))
+        assertEquals(testEndpointsJson(), codec.encode(testEndpoints()))
+        assertEquals(false, codec.decodeOrEmpty(codec.encode(listOf(endpoint.copy(tls = false))), instanceId).single().tls)
+    }
+
+    @Test
     fun `round trips multi endpoint list`() {
         val endpoints = listOf(
             ServiceEndpoint("web", 8080, EndpointProtocol.HTTP, "https://team-1.local:8080"),

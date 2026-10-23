@@ -130,6 +130,8 @@ class InstanceStateTransitionService(
                 InstanceStatus.CLEANED,
                 InstanceStatus.FAILED,
             ),
+            // 운영자 retry-cleanup만 이 경로로 정리를 재개한다.
+            InstanceStatus.FAILED to setOf(InstanceStatus.CLEANUP_PENDING),
         )
 
         // 새 create를 막는, RUNNING으로 수렴 중인 상태
