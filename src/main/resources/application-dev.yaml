@@ -1,32 +1,14 @@
-# 개발 서버 실연동 프로파일, fake 없이 실제 Broker와 Runtime 서버를 부른다
+# 개발 서버 프로파일, 실연동 설정(real)과 함께 켜지고 확인용 화면을 더 연다
+# 데모 화면은 DemoPageController가 local, dev에서만 등록한다
+# 그룹 구성원인 real이 dev 뒤에 켜지므로 같은 키를 여기 적으면 real 값이 이긴다
+# 개발 서버만 값을 다르게 하려면 그 키를 real에서 빼고 여기와 prod 쪽에 따로 둔다
 scheduler:
-  api:
-    token: ${SCHEDULER_API_TOKEN}
-  broker:
-    base-url: https://broker.mjsec.kr/api
-    token: ${SCHEDULER_BROKER_TOKEN}
-  runtime:
-    base-url: ${SCHEDULER_RUNTIME_BASE_URL}
-    token: ${SCHEDULER_RUNTIME_TOKEN}
-  cleanup:
-    enabled: true
-    fixed-delay: 30s
-    retry-limit: 5
-  operation:
-    # 워커가 한 단계의 대상을 동시에 처리하는 스레드 수, 브로커 팀이 동시 8개를 확인했다
-    # 후보 하나의 자리보다 커도 된다, 예약이 자리 부족으로 거절되면 같은 주기에 다음 후보로 넘어간다
-    parallelism: 8
-    # 몰릴 때 단계마다 이만큼씩 나눠 처리해 먼저 온 요청이 먼저 RUNNING이 되게 한다
-    # 폴링 조회에도 걸려서 작으면 끝난 operation 확인이 늦어진다, 대회 규모인 200건은 한 주기에 다 잡는다
-    batch-size: 200
-    # 나눠 처리하면 끝나지 않은 operation을 주기마다 다시 묻게 되어 간격의 하한을 둔다
-    min-poll-interval: 5s
-
-spring:
-  datasource:
-    hikari:
-      # 워커 스레드마다 커넥션 하나에 API 몫 10개, 모자라면 connection-timeout 30초를 기다린다
-      maximum-pool-size: 20
+  instance-policy:
+    # 개발 서버 E2E(loadtest/e2e-create.sh)가 공개 nginx 이미지로 런타임 왕복을 확인한다
+    # 목록은 기본값을 덮어쓰므로 대회 문제 저장소도 다시 적는다
+    allowed-image-prefixes:
+      - ghcr.io/msg-ctf/challenges/
+      - ghcr.io/nginxinc/
 
 springdoc:
   api-docs:

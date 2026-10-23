@@ -8,6 +8,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kr.msgctf.scheduler.FOREIGN_DIGEST_IMAGE
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
@@ -509,6 +510,25 @@ class InstanceCommandIntegrationTest {
         }.andExpect {
             status { isBadRequest() }
             jsonPath("$.code") { value("EXPOSED_PORTS_NOT_SUPPORTED") }
+        }
+    }
+
+    // 허용 저장소 밖의 이미지는 요청 검증을 통과해도 정책에서 거절한다
+    // 요청 검증이 다른 코드로 먼저 거절하지 않는지와 400 매핑까지 본다
+    @Test
+    fun `create api rejects image outside allowed prefixes`() {
+        val requestBody = createRequestBody(
+            teamId = testUuid(917),
+            challengeId = testUuid(10),
+            containers = """[ { "name": "challenge", "image": "$FOREIGN_DIGEST_IMAGE", "ports": [8080], "expose": true } ]""",
+        )
+
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = requestBody
+        }.andExpect {
+            status { isBadRequest() }
+            jsonPath("$.code") { value("IMAGE_NOT_ALLOWED") }
         }
     }
 

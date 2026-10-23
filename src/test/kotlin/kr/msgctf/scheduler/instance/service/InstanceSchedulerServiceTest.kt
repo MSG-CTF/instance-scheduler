@@ -10,6 +10,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -29,6 +30,7 @@ import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
+import kr.msgctf.scheduler.FOREIGN_DIGEST_IMAGE
 import kr.msgctf.scheduler.TEST_DIGEST_IMAGE
 import kr.msgctf.scheduler.exposedPortsContainers
 import kr.msgctf.scheduler.testContainers
@@ -654,6 +656,50 @@ class InstanceSchedulerServiceTest {
 
         // then
         assertEquals(SchedulerErrorCode.EXPOSED_PORTS_NOT_SUPPORTED, exception.errorCode)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(1, instanceRepository.savedInstances.size)
+    }
+
+    // 허용 범위 밖의 이미지는 접수에서 거절하고 저장하지 않는다
+    @Test
+    fun `rejects create with image outside allowed prefixes`() {
+        // given
+        val savedInstances = mutableListOf<Instance>()
+        val instanceRepository = newInstanceRepository(savedInstances)
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository)
+        val containers = listOf(ContainerSpec(name = "web", image = FOREIGN_DIGEST_IMAGE, ports = listOf(8080), expose = true))
+        val command = newCommand(teamId = testUuid(205), containers = containers)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.createInstance(command)
+        }
+
+        // then: 어느 문제의 이미지가 잘못됐는지 로그로 찾을 수 있어야 한다
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+        assertTrue("challengeId=${command.challengeId}" in assertNotNull(exception.adminDetail))
+        assertEquals(0, savedInstances.size)
+    }
+
+    // 허용 범위를 좁힌 뒤에는 옛 이미지로 다시 띄우는 초기화도 막는다
+    @Test
+    fun `rejects reset with stored image outside allowed prefixes`() {
+        // given
+        val instanceRepository = TestInstanceRepository()
+        val foreign = listOf(ContainerSpec(name = "web", image = FOREIGN_DIGEST_IMAGE, ports = listOf(8080), expose = true))
+        val instance = instanceRepository.save(
+            newRunningInstance().apply { containers = ContainerSpecCodec().encode(foreign) },
+        )
+        val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
+
+        // when
+        val exception = assertFailsWith<SchedulerException> {
+            instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instance.instanceId))
+        }
+
+        // then: 허용 범위를 좁혀 막힌 인스턴스를 로그로 찾을 수 있어야 한다
+        assertEquals(SchedulerErrorCode.IMAGE_NOT_ALLOWED, exception.errorCode)
+        assertTrue("instanceId=${instance.instanceId}" in assertNotNull(exception.adminDetail))
         assertEquals(InstanceStatus.RUNNING, instance.status)
         assertEquals(1, instanceRepository.savedInstances.size)
     }

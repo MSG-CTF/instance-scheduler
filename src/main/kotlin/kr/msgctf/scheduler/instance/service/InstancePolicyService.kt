@@ -49,6 +49,28 @@ class InstancePolicyService(
         }
     }
 
+    // 허용한 저장소 밖의 이미지가 하나라도 있으면 거절한다
+    // 접수 시점(생성, 초기화)에만 본다, 허용 범위를 좁히기 전에 접수된 인스턴스는 워커가 그대로 띄운다
+    // context는 거절 로그에 붙일 식별 정보다, 어느 문제나 인스턴스가 막혔는지 찾게 한다
+    fun validateImages(containers: List<ContainerSpec>, context: String) {
+        val prefixes = policyProperties.allowedImagePrefixes
+        val offending = containers.filter { container ->
+            prefixes.none { container.image.startsWith(it) } || climbsPath(container.image)
+        }
+        if (offending.isNotEmpty()) {
+            throw SchedulerException(
+                errorCode = SchedulerErrorCode.IMAGE_NOT_ALLOWED,
+                adminDetail = "$context, containers=${offending.map { it.name }}, " +
+                    "images=${offending.map { it.image }}, allowed=$prefixes",
+            )
+        }
+    }
+
+    // 접두어 뒤에서 ..로 올라가면 접두어가 다른 저장소를 가리키게 된다
+    // 빈 조각과 . 조각도 같은 이유로 막는다, 정상 이미지 이름에는 나오지 않는다
+    private fun climbsPath(image: String): Boolean =
+        image.substringBefore('@').split('/').any { it.isEmpty() || it == "." || it == ".." }
+
     // 팀의 활성 인스턴스가 상한에 이르렀으면 새 생성을 거절한다
     // user당 1개 제한과 별개로 두는 이유는 팀 인원이 늘어도 팀 총량이 상한을 넘지 않게 하기 위함
     fun validateTeamActiveCount(teamId: UUID, activeCount: Long) {
