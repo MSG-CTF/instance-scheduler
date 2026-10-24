@@ -984,7 +984,13 @@ class InstanceCommandIntegrationTest {
     @Test
     fun `extend api extends expiry`() {
         // given: create는 202 접수라 RUNNING을 직접 시딩한다
-        val instance = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(1000)))
+        val expectedReleaseId = UUID.randomUUID()
+        val expectedRevision = 113L
+        val instance = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(1000), registryRevision = expectedRevision).apply {
+                releaseId = expectedReleaseId
+            },
+        )
         val instanceId = instance.instanceId
         val originalExpiresAt = instance.expiresAt
 
@@ -999,6 +1005,10 @@ class InstanceCommandIntegrationTest {
             jsonPath("$.data.status") { value("RUNNING") }
             jsonPath("$.data.expires_at") { exists() }
             jsonPath("$.data.hard_expires_at") { exists() }
+            jsonPath("$.data.release_id") { value(expectedReleaseId.toString()) }
+            jsonPath("$.data.registry_revision") { value(expectedRevision.toInt()) }
+            jsonPath("$.data.releaseId") { doesNotExist() }
+            jsonPath("$.data.registryRevision") { doesNotExist() }
         }.andReturn().response.contentAsString
 
         // then: 연장된 만료 시각이 원래보다 뒤이고 DB 저장값과 같아야 한다
@@ -1009,6 +1019,8 @@ class InstanceCommandIntegrationTest {
 
         val saved = instanceRepository.findById(instanceId).orElseThrow()
         assertEquals(saved.expiresAt, extendedExpiresAt)
+        assertEquals(expectedReleaseId, saved.releaseId)
+        assertEquals(expectedRevision, saved.registryRevision)
     }
 
     // hard timeout을 넘기는 연장은 400 HARD_TIMEOUT_EXCEEDED로 거절하는지 확인
