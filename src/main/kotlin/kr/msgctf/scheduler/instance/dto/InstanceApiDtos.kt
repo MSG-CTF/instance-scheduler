@@ -341,6 +341,8 @@ data class ExtendInstanceResponse(
     val status: InstanceStatus,
     val expiresAt: Instant,
     val hardExpiresAt: Instant,
+    val releaseId: UUID? = null,
+    val registryRevision: Long? = null,
 ) {
 
     companion object {
@@ -351,6 +353,8 @@ data class ExtendInstanceResponse(
                 status = result.status,
                 expiresAt = result.expiresAt,
                 hardExpiresAt = result.hardExpiresAt,
+                releaseId = result.releaseId,
+                registryRevision = result.registryRevision,
             )
     }
 }
