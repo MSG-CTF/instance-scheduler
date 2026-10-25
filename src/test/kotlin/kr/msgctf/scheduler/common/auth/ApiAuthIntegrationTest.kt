@@ -57,4 +57,14 @@ class ApiAuthIntegrationTest {
                 jsonPath("$.code") { value("UNAUTHORIZED") }
             }
     }
+
+    @Test
+    fun `rejects retry cleanup without token`() {
+        // when & then
+        mockMvc.post("/api/instances/${UUID.randomUUID()}/retry-cleanup")
+            .andExpect {
+                status { isUnauthorized() }
+                jsonPath("$.code") { value("UNAUTHORIZED") }
+            }
+    }
 }

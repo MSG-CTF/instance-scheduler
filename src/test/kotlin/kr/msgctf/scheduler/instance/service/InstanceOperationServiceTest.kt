@@ -210,7 +210,8 @@ class InstanceOperationServiceTest {
 
     @Test
     fun `late delete submit result or failure cannot overwrite an operator retry generation`() {
-        for (lateFailure in listOf(false, true)) {
+        // 늦게 도착한 이전 세대의 404도 새 세대를 FAILED로 되돌리면 안 된다
+        for (late in listOf("accepted", "failure", "target-missing")) {
             val repository = TestInstanceRepository()
             val instance = repository.save(newCleanupPending().apply { reservationId = "held" })
             lateinit var service: InstanceOperationService
@@ -220,17 +221,139 @@ class InstanceOperationServiceTest {
                     // while this network call was still in flight.
                     instance.status = InstanceStatus.FAILED
                     service.retryCleanup(instance.instanceId)
-                    if (lateFailure) throw IllegalStateException("late response lost")
-                    return RuntimeSubmitResult.Accepted("old-generation-operation", null)
+                    return when (late) {
+                        "failure" -> throw IllegalStateException("late response lost")
+                        "target-missing" -> RuntimeSubmitResult.TargetMissing
+                        else -> RuntimeSubmitResult.Accepted("old-generation-operation", null)
+                    }
                 }
             }
             service = newService(repository, runtimeClient = runtime)
             service.submitDelete(instance.instanceId)
-            assertEquals(1, instance.cleanupGeneration)
-            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
-            assertEquals(0, instance.cleanupRetryCount)
-            assertNull(instance.runtimeOperationId)
-            assertEquals("held", instance.reservationId)
+            assertEquals(1, instance.cleanupGeneration, "late=$late")
+            assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status, "late=$late")
+            assertEquals(0, instance.cleanupRetryCount, "late=$late")
+            assertNull(instance.runtimeOperationId, "late=$late")
+            assertEquals("held", instance.reservationId, "late=$late")
+        }
+    }
+
+    // 운영자가 다시 시작한 세대는 첫 접수 전에도 묻는다, 그 사이 런타임에서 이미 지워졌으면 접수 없이 끝낸다
+    // 묻지 않고 접수하면 런타임이 지워진 workload의 삭제를 409로 거절해 한 회차 늦어지고 실패 기록이 남는다
+    @Test
+    fun `operator retry finishes without submitting when runtime already deleted the workload`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newCleanupPending().apply { status = InstanceStatus.FAILED; reservationId = "held" })
+        val runtime = SubmitCountingRuntimeClient(status = { RuntimeStatusResult.AlreadyDeleted("workload-1") })
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime, events = events)
+
+        // when
+        service.retryCleanup(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(0, runtime.deleteSubmits)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("held"), broker.releasedReservations)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 런타임이 인스턴스 기록을 잃어 404만 주면 운영자 재시도도 같은 404로 FAILED에 돌아온다
+    // 404만으로는 Gateway까지 정리됐다고 볼 수 없어 예약을 지킨다, 이 경우를 끝내는 방법은 런타임 팀과 정할 몫이다
+    @Test
+    fun `operator retry returns to FAILED while runtime has no record of the instance`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newCleanupPending().apply { status = InstanceStatus.FAILED; reservationId = "held" })
+        val requestIds = mutableListOf<String>()
+        val runtime = SubmitCountingRuntimeClient(
+            status = { RuntimeStatusResult.NotStored },
+            submit = { request ->
+                requestIds += request.requestId
+                RuntimeSubmitResult.TargetMissing
+            },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+
+        // when
+        service.retryCleanup(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(listOf("runtime-delete-${instance.instanceId}-retry-1"), requestIds)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(1, instance.cleanupGeneration)
+        assertEquals("held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+    }
+
+    // 두 번째 운영자 재시도는 다음 세대의 request_id를 써야 한다
+    // 같은 id면 런타임이 FAILED로 끝난 기존 operation을 돌려줘 재시도가 아무 효과 없이 FAILED로 돌아온다
+    @Test
+    fun `second operator retry uses the next generation request id`() {
+        // given
+        val repository = TestInstanceRepository()
+        val delegate = FakeRuntimeClient(FakeRuntimeMode.OPERATION_FAIL)
+        val requestIds = mutableListOf<String>()
+        val runtime = SubmitCountingRuntimeClient(
+            delegate = delegate,
+            status = { RuntimeStatusResult.Found("workload-1") },
+            submit = { request ->
+                requestIds += request.requestId
+                delegate.submitDelete(request)
+            },
+        )
+        val instance = repository.save(newCleanupPending().apply { status = InstanceStatus.FAILED; reservationId = "held" })
+        val service = newService(repository, runtimeClient = runtime)
+
+        // when: 첫 재시도의 삭제도 확정 실패로 끝나고, 운영자가 한 번 더 다시 시작한다
+        service.retryCleanup(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        service.retryCleanup(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(2, instance.cleanupGeneration)
+        assertEquals(
+            listOf("runtime-delete-${instance.instanceId}-retry-1", "runtime-delete-${instance.instanceId}-retry-2"),
+            requestIds,
+        )
+        assertEquals("held", instance.reservationId)
+    }
+
+    // 런타임 정리가 아닌 이유로 FAILED가 된 인스턴스는 다시 시작하지 않는다
+    // 하드타임아웃과 교체 실패는 런타임을 부르기 전에 끝나 좌표가 없고,
+    // 운영자 강제 정리로 끝난 인스턴스는 workload id가 없고 예약도 이미 반납했다
+    @Test
+    fun `operator cannot retry failures outside runtime cleanup`() {
+        val cases = mapOf(
+            "hard timeout before runtime" to newRequested().apply {
+                status = InstanceStatus.FAILED
+                deleteReason = RuntimeDeleteReason.HARD_TIMEOUT_EXPIRED
+            },
+            "replacement wait expired" to newRequested().apply {
+                status = InstanceStatus.FAILED
+                deleteReason = RuntimeDeleteReason.TTL_EXPIRED
+            },
+            "force cleanup by operator" to newCleanupPending().apply {
+                status = InstanceStatus.FAILED
+                deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+                runtimeWorkloadId = null
+                reservationId = null
+            },
+        )
+        for ((name, initial) in cases) {
+            val repository = TestInstanceRepository()
+            val instance = repository.save(initial)
+            assertFailsWith<SchedulerException>(name) { newService(repository).retryCleanup(instance.instanceId) }
+            assertEquals(InstanceStatus.FAILED, instance.status, name)
+            assertEquals(0, instance.cleanupGeneration, name)
         }
     }
 

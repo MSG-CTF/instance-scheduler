@@ -6,6 +6,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.testUuid
@@ -47,10 +48,13 @@ class HttpRuntimeClientTest {
     fun `unknown delete 404 does not prove missing workload`() {
         server.expect(requestTo("http://runtime.test/internal/v1/instances/${testUuid(1)}"))
             .andRespond(withStatus(HttpStatus.NOT_FOUND).contentType(MediaType.TEXT_HTML).body("proxy route missing"))
-        assertFailsWith<org.springframework.web.client.RestClientResponseException> {
+        val exception = assertFailsWith<SchedulerException> {
             client.submitDelete(RuntimeDeleteRequest("delete-unknown", testUuid(1), testUuid(7),
                 RuntimeTarget(RuntimeType.KUBERNETES, "node"), "node/ns", RuntimeDeleteReason.USER_REQUESTED))
         }
+        // 다른 삭제 실패와 같은 형식으로 남아야 프록시가 낸 404를 로그에서 추적할 수 있다
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, exception.errorCode)
+        assertEquals("requestId=delete-unknown, status=404, body=proxy route missing", exception.adminDetail)
     }
 
     @Test

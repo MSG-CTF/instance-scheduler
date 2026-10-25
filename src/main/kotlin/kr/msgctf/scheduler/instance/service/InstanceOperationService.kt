@@ -407,7 +407,8 @@ class InstanceOperationService(
             // 한 번이라도 실패한 뒤에는 다시 접수하기 전에 workload가 남았는지 먼저 묻는다
             // 이미 지워진 workload에 접수하면 런타임이 상태 전이 위반(409)으로 거절한다
             // 한도까지 기다렸다 물으면 지워진 workload인데도 실패 기록이 남고 예약 반납이 늦어진다
-            checkFirst = instance.cleanupRetryCount > 0
+            // 운영자가 다시 시작한 세대도 첫 접수 전에 묻는다, 그 사이 런타임에서 이미 지워졌을 수 있다
+            checkFirst = instance.cleanupRetryCount > 0 || instance.cleanupGeneration > 0
             submissionGeneration = instance.cleanupGeneration
             RuntimeDeleteRequest(
                 requestId = "runtime-delete-$instanceId" +
@@ -448,7 +449,7 @@ class InstanceOperationService(
             when (submitted) {
                 is RuntimeSubmitResult.Accepted -> storeAcceptedOperation(instance, submitted)
                 RuntimeSubmitResult.TargetMissing -> {
-                    parkFailed(instance, "delete target missing without confirmed cleanup")
+                    parkForOperatorRetry(instance, "delete target missing without confirmed cleanup")
                 }
             }
         }
@@ -461,8 +462,9 @@ class InstanceOperationService(
     // 실패는 정리 완료 증명이 아니다. 예약을 유지한 채 명시적으로 새 삭제 세대를 시작한다.
     fun retryCleanup(instanceId: UUID): InstanceResult = checkNotNull(tx.execute {
         val instance = instanceRepository.findByIdForUpdate(instanceId) ?: throw instanceNotFound(instanceId)
+        // workload id가 없는 FAILED는 다시 시작하지 않는다, 운영자 강제 정리로 끝내 예약을 이미 반납한 인스턴스다
         if (instance.status != InstanceStatus.FAILED || instance.deleteReason == null ||
-            instance.runtimeType == null || instance.runtimeTargetId == null) {
+            instance.runtimeType == null || instance.runtimeTargetId == null || instance.runtimeWorkloadId == null) {
             throw SchedulerException(
                 errorCode = SchedulerErrorCode.INVALID_STATE_TRANSITION,
                 adminDetail = "instanceId=$instanceId, status=${instance.status}, reason=not a failed runtime cleanup",
@@ -1011,7 +1013,8 @@ class InstanceOperationService(
                     }
                 }
                 InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING -> {
-                    // Runtime이 삭제를 확인했을 때만 끝내고, 확인이 없으면 상태 조회를 이어간다
+                    // Runtime이 삭제를 확인했을 때만 끝낸다
+                    // 생성이 실패한 것이면 상태 조회로 넘기고, 삭제가 실패한 것이면 FAILED로 두어 운영자 재시도를 기다린다
                     if (snapshot.type == RuntimeOperationType.CREATE) {
                         if (snapshot.cleanupCompleted) {
                             recordError(
@@ -1042,7 +1045,7 @@ class InstanceOperationService(
                         // 런타임이 안에서 재시도를 다 쓴 뒤 확정한 실패다, 같은 request_id로 다시 접수해도 기존 operation이 돌아와 재실행되지 않는다
                         // 그래서 자동으로 되풀이하지 않고 FAILED로 두어 운영자가 retry-cleanup으로 새 세대를 시작하게 한다
                         // workload가 남았을 수 있으므로 예약은 반납하지 않는다
-                        parkFailed(
+                        parkForOperatorRetry(
                             instance,
                             "operationId=${snapshot.operationId}, lastErrorCode=${snapshot.lastErrorCode}",
                         )
@@ -1111,6 +1114,17 @@ class InstanceOperationService(
         transitionService.move(instance, InstanceStatus.CLEANED, transitionDetail)
         instance.action = null
         clearOperation(instance)
+    }
+
+    // 런타임이 확정한 삭제 실패로 FAILED에 둔다, 워커는 다시 집지 않으므로 운영자가 retry-cleanup해야 정리가 이어진다
+    // 워커가 자동으로 다시 시도하지 않는 경우라 회차마다 남는 재시도 로그와 구분되게 남긴다
+    private fun parkForOperatorRetry(instance: Instance, detail: String) {
+        parkFailed(instance, detail)
+        log.warn(
+            "cleanup parked FAILED, operator retry-cleanup required: instanceId={}, reason={}",
+            instance.instanceId,
+            detail,
+        )
     }
 
     // detail은 오류 이벤트에, transitionDetail은 FAILED 전환 이벤트에 남긴다

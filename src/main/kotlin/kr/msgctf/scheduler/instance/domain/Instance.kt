@@ -180,7 +180,7 @@ class Instance(
     @Column(name = "last_accessed_at")
     var lastAccessedAt: Instant? = null,
 
-    // runtime 삭제(cleanup) 재시도 횟수, 한도에 닿으면 오류 이벤트를 한 번 남기고 정리는 이어 간다
+    // runtime 삭제(cleanup)의 일시적인 실패 횟수, 한도에 닿으면 오류 이벤트를 한 번 남기고 정리는 이어 간다
     @Column(name = "cleanup_retry_count", nullable = false)
     var cleanupRetryCount: Int = 0,
 
