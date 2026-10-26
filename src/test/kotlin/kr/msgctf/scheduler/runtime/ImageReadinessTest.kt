@@ -225,4 +225,3 @@ class ImageReadinessTest {
         override fun withZone(zone: ZoneId): Clock = this
     }
 }
-
