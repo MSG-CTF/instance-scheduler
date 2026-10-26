@@ -1317,7 +1317,7 @@ class InstanceOperationService(
             memoryMib = instance.memoryMib ?: return null,
             ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
         )
-        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile, instance.createdAt)
+        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile, requireNotNull(instance.createdAt))
     }
 
     // 확정 실패는 기존 operation으로 재시도하고, 폴링 상한을 넘기면 생성 정리 경로를 탄다
