@@ -54,8 +54,9 @@ class ReleaseIdMigrationTest {
         }
 
         val current = flyway()
-        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V22 cleanup_generation
-        assertEquals(4, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V23 windows_assignment, V24 cleanup_generation
+        // V22는 비어 있다, 개발 서버에 V23이 먼저 적용돼 cleanup_generation을 V24로 옮겼다
+        assertEquals(5, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(

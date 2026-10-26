@@ -106,7 +106,7 @@ request ID가 바뀌지 않는다. 이전 세대의 늦은 응답·예외는 새
 Gateway `instance_id`는 어떤 경우에도 바뀌지 않는다.
 예약은 정리 확인 때까지 유지한다.
 
-V22 migration은 기존 인스턴스에 세대 0을 부여한다. Scheduler가 기동할 때 Flyway가 자동으로 적용한다.
+V24 migration은 기존 인스턴스에 세대 0을 부여한다. Scheduler가 기동할 때 Flyway가 자동으로 적용한다.
 기존 `force-cleanup`의 제한된 운영자 수동 정리 계약은 그대로 유지한다.
 Gateway 등록 가능성이 있는 동안에는 `retry-cleanup`으로 Runtime 정리를 진행한다.
 
@@ -160,13 +160,13 @@ SELECT instance_id, delete_reason, runtime_workload_id, reservation_id, updated_
 이 버전을 다시 배포하는 것이 회수 경로다. 이전 버전과 이 버전을 동시에 띄우지 않는다.
 이전 버전 노드가 세대 1 이상 인스턴스에 세대 0 request ID를 보낸다.
 
-V22의 CHECK 제약은 적용할 때 테이블을 한 번 훑으며 잠금을 쥔다. 지금 크기에서는 영향이 없지만
+V24의 CHECK 제약은 적용할 때 테이블을 한 번 훑으며 잠금을 쥔다. 지금 크기에서는 영향이 없지만
 Scheduler를 여러 대로 늘린 뒤에는 `lock_timeout`을 함께 고려한다.
 
 ## 검증
 
 단위 테스트는 Runtime 응답 역직렬화·DB JSON codec·필드 전달·예약 보존·명시적 정리
 증명·재시도 세대와 응답 유실 재전송을 검사한다. PostgreSQL/Redis 통합 테스트는
-V22 적용 후 세대 저장과 실제 MVC 응답의 snake_case 연결 필드를 확인한다.
+V24 적용 후 세대 저장과 실제 MVC 응답의 snake_case 연결 필드를 확인한다.
 통합 테스트는 Docker가 없으면 생략되며 CI는 생략된 테스트가 있으면 실패한다.
 실제 Gateway 토큰·NodePort·TLS 연결 검증은 별도 운영 전 smoke test로 진행한다.
