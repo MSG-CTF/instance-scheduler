@@ -27,6 +27,9 @@ data class InstancePolicyProperties(
     // 꺼져 있어도 검증과 저장은 하고 요청에만 싣지 않는다
     val healthcheckEnabled: Boolean = false,
 
+    // Enable only after Runtime accepts release_id and architecture on create/reconcile.
+    val releaseMetadataEnabled: Boolean = false,
+
     // 생성과 초기화가 받는 이미지 저장소 접두어, 토큰이 새도 다른 소유자의 이미지를 띄우지 못하게 한다
     // 기본값은 백엔드가 릴리스 이미지에 요구하는 경로와 같다
     val allowedImagePrefixes: List<String> = listOf("ghcr.io/msg-ctf/challenges/"),

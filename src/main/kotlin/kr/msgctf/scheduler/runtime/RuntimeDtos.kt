@@ -23,6 +23,13 @@ data class RuntimeCreateRequest(
 
     val target: RuntimeTarget,
     val workload: RuntimeWorkload,
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("release_id")
+    val releaseId: UUID? = null,
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    val architecture: kr.msgctf.scheduler.broker.Architecture? = null,
 )
 
 // Runtime이 workload를 생성할 실행 대상

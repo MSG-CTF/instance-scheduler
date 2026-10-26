@@ -30,3 +30,17 @@ springdoc:
     enabled: false
   swagger-ui:
     enabled: false
+
+scheduler:
+  image-readiness:
+    enabled: false
+    lookup-timeout: 300ms
+    cache-ttl: 10s
+    max-observation-age: 60s
+    # 조회가 실패하면 생성마다 기다리지 않도록 잠시 묻지 않는다, 404와 503은 런타임에 기능이 없는 것이라 더 길게 쉰다
+    failure-backoff: 30s
+    not-found-backoff: 5m
+    # 런타임 조회 경로는 전용 토큰만 받는다, 켤 때 비어 있으면 기동을 막는다
+    token: ${SCHEDULER_IMAGE_READINESS_TOKEN:}
+  instance-policy:
+    release-metadata-enabled: false

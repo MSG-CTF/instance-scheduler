@@ -29,6 +29,32 @@ import org.springframework.web.client.RestClient
 class HttpRuntimeClientTest {
 
     @Test
+    fun `omits release metadata for legacy requests and serializes opted in metadata`() {
+        val instanceId = UUID.randomUUID()
+        val release = UUID.randomUUID()
+        for (enabled in listOf(false, true)) {
+            server.expect(requestTo("http://runtime.test/internal/v1/instances"))
+                .andExpect { request ->
+                    val json = (request as org.springframework.mock.http.client.MockClientHttpRequest).bodyAsString
+                    val tree = tools.jackson.databind.json.JsonMapper.builder().build().readTree(json)
+                    assertEquals(enabled, tree.has("release_id"))
+                    assertEquals(enabled, tree.has("architecture"))
+                    if (enabled) {
+                        assertEquals(release.toString(), tree["release_id"].asString())
+                        assertEquals("ARM64", tree["architecture"].asString())
+                    }
+                }
+                .andRespond(withStatus(HttpStatus.ACCEPTED).contentType(MediaType.APPLICATION_JSON).body("""{"operation_id":"metadata"}"""))
+            client.submitCreate(createRequest(instanceId).copy(
+                releaseId = if (enabled) release else null,
+                architecture = if (enabled) kr.msgctf.scheduler.broker.Architecture.ARM64 else null,
+            ))
+            server.verify()
+            server.reset()
+        }
+    }
+
+    @Test
     fun `preserves gateway TCP TLS and SNI transport metadata`() {
         server.expect(requestTo("http://runtime.test/internal/v1/operations/op-gateway"))
             .andRespond(withStatus(HttpStatus.OK).contentType(MediaType.APPLICATION_JSON).body(
