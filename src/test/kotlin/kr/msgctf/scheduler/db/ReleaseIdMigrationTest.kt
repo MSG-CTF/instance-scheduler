@@ -54,8 +54,8 @@ class ReleaseIdMigrationTest {
         }
 
         val current = flyway()
-        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V22 metadata latch
-        assertEquals(4, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V22 metadata latch, V23 windows_assignment
+        assertEquals(5, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
