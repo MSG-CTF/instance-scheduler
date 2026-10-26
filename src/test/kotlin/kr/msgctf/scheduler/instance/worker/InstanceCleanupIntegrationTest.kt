@@ -7,6 +7,7 @@ import java.util.concurrent.Executor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlin.test.assertNotNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.AfterEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Import
+import org.springframework.data.domain.Limit
 import org.springframework.test.context.ActiveProfiles
 import org.testcontainers.junit.jupiter.Testcontainers
 
@@ -77,6 +79,22 @@ class InstanceCleanupIntegrationTest {
         val cleaned = instanceRepository.findById(saved.instanceId).orElseThrow()
         assertEquals(InstanceStatus.CLEANED, cleaned.status)
         assertNull(cleaned.action)
+    }
+
+    @Test
+    fun `stored release intent is discovered after cleanup and acknowledged from PostgreSQL`() {
+        val saved = instanceRepository.saveAndFlush(expiredRunning(teamId = testUuid(803)).apply {
+            status = InstanceStatus.CLEANED
+            reservationId = "release-after-restart"
+            reservationReleaseReason = "SCHEDULER_CANCELLED"
+            nextPollAt = Instant.now().minusSeconds(1)
+        })
+        assertEquals(listOf(saved.instanceId), instanceRepository.findDueReservationReleases(Instant.now(), Limit.of(8)).map { it.instanceId })
+        operationService.retryReservationRelease(saved.instanceId)
+        val acknowledged = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertNull(acknowledged.reservationId)
+        assertNull(acknowledged.reservationReleaseReason)
+        assertTrue(instanceRepository.findDueReservationReleases(Instant.now(), Limit.of(8)).isEmpty())
     }
 
     @Test

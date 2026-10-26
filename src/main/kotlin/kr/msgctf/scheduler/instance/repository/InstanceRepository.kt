@@ -13,6 +13,12 @@ import org.springframework.data.repository.query.Param
 
 interface InstanceRepository : JpaRepository<Instance, UUID> {
 
+    @Query(
+        "select i from Instance i where i.reservationReleaseReason is not null and i.reservationId is not null" +
+            " and (i.nextPollAt is null or i.nextPollAt <= :now) order by i.createdAt, i.instanceId",
+    )
+    fun findDueReservationReleases(@Param("now") now: Instant, limit: Limit): List<Instance>
+
     // 유니크 인덱스가 최대 1행을 보장한다
     fun findFirstByUserIdAndStatusIn(
         userId: UUID,
