@@ -137,6 +137,19 @@ class Instance(
     @Column(name = "reservation_id")
     var reservationId: String? = null,
 
+    // 반납해야 하는데 브로커가 받았다는 확인을 아직 못 받은 예약
+    // reservation_id를 비우는 트랜잭션에서 적고, 반납 응답을 받은 뒤 비운다
+    // 커밋 뒤 반납 전에 죽거나 반납이 실패하면 남고, 정리 작업이 같은 request_id로 다시 보낸다
+    @Column(name = "release_pending_reservation_id")
+    var releasePendingReservationId: String? = null,
+
+    @Column(name = "release_pending_reason")
+    var releasePendingReason: String? = null,
+
+    // 표시를 적은 시각, 정리 작업은 이 시각이 유예를 지난 것만 거둔다
+    @Column(name = "release_pending_at")
+    var releasePendingAt: Instant? = null,
+
     // 결과를 모르는 예약 요청이다, 요청은 보냈지만 응답을 받지 못해 예약이 만들어졌는지 알 수 없다
     // 다음 주기에 이 요청을 그대로 다시 보내 결과를 확인한다
     // 후보를 새로 고르면 안 된다, 브로커는 이 인스턴스의 예약까지 빼고 자리를 세서 그 후보가 목록에서 빠질 수 있다

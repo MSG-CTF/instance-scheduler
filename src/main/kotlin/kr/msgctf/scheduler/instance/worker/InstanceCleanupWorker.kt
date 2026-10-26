@@ -6,6 +6,7 @@ import kr.msgctf.scheduler.common.error.SchedulerException
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.instance.service.InstanceCleanupService
+import kr.msgctf.scheduler.instance.service.PendingReservationReleaser
 import org.slf4j.LoggerFactory
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.scheduling.annotation.Scheduled
@@ -18,10 +19,22 @@ import org.springframework.stereotype.Component
 class InstanceCleanupWorker(
     private val instanceRepository: InstanceRepository,
     private val cleanupService: InstanceCleanupService,
+    private val reservationReleaser: PendingReservationReleaser,
     private val clock: Clock,
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
+
+    // 반납 확인을 못 받은 예약을 거둔다, 커밋 뒤 반납 전에 죽었거나 반납 호출이 실패한 경우다
+    @Scheduled(fixedDelayString = "\${scheduler.cleanup.release-sweep-delay:60s}")
+    fun releasePendingReservations() {
+        try {
+            val released = reservationReleaser.releasePendingReservations()
+            if (released > 0) log.info("pending reservations released: count={}", released)
+        } catch (exception: Exception) {
+            log.warn("pending reservation sweep failed: detail={}", (exception as? SchedulerException)?.adminDetail, exception)
+        }
+    }
 
     @Scheduled(fixedDelayString = "\${scheduler.cleanup.fixed-delay:30s}")
     fun cleanupExpiredInstances() {

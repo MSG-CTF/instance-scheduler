@@ -62,10 +62,32 @@ class InstanceCleanupWorkerTest {
         assertTrue(other.instanceId in service.cleaned)
     }
 
+    @Test
+    fun `release sweep calls the releaser and survives its failure`() {
+        val repo = TestInstanceRepository()
+        var calls = 0
+        val failing = InstanceCleanupWorker(
+            instanceRepository = repo.repository,
+            cleanupService = RecordingCleanupService(repo),
+            reservationReleaser = { calls++; throw IllegalStateException("broker down") },
+            clock = Clock.fixed(NOW, ZoneOffset.UTC),
+        )
+        failing.releasePendingReservations()
+        val counting = InstanceCleanupWorker(
+            instanceRepository = repo.repository,
+            cleanupService = RecordingCleanupService(repo),
+            reservationReleaser = { calls++; 2 },
+            clock = Clock.fixed(NOW, ZoneOffset.UTC),
+        )
+        counting.releasePendingReservations()
+        assertEquals(2, calls)
+    }
+
     private fun newWorker(repo: TestInstanceRepository, service: InstanceCleanupService): InstanceCleanupWorker =
         InstanceCleanupWorker(
             instanceRepository = repo.repository,
             cleanupService = service,
+            reservationReleaser = { 0 },
             clock = Clock.fixed(NOW, ZoneOffset.UTC),
         )
 

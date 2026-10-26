@@ -48,6 +48,9 @@ class InstanceCleanupIntegrationTest {
     @Autowired
     private lateinit var operationService: InstanceOperationService
 
+    @Autowired
+    private lateinit var brokerClient: kr.msgctf.scheduler.broker.BrokerClient
+
     @AfterEach
     fun cleanUp() {
         instanceEventRepository.deleteAll()
@@ -104,10 +107,44 @@ class InstanceCleanupIntegrationTest {
         assertNotNull(retried.nextPollAt)
     }
 
+    // 반납 확인을 못 받은 표시가 실제 DB 조회와 부분 인덱스를 거쳐 거둬지는지 확인한다
+    @Test
+    fun `sweeps a pending release marker from the real database`() {
+        val broker = brokerClient as kr.msgctf.scheduler.broker.FakeBrokerClient
+        broker.releaseRequests.clear()
+        val saved = instanceRepository.saveAndFlush(
+            expiredRunning(teamId = testUuid(803)).apply {
+                status = InstanceStatus.CLEANED
+                reservationId = null
+                releasePendingReservationId = "reservation-left-behind"
+                releasePendingReason = "SCHEDULER_CANCELLED"
+                releasePendingAt = Instant.now().minusSeconds(300)
+            },
+        )
+        val fresh = instanceRepository.saveAndFlush(
+            expiredRunning(teamId = testUuid(804)).apply {
+                status = InstanceStatus.CLEANED
+                reservationId = null
+                releasePendingReservationId = "reservation-still-releasing"
+                releasePendingReason = "SCHEDULER_CANCELLED"
+                releasePendingAt = Instant.now()
+            },
+        )
+
+        // 유예 안의 표시는 두고 지난 표시만 거둔다
+        assertEquals(1, operationService.releasePendingReservations())
+        val release = broker.releaseRequests.single()
+        assertEquals("reservation-left-behind", release.reservationId)
+        assertEquals("release-reservation-left-behind-SCHEDULER_CANCELLED", release.requestId)
+        assertNull(instanceRepository.findById(saved.instanceId).orElseThrow().releasePendingReservationId)
+        assertEquals("reservation-still-releasing", instanceRepository.findById(fresh.instanceId).orElseThrow().releasePendingReservationId)
+    }
+
     private fun newCleanupWorker(): InstanceCleanupWorker =
         InstanceCleanupWorker(
             instanceRepository = instanceRepository,
             cleanupService = cleanupService,
+            reservationReleaser = operationService,
             clock = Clock.systemUTC(),
         )
 

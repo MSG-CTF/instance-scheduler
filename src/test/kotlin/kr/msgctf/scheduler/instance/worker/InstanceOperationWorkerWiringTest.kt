@@ -59,10 +59,11 @@ class InstanceOperationWorkerWiringTest {
 
     // 스케줄 스레드가 하나면 operation 워커 주기가 길어질 때 cleanup 워커가 그만큼 밀린다
     // poolSize는 지금 떠 있는 스레드 수라 첫 주기 전에는 1이다, 설정값인 corePoolSize를 본다
+    // 주기 작업은 operation 워커, cleanup 워커, 반납 대기 예약 정리 셋이다
     @Test
     fun `keeps one scheduling thread per scheduled worker`() {
         val scheduler = context.getBean("taskScheduler", ThreadPoolTaskScheduler::class.java)
 
-        assertEquals(2, scheduler.scheduledThreadPoolExecutor.corePoolSize)
+        assertEquals(3, scheduler.scheduledThreadPoolExecutor.corePoolSize)
     }
 }

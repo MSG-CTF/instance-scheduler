@@ -62,6 +62,13 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
     // EXPIRED/CLEANUP_PENDING 정리 재시도 대상을 조회한다
     fun findByStatusIn(statuses: Collection<InstanceStatus>): List<Instance>
 
+    // 반납 확인을 못 받은 예약이 남은 인스턴스를 오래된 표시부터 조회한다
+    // 막 비운 인스턴스는 반납 호출이 진행 중일 수 있어 표시 시각이 기준 시각보다 앞선 것만 본다
+    fun findByReleasePendingReservationIdIsNotNullAndReleasePendingAtLessThanEqualOrderByReleasePendingAtAsc(
+        releasePendingAt: Instant,
+        limit: Limit,
+    ): List<Instance>
+
     // 접수 전 진행/재시도 대상을 조회한다
     // nextPollAt이 미래면 재시도 대기 중이라 건너뛴다
     // 워커가 상한만큼만 집을 때 먼저 온 요청부터 처리되게 만든 순서로 준다

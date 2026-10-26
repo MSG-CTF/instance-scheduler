@@ -50,6 +50,14 @@ class TestInstanceRepository {
                     val statuses = args?.first() as Collection<InstanceStatus>
                     savedInstances.filter { it.status in statuses }
                 }
+                "findByReleasePendingReservationIdIsNotNullAndReleasePendingAtLessThanEqualOrderByReleasePendingAtAsc" -> {
+                    val at = args?.get(0) as Instant
+                    val limit = args[1] as Limit
+                    savedInstances
+                        .filter { it.releasePendingReservationId != null && it.releasePendingAt != null && !it.releasePendingAt!!.isAfter(at) }
+                        .sortedWith(compareBy<Instance>({ it.releasePendingAt }, { it.instanceId }))
+                        .limitTo(limit)
+                }
                 // 실제 쿼리와 같게 만든 순서로 정렬하고 상한만큼 자른다
                 "findDueByStatusInAndRuntimeOperationIdIsNull" -> {
                     @Suppress("UNCHECKED_CAST")

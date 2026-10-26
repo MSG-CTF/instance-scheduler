@@ -56,6 +56,7 @@ import kr.msgctf.scheduler.runtime.RuntimeTarget
 import kr.msgctf.scheduler.runtime.RuntimeWorkload
 import kr.msgctf.scheduler.runtime.RuntimeWritablePath
 import org.slf4j.LoggerFactory
+import org.springframework.data.domain.Limit
 import org.springframework.stereotype.Service
 import org.springframework.transaction.support.TransactionOperations
 
@@ -78,7 +79,7 @@ class InstanceOperationService(
     private val clock: Clock,
     private val tx: TransactionOperations,
     private val imageReadinessPreference: ImageReadinessPreference = ImageReadinessPreference(),
-) {
+) : PendingReservationReleaser {
 
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -1296,7 +1297,68 @@ class InstanceOperationService(
             RuntimeDeleteReason.CREATE_FAILED_CLEANUP -> ReleaseReason.RUNTIME_CREATE_FAILED
             else -> ReleaseReason.SCHEDULER_CANCELLED
         }
+        // 커밋 뒤 반납 전에 죽어도 예약이 어디 있는지 남도록 같은 트랜잭션에 적어 둔다
+        // 확정한 예약은 브로커가 만료시키지 않아 여기 적지 않으면 자리가 영영 남는다
+        instance.releasePendingReservationId = reservationId
+        instance.releasePendingReason = reason.name
+        instance.releasePendingAt = clock.instant()
         return PendingRelease(reservationId, instance.instanceId, reason)
+    }
+
+    // 반납 확인을 못 받은 예약을 거둔다, 정리 워커가 주기마다 부른다
+    // 같은 request_id로 보내므로 앞선 호출이 사실은 성공했어도 브로커는 같은 결과를 돌려준다
+    override fun releasePendingReservations(): Int {
+        val before = clock.instant().minus(cleanupProperties.releaseSweepGrace)
+        val targets = instanceRepository.findByReleasePendingReservationIdIsNotNullAndReleasePendingAtLessThanEqualOrderByReleasePendingAtAsc(
+            before,
+            Limit.of(RELEASE_SWEEP_BATCH),
+        )
+        var released = 0
+        for (instance in targets) {
+            val reservationId = instance.releasePendingReservationId ?: continue
+            val reason = instance.releasePendingReason?.let { name -> ReleaseReason.entries.firstOrNull { it.name == name } }
+                ?: ReleaseReason.SCHEDULER_CANCELLED
+            log.warn(
+                "releasing reservation left without confirmation: instanceId={}, reservationId={}, releaseReason={}",
+                instance.instanceId,
+                reservationId,
+                reason,
+            )
+            // 한 건이 예외로 끝나도 나머지는 이번 주기에 거둔다
+            try {
+                if (releaseReservationQuietly(PendingRelease(reservationId, instance.instanceId, reason))) released += 1
+            } catch (exception: Exception) {
+                log.warn(
+                    "pending reservation sweep failed for one instance: instanceId={}, reservationId={}, reason={}",
+                    instance.instanceId,
+                    reservationId,
+                    failureDetail(exception),
+                )
+            }
+        }
+        if (targets.size >= RELEASE_SWEEP_BATCH) {
+            log.warn("pending reservation sweep hit the batch limit, more remain for the next cycle: batch={}", RELEASE_SWEEP_BATCH)
+        }
+        return released
+    }
+
+    // 반납 응답을 받았을 때만 표시를 지운다, 그사이 다른 예약으로 바뀌었으면 그 표시는 둔다
+    private fun clearReleasePending(release: PendingRelease) {
+        tx.executeWithoutResult {
+            val instance = instanceRepository.findByIdForUpdate(release.instanceId) ?: return@executeWithoutResult
+            if (instance.releasePendingReservationId != release.reservationId) {
+                log.debug(
+                    "pending marker now names another reservation, leaving it: instanceId={}, released={}, pending={}",
+                    release.instanceId,
+                    release.reservationId,
+                    instance.releasePendingReservationId,
+                )
+                return@executeWithoutResult
+            }
+            instance.releasePendingReservationId = null
+            instance.releasePendingReason = null
+            instance.releasePendingAt = null
+        }
     }
 
     // 확정에 필요한 값을 tx 안에서 모아 둔다, 자원 값이 비어 있는 옛 행은 확정하지 않는다
@@ -1339,10 +1401,11 @@ class InstanceOperationService(
         }
     }
 
-    // 반납 실패는 만료로 회수되므로 기록만 남긴다
+    // 반납 실패는 표시로 남아 정리 작업이 다시 보낸다, 확정된 예약은 만료되지 않아 기록만으로는 안 된다
     // request_id에 사유를 넣는다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청으로 보이게 하기 위해서다
-    private fun releaseReservationQuietly(release: PendingRelease?) {
-        if (release == null) return
+    // 반납이 끝났으면 true, 실패했으면 표시를 남긴 채 false를 돌려준다, 실패는 정리 작업이 다시 보낸다
+    private fun releaseReservationQuietly(release: PendingRelease?): Boolean {
+        if (release == null) return false
         try {
             brokerClient.releaseReservation(
                 BrokerReservationReleaseRequest(
@@ -1354,14 +1417,36 @@ class InstanceOperationService(
                 ),
             )
         } catch (exception: Exception) {
+            // 브로커가 그런 예약이 없다고 확정하면 돌려줄 것이 없는 것이다, 표시를 남겨 두면 정리 작업이 같은 거절을 되풀이한다
+            if (exception is BrokerRejectedException && exception.definite && exception.brokerCode == RESERVATION_NOT_FOUND_CODE) {
+                log.warn(
+                    "reservation already gone in broker, nothing to release: instanceId={}, reservationId={}",
+                    release.instanceId,
+                    release.reservationId,
+                )
+            } else {
+                log.warn(
+                    "reservation release failed: instanceId={}, reservationId={}, releaseReason={}, reason={}",
+                    release.instanceId,
+                    release.reservationId,
+                    release.reason,
+                    failureDetail(exception),
+                )
+                return false
+            }
+        }
+        // 브로커는 받았으니 표시 지우기가 실패해도 반납은 끝난 것이다, 표시가 남으면 정리 작업이 같은 요청을 한 번 더 보낼 뿐이다
+        try {
+            clearReleasePending(release)
+        } catch (exception: Exception) {
             log.warn(
-                "reservation release failed: instanceId={}, reservationId={}, releaseReason={}, reason={}",
+                "reservation released but the pending marker was not cleared, the sweep will resend: instanceId={}, reservationId={}, reason={}",
                 release.instanceId,
                 release.reservationId,
-                release.reason,
                 failureDetail(exception),
             )
         }
+        return true
     }
 
     private fun storeAcceptedOperation(instance: Instance, accepted: RuntimeSubmitResult.Accepted) {
@@ -1857,6 +1942,7 @@ class InstanceOperationService(
         // 기본 설정에서는 만든 지 5분 안 된 행에 backoff-max인 30초마다 묻고, 100분이 지난 행부터 상한인 10분마다 묻는다
         private const val STATUS_CHECK_AGE_DIVISOR = 10L
         private const val DEPLOYED_SPEC_MISMATCH_CODE = "DEPLOYED_SPEC_MISMATCH"
+        private const val RESERVATION_NOT_FOUND_CODE = "RESERVATION_NOT_FOUND"
 
         // 예약이 이 이유로 거절되면 같은 주기에 다음 후보로 넘어간다
         private const val INSTANCE_ALREADY_RESERVED_CODE = "INSTANCE_ALREADY_RESERVED"
@@ -1865,6 +1951,9 @@ class InstanceOperationService(
 
         // 한 주기에 예약을 시도하는 후보 수, 후보마다 브로커 왕복이 한 번 들고 만료된 예약을 만나면 세대 수만큼 든다
         private const val MAX_RESERVATION_CANDIDATES = 3
+
+        // 한 주기에 거두는 반납 대기 예약 수, 브로커 호출이 주기 하나를 넘기지 않게 묶는다
+        private const val RELEASE_SWEEP_BATCH = 100
 
         // 만료된 예약을 보고 번호를 붙여 다시 잡는 횟수, 첫 id를 포함한다
         private const val MAX_RESERVATION_GENERATIONS = 3

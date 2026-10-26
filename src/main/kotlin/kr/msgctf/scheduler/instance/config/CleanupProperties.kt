@@ -38,8 +38,14 @@ data class CleanupProperties(
     // 알림을 보낼지는 런타임에 물을 때만 확인한다, 그래서 resolve-timeout보다 길게 두면 알림도 이 간격만큼 늦어진다
     // backoff-max보다 짧게 두면 backoff-max 간격으로 묻는다
     val statusCheckMaxInterval: Duration = Duration.ofMinutes(10),
+
+    // 반납 확인을 못 받은 예약을 거두는 주기, @Scheduled는 release-sweep-delay placeholder를 읽으므로 이 필드는 문서용이다
+    val releaseSweepDelay: Duration = Duration.ofSeconds(60),
+    // 표시가 남은 뒤 이만큼 지난 것만 거둔다, 막 비운 인스턴스는 반납 호출이 아직 진행 중일 수 있다
+    val releaseSweepGrace: Duration = Duration.ofSeconds(60),
 ) {
     init {
         require(statusCheckMaxInterval.isPositive) { "scheduler.cleanup.status-check-max-interval 설정은 0보다 커야 한다" }
+        require(releaseSweepGrace.isPositive) { "scheduler.cleanup.release-sweep-grace 설정은 0보다 커야 한다" }
     }
 }

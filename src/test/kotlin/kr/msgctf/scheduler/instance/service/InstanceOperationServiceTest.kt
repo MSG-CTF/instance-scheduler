@@ -2523,6 +2523,197 @@ class InstanceOperationServiceTest {
         assertEquals(emptyList(), delegate.releasedReservations)
     }
 
+    // 커밋과 반납 호출 사이에 죽거나 반납이 실패하면 예약이 브로커에 남는다, 그 자리를 표시로 남겨 정리 작업이 거둔다
+    @Test
+    fun `keeps a release marker when the broker release fails and sweeps it later`() {
+        val movingClock = MutableClock(clock.instant())
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        var failRelease = true
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse {
+                if (failRelease) throw IllegalStateException("broker down")
+                return delegate.releaseReservation(request)
+            }
+        }
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-committed" })
+        val properties = CleanupProperties(releaseSweepGrace = Duration.ofSeconds(60))
+        val service = newService(repository, brokerClient = broker, clock = movingClock, cleanupProperties = properties)
+
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // 정리는 끝났지만 반납은 확인되지 않았다
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertNull(instance.reservationId)
+        assertEquals("reservation-committed", instance.releasePendingReservationId)
+        assertEquals("SCHEDULER_CANCELLED", instance.releasePendingReason)
+        assertEquals(emptyList(), delegate.releaseRequests)
+
+        // 막 비운 인스턴스는 반납이 진행 중일 수 있어 유예 안에서는 거두지 않는다
+        assertEquals(movingClock.instant(), instance.releasePendingAt)
+        failRelease = false
+        assertEquals(0, service.releasePendingReservations())
+        assertEquals(emptyList(), delegate.releaseRequests)
+
+        // 유예가 지나면 같은 request_id로 다시 보내고 표시를 지운다
+        movingClock.advance(Duration.ofSeconds(61))
+        assertEquals(1, service.releasePendingReservations())
+        val release = delegate.releaseRequests.single()
+        assertEquals("release-reservation-committed-SCHEDULER_CANCELLED", release.requestId)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED, release.releaseReason)
+        assertNull(instance.releasePendingReservationId)
+        assertNull(instance.releasePendingReason)
+        assertEquals(0, service.releasePendingReservations())
+    }
+
+    // 반납 응답을 기다리는 사이 다른 워커가 표시를 다른 예약으로 바꿨으면 그 표시는 지우지 않는다
+    @Test
+    fun `does not clear a release marker that now names a different reservation`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-committed" })
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse {
+                // 브로커가 답하는 사이 다른 경로가 새 예약의 반납 대기를 적어 둔 상태를 만든다
+                instance.releasePendingReservationId = "reservation-newer"
+                instance.releasePendingReason = ReleaseReason.RUNTIME_CREATE_FAILED.name
+                return delegate.releaseReservation(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker)
+
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals("reservation-committed", delegate.releaseRequests.single().reservationId)
+        assertEquals("reservation-newer", instance.releasePendingReservationId)
+        assertEquals("RUNTIME_CREATE_FAILED", instance.releasePendingReason)
+    }
+
+    @Test
+    fun `clears the release marker once the broker confirms the release`() {
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-committed" })
+        val service = newService(repository, brokerClient = broker)
+
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(1, broker.releaseRequests.size)
+        assertNull(instance.releasePendingReservationId)
+        assertNull(instance.releasePendingReason)
+    }
+
+    // 생성 실패로 정리된 인스턴스의 표시는 그 사유를 그대로 남겨, 거둘 때도 같은 사유와 request_id로 보낸다
+    @Test
+    fun `sweep reuses the recorded release reason for create failure cleanups`() {
+        val movingClock = MutableClock(clock.instant())
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val instance = repository.save(
+            newStopping().apply {
+                status = InstanceStatus.CLEANED
+                reservationId = null
+                releasePendingReservationId = "reservation-create-failed"
+                releasePendingReason = "RUNTIME_CREATE_FAILED"
+                releasePendingAt = movingClock.instant().minus(Duration.ofMinutes(5))
+            },
+        )
+        val service = newService(repository, brokerClient = delegate, clock = movingClock)
+
+        assertEquals(1, service.releasePendingReservations())
+        val release = delegate.releaseRequests.single()
+        assertEquals(ReleaseReason.RUNTIME_CREATE_FAILED, release.releaseReason)
+        assertEquals("release-reservation-create-failed-RUNTIME_CREATE_FAILED", release.requestId)
+        assertEquals(instance.instanceId, release.instanceId)
+        assertNull(instance.releasePendingReservationId)
+    }
+
+    // 생성 실패 정리(강제 정리) 경로도 같은 트랜잭션에 표시를 남긴다, 사유는 생성 실패다
+    @Test
+    fun `force cleanup leaves a release marker with the create failure reason when the release fails`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse =
+                throw IllegalStateException("broker down")
+        }
+        val instance = repository.save(
+            stuckCleanupPending().apply {
+                deleteReason = RuntimeDeleteReason.CREATE_FAILED_CLEANUP
+                reservationId = "reservation-held"
+            },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = statusRuntime(RuntimeStatusResult.NotStored))
+
+        service.forceCleanup(instance.instanceId)
+
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertNull(instance.reservationId)
+        assertEquals("reservation-held", instance.releasePendingReservationId)
+        assertEquals("RUNTIME_CREATE_FAILED", instance.releasePendingReason)
+    }
+
+    // 한 주기에 거두는 수는 상한까지다, 남은 것은 다음 주기가 오래된 것부터 거둔다
+    @Test
+    fun `sweep releases at most one batch per call and the oldest first`() {
+        val movingClock = MutableClock(clock.instant())
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val oldest = newStopping().apply {
+            status = InstanceStatus.CLEANED
+            reservationId = null
+            releasePendingReservationId = "reservation-oldest"
+            releasePendingReason = "SCHEDULER_CANCELLED"
+            releasePendingAt = movingClock.instant().minus(Duration.ofHours(1))
+        }
+        repository.save(oldest)
+        repeat(100) { index ->
+            repository.save(
+                newStopping().apply {
+                    status = InstanceStatus.CLEANED
+                    reservationId = null
+                    releasePendingReservationId = "reservation-$index"
+                    releasePendingReason = "SCHEDULER_CANCELLED"
+                    releasePendingAt = movingClock.instant().minus(Duration.ofMinutes(10)).plusSeconds(index.toLong())
+                },
+            )
+        }
+        val service = newService(repository, brokerClient = broker, clock = movingClock)
+
+        assertEquals(100, service.releasePendingReservations())
+        assertEquals("reservation-oldest", broker.releaseRequests.first().reservationId)
+        assertEquals(100, broker.releaseRequests.size)
+        assertEquals(1, service.releasePendingReservations())
+        assertEquals(101, broker.releaseRequests.size)
+        assertEquals(0, service.releasePendingReservations())
+    }
+
+    // 브로커가 그런 예약이 없다고 확정하면 돌려줄 것이 없으므로 표시를 지운다, 아니면 정리 작업이 같은 거절을 되풀이한다
+    @Test
+    fun `clears the release marker when the broker definitely has no such reservation`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse =
+                throw BrokerRejectedException("RESERVATION_NOT_FOUND", "gone", httpStatus = 404)
+        }
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-gone" })
+        val service = newService(repository, brokerClient = broker)
+
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertNull(instance.releasePendingReservationId)
+        assertNull(instance.releasePendingAt)
+        assertEquals(0, service.releasePendingReservations())
+    }
+
     // 확정된 예약은 삭제가 끝날 때 반납한다, 사용자 삭제라 사유는 SCHEDULER_CANCELLED다
     // 반납 request_id에 사유가 들어간다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청이어야 한다
     @Test
