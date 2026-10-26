@@ -133,6 +133,26 @@ class InstanceQueryIntegrationTest {
             }
     }
 
+    @Test
+    fun `get api preserves gateway connection metadata from stored endpoints`() {
+        val instanceId = createInstance(teamId = testUuid(121), endpoints = """
+            [{"containerName":"shell","port":31337,"protocol":"TCP",
+              "serviceUrl":"tls://random.gate.msgctf.kr:443","hostname":"random.gate.msgctf.kr",
+              "connectionPort":443,"tls":true,"serverName":"random.gate.msgctf.kr"}]
+        """.trimIndent())
+        mockMvc.get("/api/instances/$instanceId").andExpect {
+            status { isOk() }
+            jsonPath("$.data.endpoints[0].port") { value(31337) }
+            jsonPath("$.data.endpoints[0].protocol") { value("TCP") }
+            jsonPath("$.data.endpoints[0].hostname") { value("random.gate.msgctf.kr") }
+            jsonPath("$.data.endpoints[0].connection_port") { value(443) }
+            jsonPath("$.data.endpoints[0].tls") { value(true) }
+            jsonPath("$.data.endpoints[0].server_name") { value("random.gate.msgctf.kr") }
+            jsonPath("$.data.endpoints[0].connectionPort") { doesNotExist() }
+            jsonPath("$.data.endpoints[0].serverName") { doesNotExist() }
+        }
+    }
+
     // Runtime이 아직 안 보낸 인스턴스는 빈 배열이 나가고 service_url만 남는다
     @Test
     fun `get api returns empty endpoints when runtime sent none`() {

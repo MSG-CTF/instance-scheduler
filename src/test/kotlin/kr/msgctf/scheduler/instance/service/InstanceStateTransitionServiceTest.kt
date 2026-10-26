@@ -127,11 +127,22 @@ class InstanceStateTransitionServiceTest {
             InstanceStatus.RUNNING to InstanceStatus.CLEANUP_PENDING,
             InstanceStatus.EXPIRED to InstanceStatus.CLEANUP_PENDING,
             InstanceStatus.CLEANUP_PENDING to InstanceStatus.CLEANED,
+            // 운영자 retry-cleanup이 정리를 다시 시작하는 유일한 출구다
+            InstanceStatus.FAILED to InstanceStatus.CLEANUP_PENDING,
         )
 
         // when & then
         allowedTransitions.forEach { (from, to) ->
             assertTrue(transitionService.canTransition(from, to), "$from -> $to should be allowed")
+        }
+    }
+
+    // FAILED에서 나가는 길은 정리 재시작 하나뿐이다, 정리를 건너뛰고 끝내거나 되살리는 전환은 막는다
+    @Test
+    fun `failed leaves only through cleanup pending`() {
+        val rejected = InstanceStatus.entries.filter { it != InstanceStatus.CLEANUP_PENDING }
+        rejected.forEach { to ->
+            assertFalse(transitionService.canTransition(InstanceStatus.FAILED, to), "FAILED -> $to should be rejected")
         }
     }
 

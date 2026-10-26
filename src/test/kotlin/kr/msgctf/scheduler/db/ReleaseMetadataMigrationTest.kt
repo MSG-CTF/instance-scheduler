@@ -22,12 +22,12 @@ class ReleaseMetadataMigrationTest {
     lateinit var historicalMigrations: Path
 
     @Test
-    fun `upgrades deployed windows schema without out of order migration or lost assignments`() {
-        // The deployed Windows branch has V23 but has never contained our metadata migration.
+    fun `upgrades deployed gateway and windows schema without out of order migration or lost assignments`() {
+        // The merged Gateway branch has V24 but has never contained our metadata migration.
         PathMatchingResourcePatternResolver().getResources("classpath:db/migration/*.sql")
             .filter { resource ->
                 val name = requireNotNull(resource.filename)
-                name.substringBefore("__").removePrefix("V").toInt() <= 23 &&
+                name.substringBefore("__").removePrefix("V").toInt() <= 24 &&
                     !name.endsWith("__add_release_metadata_forwarded.sql")
             }.forEach { resource ->
                 resource.inputStream.use { Files.copy(it, historicalMigrations.resolve(requireNotNull(resource.filename))) }
@@ -75,12 +75,13 @@ class ReleaseMetadataMigrationTest {
         current.validate()
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.prepareStatement(
-                "SELECT status, release_metadata_forwarded FROM challenge_instance WHERE instance_id = ?",
+                "SELECT status, cleanup_generation, release_metadata_forwarded FROM challenge_instance WHERE instance_id = ?",
             ).use { statement ->
                 statement.setObject(1, instanceId)
                 statement.executeQuery().use { result ->
                     assertTrue(result.next())
                     assertEquals("CLEANUP_PENDING", result.getString("status"))
+                    assertEquals(0, result.getInt("cleanup_generation"))
                     assertNull(result.getObject("release_metadata_forwarded"))
                 }
             }

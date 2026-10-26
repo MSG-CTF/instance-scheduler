@@ -980,6 +980,57 @@ class InstanceCommandIntegrationTest {
             }
     }
 
+    // 런타임이 삭제 실패를 확정해 FAILED로 둔 인스턴스를 운영자가 다시 시작한다, 접수만 하고 정리 대기로 답한다
+    @Test
+    fun `retry cleanup api resumes a failed runtime cleanup`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(
+            runningInstance(teamId = testUuid(704)).apply {
+                status = InstanceStatus.FAILED
+                action = InstanceAction.CLEANUP
+                deleteReason = RuntimeDeleteReason.TTL_EXPIRED
+                reservationId = "reservation-held"
+            },
+        ).instanceId
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/retry-cleanup")
+            .andExpect {
+                status { isOk() }
+                jsonPath("$.code") { value("SUCCESS") }
+                jsonPath("$.data.instance_id") { value(instanceId.toString()) }
+                jsonPath("$.data.status") { value("CLEANUP_PENDING") }
+            }
+        val saved = instanceRepository.findById(instanceId).orElseThrow()
+        assertEquals(InstanceStatus.CLEANUP_PENDING, saved.status)
+        assertEquals(1, saved.cleanupGeneration)
+        assertEquals("reservation-held", saved.reservationId)
+    }
+
+    @Test
+    fun `retry cleanup api rejects an instance that is not a failed runtime cleanup`() {
+        // given
+        val instanceId = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(705))).instanceId
+
+        // when & then
+        mockMvc.post("/api/instances/$instanceId/retry-cleanup")
+            .andExpect {
+                status { isBadRequest() }
+                jsonPath("$.code") { value("INVALID_STATE_TRANSITION") }
+            }
+        assertEquals(InstanceStatus.RUNNING, instanceRepository.findById(instanceId).orElseThrow().status)
+    }
+
+    @Test
+    fun `retry cleanup api returns not found for unknown instance`() {
+        // when & then
+        mockMvc.post("/api/instances/${UUID.randomUUID()}/retry-cleanup")
+            .andExpect {
+                status { isNotFound() }
+                jsonPath("$.code") { value("INSTANCE_NOT_FOUND") }
+            }
+    }
+
     // extend가 만료 시각을 늘리고 DB에 반영되는지 확인
     @Test
     fun `extend api extends expiry`() {

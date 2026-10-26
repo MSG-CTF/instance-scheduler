@@ -54,12 +54,12 @@ class ReleaseIdMigrationTest {
         }
 
         val current = flyway()
-        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V23 windows_assignment, V24 metadata latch
-        assertEquals(5, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V23 windows_assignment, V24 cleanup_generation, V25 metadata latch
+        assertEquals(6, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
-                "SELECT status, containers, create_failure_confirmed, release_id, release_metadata_forwarded FROM challenge_instance WHERE instance_id = ?",
+                "SELECT status, containers, create_failure_confirmed, release_id, cleanup_generation, release_metadata_forwarded FROM challenge_instance WHERE instance_id = ?",
             ).use { statement ->
                 statement.setObject(1, instanceId)
                 statement.executeQuery().use { result ->
@@ -68,6 +68,7 @@ class ReleaseIdMigrationTest {
                     assertEquals(settings, result.getString("containers"))
                     assertTrue(result.getBoolean("create_failure_confirmed"))
                     assertNull(result.getObject("release_id"))
+                    assertEquals(0, result.getInt("cleanup_generation"))
                     assertNull(result.getObject("release_metadata_forwarded"))
                 }
             }

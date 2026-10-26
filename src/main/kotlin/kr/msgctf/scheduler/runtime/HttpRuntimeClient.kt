@@ -56,16 +56,23 @@ class HttpRuntimeClient(
                 .toEntity(RuntimeOperationAcceptedResponse::class.java)
             accepted(response)
         } catch (exception: HttpClientErrorException.NotFound) {
+            // 본문 코드가 INSTANCE_NOT_FOUND인 404만 대상 없음으로 읽는다, 프록시나 경로가 낸 404는 다른 실패와 같이 다룬다
+            if (errorCodeOf(exception) != INSTANCE_NOT_FOUND) throw deleteFailed(request, exception)
             RuntimeSubmitResult.TargetMissing
         } catch (exception: RestClientResponseException) {
-            // 삭제는 생성과 달리 4xx와 5xx를 가르지 않는다, 호출자가 어느 쪽이든 재시도 예산을 쓰기 때문이다
-            throw SchedulerException(
-                errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
-                adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
-                    ", body=${exception.responseBodyAsString.take(200)}",
-                cause = exception,
-            )
+            // 삭제는 생성과 달리 4xx와 5xx를 가르지 않는다, 호출자가 어느 쪽이든 일시적인 실패로 세고 다시 시도한다
+            // 409(이미 지워진 workload)는 다음 회차의 상태 확인이 TERMINATED를 받아 정리를 끝낸다
+            throw deleteFailed(request, exception)
         }
+
+    // 로그와 오류 이벤트에서 같은 형식으로 추적하도록 요청 id, 상태 코드, 본문 앞부분을 남긴다
+    private fun deleteFailed(request: RuntimeDeleteRequest, exception: RestClientResponseException): SchedulerException =
+        SchedulerException(
+            errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+            adminDetail = "requestId=${request.requestId}, status=${exception.statusCode.value()}" +
+                ", body=${exception.responseBodyAsString.take(200)}",
+            cause = exception,
+        )
 
     override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted? =
         try {

@@ -7,6 +7,7 @@ import java.util.concurrent.Executor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertNotNull
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.common.model.RuntimeType
 import kr.msgctf.scheduler.instance.config.OperationProperties
@@ -76,6 +77,31 @@ class InstanceCleanupIntegrationTest {
         val cleaned = instanceRepository.findById(saved.instanceId).orElseThrow()
         assertEquals(InstanceStatus.CLEANED, cleaned.status)
         assertNull(cleaned.action)
+    }
+
+    @Test
+    fun `operator retry commits cleanup generation without releasing reservation`() {
+        val saved = instanceRepository.saveAndFlush(expiredRunning(teamId = testUuid(802)).apply {
+            status = InstanceStatus.FAILED
+            deleteReason = RuntimeDeleteReason.TTL_EXPIRED
+            reservationId = "gateway-route-still-held"
+            cleanupRetryCount = 5
+            runtimeOperationId = "failed-delete-operation"
+            pollDeadlineAt = Instant.now().minusSeconds(1)
+        })
+
+        operationService.retryCleanup(saved.instanceId)
+
+        val retried = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.CLEANUP_PENDING, retried.status)
+        assertEquals(1, retried.cleanupGeneration)
+        assertEquals(0, retried.cleanupRetryCount)
+        assertEquals("gateway-route-still-held", retried.reservationId)
+        assertEquals("cluster-main", retried.runtimeTargetId)
+        assertEquals(saved.runtimeWorkloadId, retried.runtimeWorkloadId)
+        assertNull(retried.runtimeOperationId)
+        assertNull(retried.pollDeadlineAt)
+        assertNotNull(retried.nextPollAt)
     }
 
     private fun newCleanupWorker(): InstanceCleanupWorker =

@@ -249,6 +249,13 @@ data class RuntimeEndpoint(
 
     @JsonProperty("service_url")
     val serviceUrl: String,
+
+    val hostname: String? = null,
+    @JsonProperty("connection_port")
+    val connectionPort: Int? = null,
+    val tls: Boolean? = null,
+    @JsonProperty("server_name")
+    val serverName: String? = null,
 )
 
 // 공개 주소로 주고받는 통신 규약, WEB 문제는 HTTP고 PWN 문제는 TCP다
