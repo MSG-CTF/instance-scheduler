@@ -2569,14 +2569,16 @@ class InstanceOperationServiceTest {
         service.pollOperation(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(instance.serviceUrl)
+        assertNotNull(instance.runtimeOperationId)
         assertEquals(emptyList(), delegate.releaseRequests)
     }
 
     // 자원 값이 안 맞아 확정이 거절되면 예약이 HELD로 남아 만료까지 용량을 잡는다
-    // 그 사유로 바로 반납하는지 확인, 인스턴스는 RUNNING 그대로다
+    // 실행 중인 workload가 있으므로 공개하지 않고 삭제 증명 전까지 예약을 보관한다
     @Test
-    fun `releases reservation with mismatch reason when commit is rejected for spec mismatch`() {
+    fun `keeps workload private and reservation held when commit is rejected for spec mismatch`() {
         // given
         val repository = TestInstanceRepository()
         val delegate = FakeBrokerClient()
@@ -2596,10 +2598,60 @@ class InstanceOperationServiceTest {
         service.pollOperation(instance.instanceId)
 
         // then
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(instance.serviceUrl)
+        assertNotNull(instance.runtimeOperationId)
+        assertTrue(delegate.releaseRequests.isEmpty())
+    }
+
+    @Test
+    fun `lost commit response retries identical payload before publishing workload`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val requests = mutableListOf<BrokerReservationCommitRequest>()
+        val movingClock = MutableClock(clock.instant())
+        val broker = object : BrokerClient by delegate {
+            override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse {
+                requests += request
+                if (requests.size == 1) {
+                    delegate.commitReservation(request)
+                    throw IllegalStateException("response lost after commit")
+                }
+                assertEquals(requests.first(), request)
+                return delegate.commitReservation(request)
+            }
+        }
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = broker, clock = movingClock)
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(instance.serviceUrl)
+        assertNotNull(instance.runtimeOperationId)
+        movingClock.advance(Duration.ofSeconds(15))
+        service.pollOperation(instance.instanceId)
         assertEquals(InstanceStatus.RUNNING, instance.status)
-        val release = delegate.releaseRequests.single()
-        assertEquals("reservation-${instance.instanceId}", release.reservationId)
-        assertEquals(ReleaseReason.DEPLOYED_SPEC_MISMATCH, release.releaseReason)
+        assertNotNull(instance.serviceUrl)
+        assertEquals(2, requests.size)
+        assertEquals(instance.createdAt, requests.first().requestedAt)
+    }
+
+    @Test
+    fun `uncommitted broker response never exposes the running workload`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse =
+                delegate.commitReservation(request).copy(status = BrokerReservationStatus.EXPIRED)
+        }
+        val instance = repository.save(newRequested())
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(instance.serviceUrl)
+        assertNotNull(instance.runtimeOperationId)
+        assertTrue(delegate.releaseRequests.isEmpty())
     }
 
     // workload id가 없어도 지울 대상이 있을 수 있다

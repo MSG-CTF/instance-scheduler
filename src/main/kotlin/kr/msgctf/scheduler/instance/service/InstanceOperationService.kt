@@ -964,7 +964,19 @@ class InstanceOperationService(
     }
 
     private fun applySucceeded(instanceId: UUID, snapshot: RuntimeOperationSnapshot) {
-        var reservationToCommit: PendingCommit? = null
+        // 확정 응답을 잃어도 같은 본문으로 다시 묻고, 확정 전에는 접속점을 공개하지 않는다
+        val reservationToCommit = tx.execute {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
+            if (instance.runtimeOperationId != snapshot.operationId || instance.status != InstanceStatus.PROVISIONING) {
+                return@execute null
+            }
+            val result = checkNotNull(snapshot.result) { "operation result missing: $instanceId" }
+            pendingCommit(instance, result.runtimeWorkloadId)
+        }
+        if (reservationToCommit != null && !commitReservation(reservationToCommit)) {
+            reschedulePoll(instanceId, snapshot.operationId, retryAfterSeconds = null, lookupFailed = true)
+            return
+        }
         var reservationToRelease: PendingRelease? = null
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
@@ -983,7 +995,6 @@ class InstanceOperationService(
                     clearOperation(instance)
                     // 확정한 예약은 만료되지 않는다, 정리가 끝날 때 반납해야 하므로 id를 비우지 않는다
                     // 브로커는 Pod가 노드에 보인 뒤 확정하라고 한다, 접수 202가 아니라 operation SUCCEEDED에 묶는다
-                    reservationToCommit = pendingCommit(instance, result.runtimeWorkloadId)
                 }
                 // 정리로 넘어온 뒤에 끝난 생성이다, 그 결과로 만들어진 workload를 지워야 한다
                 // 여기서 삭제 성공으로 읽으면 방금 생긴 자원을 남긴 채 정리를 끝내게 된다
@@ -1013,7 +1024,6 @@ class InstanceOperationService(
                 else -> return@executeWithoutResult
             }
         }
-        commitReservationQuietly(reservationToCommit)
         releaseReservationQuietly(reservationToRelease)
     }
 
@@ -1307,37 +1317,32 @@ class InstanceOperationService(
             memoryMib = instance.memoryMib ?: return null,
             ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
         )
-        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile)
+        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile, requireNotNull(instance.createdAt))
     }
 
-    // 확정 실패는 인스턴스 상태를 바꾸지 않고 기록만 남긴다
-    // 자원 값이 안 맞아 거절되면 예약이 HELD로 남아 만료까지 용량을 잡으므로 그 사유로 바로 반납한다
-    private fun commitReservationQuietly(commit: PendingCommit?) {
-        if (commit == null) return
+    // 확정 실패는 기존 operation으로 재시도하고, 폴링 상한을 넘기면 생성 정리 경로를 탄다
+    // 이미 실행 중인 workload가 있으므로 예약은 삭제 증명을 확인한 뒤 반납한다
+    private fun commitReservation(commit: PendingCommit): Boolean =
         try {
-            brokerClient.commitReservation(
+            val response = brokerClient.commitReservation(
                 BrokerReservationCommitRequest(
                     requestId = "commit-${commit.reservationId}",
-                    requestedAt = clock.instant(),
+                    requestedAt = commit.requestedAt,
                     instanceId = commit.instanceId,
                     reservationId = commit.reservationId,
                     runtimeWorkloadId = commit.runtimeWorkloadId,
                     resourceProfile = commit.resourceProfile,
                 ),
             )
+            response.status == BrokerReservationStatus.COMMITTED
         } catch (exception: Exception) {
             log.warn(
                 "reservation commit failed: reservationId={}, reason={}",
                 commit.reservationId,
                 failureDetail(exception),
             )
-            if (exception is BrokerRejectedException && exception.brokerCode == DEPLOYED_SPEC_MISMATCH_CODE) {
-                releaseReservationQuietly(
-                    PendingRelease(commit.reservationId, commit.instanceId, ReleaseReason.DEPLOYED_SPEC_MISMATCH),
-                )
-            }
+            false
         }
-    }
 
     // 반납 실패는 만료로 회수되므로 기록만 남긴다
     // request_id에 사유를 넣는다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청으로 보이게 하기 위해서다
@@ -1885,6 +1890,7 @@ private data class PendingCommit(
     val instanceId: UUID,
     val runtimeWorkloadId: String,
     val resourceProfile: ResourceProfile,
+    val requestedAt: Instant,
 )
 
 private data class ResumedCreate(
