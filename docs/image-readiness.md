@@ -63,7 +63,9 @@ until this short cache expires; actual create still checks current Runtime polic
 
 ## Durable create metadata and rollout
 
-Migration V22 adds nullable `release_metadata_forwarded`. Before the first Runtime
+Migration V24 adds nullable `release_metadata_forwarded`. It follows the merged
+Windows assignment V23 so existing deployments upgrade without out-of-order
+migrations. Before the first Runtime
 create, Scheduler stores whether `release_id` and `architecture` will be forwarded.
 The decision is reused for resubmission and reconcile after restart, regardless of
 later flag changes. Existing provisioned rows with a null decision keep omitting
@@ -73,7 +75,7 @@ new instance; a new forwarding decision is recorded before its own first create.
 
 1. Deploy Runtime support for readiness query and optional create/reconcile
    `release_id` and `architecture` first. Older Runtime rejects unknown create keys.
-2. Deploy Scheduler with both flags false and apply V22. Confirm Broker target IDs
+2. Deploy Scheduler with both flags false and apply V24. Confirm Broker target IDs
    match Runtime Registry IDs and configure the authorized readiness credential.
 3. Enable metadata forwarding only after Runtime support is deployed. Enable
    readiness separately for a pilot after observations and image policies are ready.
