@@ -8,6 +8,7 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.context.annotation.Import
 import org.springframework.http.HttpHeaders
+import org.springframework.http.MediaType
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.get
@@ -66,5 +67,16 @@ class ApiAuthIntegrationTest {
                 status { isUnauthorized() }
                 jsonPath("$.code") { value("UNAUTHORIZED") }
             }
+    }
+
+    @Test
+    fun `windows assignment requires the api token`() {
+        mockMvc.post("/api/windows-assignments") {
+            contentType = MediaType.APPLICATION_JSON
+            content = "{}"
+        }.andExpect {
+            status { isUnauthorized() }
+            jsonPath("$.code") { value("UNAUTHORIZED") }
+        }
     }
 }

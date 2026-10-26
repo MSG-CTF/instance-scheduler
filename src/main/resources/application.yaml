@@ -7,6 +7,11 @@ spring:
     group:
       dev: real
       prod: real
+  jpa:
+    # 요청이 끝날 때까지 DB 연결을 쥐지 않게 끈다
+    # Windows 배정 API는 요청 스레드에서 브로커를 부르므로, 켜 두면 브로커를 기다리는 동안 연결 풀을 잡아먹는다
+    # 지연 로딩 관계가 없어 끄더라도 응답을 만들 때 추가 조회가 생기지 않는다
+    open-in-view: false
   jackson:
     property-naming-strategy: SNAKE_CASE
   task:
