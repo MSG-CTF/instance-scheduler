@@ -43,6 +43,7 @@ import kr.msgctf.scheduler.instance.service.ServiceEndpointCodec
 import kr.msgctf.scheduler.runtime.ImageReadinessClient
 import kr.msgctf.scheduler.runtime.ImageReadinessPreference
 import kr.msgctf.scheduler.runtime.ImageReadinessProperties
+import kr.msgctf.scheduler.runtime.ReadinessLookup
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
@@ -107,7 +108,7 @@ class InstanceOperationIntegrationTest {
         val readiness = ImageReadinessPreference(
             ImageReadinessProperties(enabled = true),
             ImageReadinessClient { query ->
-                JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${runtimeClock.instant()}","valid_until":"${runtimeClock.instant().plusSeconds(30)}"}]}""")
+                ReadinessLookup.Answered(JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${runtimeClock.instant()}","valid_until":"${runtimeClock.instant().plusSeconds(30)}"}]}"""))
             }, runtimeClock,
         )
         assertFailsWith<SimulatedProcessDeath> {

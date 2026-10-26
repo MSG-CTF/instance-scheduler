@@ -38,6 +38,7 @@ import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import kr.msgctf.scheduler.runtime.ImageReadinessPreference
 import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.runtime.ReadinessDecision
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeContainer
 import kr.msgctf.scheduler.runtime.RuntimeCreateRequest
@@ -103,7 +104,7 @@ class InstanceOperationService(
             spec
         } ?: return
 
-        val (chosenPlacement, reservation, candidateSummary, pendingReservationJson) = obtainReservation(instanceId, spec) ?: return
+        val (chosenPlacement, reservation, candidateSummary, pendingReservationJson, readiness) = obtainReservation(instanceId, spec) ?: return
 
         // 만료나 반납된 예약의 재사용을 막는다, HELD가 아니면 선점된 용량이 없다
         if (reservation.status != BrokerReservationStatus.HELD) {
@@ -165,7 +166,8 @@ class InstanceOperationService(
             transitionService.move(
                 instance,
                 InstanceStatus.PROVISIONING,
-                "$candidateSummary, reservation=${reservation.reservationId}, target=${placement.runtimeTargetId}",
+                "$candidateSummary, reservation=${reservation.reservationId}, target=${placement.runtimeTargetId}, " +
+                    readiness.detail(placement.runtimeTargetId, chosenPlacement.runtimeTargetId),
             )
             // broker 단계가 끝났으므로 재시도 횟수를 0에서 다시 센다
             instance.attemptCount = 0
@@ -1388,7 +1390,7 @@ class InstanceOperationService(
         spec.pendingReservation?.let { pending ->
             when (val outcome = replayPendingReservation(instanceId, spec, pending)) {
                 is ReplayOutcome.Held ->
-                    return ObtainedReservation(pending.placement, outcome.reservation, "recovered request=${pending.requestId}", checkNotNull(spec.pendingReservationJson))
+                    return ObtainedReservation(pending.placement, outcome.reservation, "recovered request=${pending.requestId}", checkNotNull(spec.pendingReservationJson), ReadinessDecision.replay())
                 ReplayOutcome.Unresolved -> return null
                 ReplayOutcome.Gone -> if (!forgetPendingReservation(instanceId, checkNotNull(spec.pendingReservationJson), spec.schedulingLease)) return null
             }
@@ -1399,6 +1401,7 @@ class InstanceOperationService(
             !forgetPendingReservation(instanceId, spec.pendingReservationJson, spec.schedulingLease)
         ) return null
 
+        var readiness = ReadinessDecision.off()
         val (response, candidates) = try {
             val response = brokerClient.getCandidates(
                 BrokerCandidateRequest(
@@ -1412,17 +1415,18 @@ class InstanceOperationService(
                 ),
             )
             val eligible = resourceCandidateSelector.rank(response, spec.architecture, instanceId)
-            val readyTargets = imageReadinessPreference.readyTargets(
+            // 준비 정보는 순서에만 쓴다, 조회가 어떻게 끝났든 예외 없이 결과 값으로 돌아온다
+            readiness = imageReadinessPreference.decide(
                 spec.architecture, spec.containers.map { it.image }, eligible.map { it.runtime.targetId },
             )
-            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readyTargets)
+            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readiness.readyTargets)
         } catch (exception: Exception) {
             handleBrokerFailure(instanceId, exception, ReservationGuard(null, spec.schedulingLease))
             return null
         }
 
         val (candidate, reservation, pendingJson) = reserveFirstAvailable(instanceId, spec, candidates) ?: return null
-        return ObtainedReservation(candidate.toPlacement(), reservation, candidateSummary(response, candidate), pendingJson)
+        return ObtainedReservation(candidate.toPlacement(), reservation, candidateSummary(response, candidate), pendingJson, readiness)
     }
 
     // 결과를 모르는 예약 요청을 같은 request_id와 본문으로 다시 보낸다
@@ -1911,6 +1915,8 @@ private data class ObtainedReservation(
     val reservation: BrokerReservationResponse,
     val summary: String,
     val pendingReservationJson: String,
+    // 준비 정보를 어떻게 판단했는지, 전환 기록에 남겨 켠 뒤 효과를 잴 수 있게 한다
+    val readiness: ReadinessDecision,
 )
 
 private data class ReservationGuard(val pendingReservationJson: String?, val schedulingLease: Instant?) {

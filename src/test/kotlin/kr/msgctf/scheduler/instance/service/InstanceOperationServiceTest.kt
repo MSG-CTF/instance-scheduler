@@ -51,6 +51,7 @@ import kr.msgctf.scheduler.runtime.ImageReadinessClient
 import kr.msgctf.scheduler.runtime.ImageReadinessPreference
 import kr.msgctf.scheduler.runtime.ImageReadinessProperties
 import kr.msgctf.scheduler.runtime.ImageReadinessQuery
+import kr.msgctf.scheduler.runtime.ReadinessLookup
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeContainer
@@ -111,7 +112,7 @@ class InstanceOperationServiceTest {
             }
         }
         val readiness = ImageReadinessPreference(ImageReadinessProperties(enabled = true), ImageReadinessClient { query ->
-            tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}""")
+            ReadinessLookup.Answered(tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}"""))
         }, clock)
         assertFailsWith<SimulatedProcessDeath> {
             newService(repository, brokerClient = broker, readiness = readiness).progressRequested(instance.instanceId)
@@ -158,13 +159,13 @@ class InstanceOperationServiceTest {
             val instance = repository.save(newRequested())
             val broker = FakeBrokerClient()
             val lease = clock.instant().plusSeconds(300)
-            val readiness = ImageReadinessPreference(ImageReadinessProperties(enabled = true), ImageReadinessClient {
+            val readiness = ImageReadinessPreference(ImageReadinessProperties(enabled = true), ImageReadinessClient { query ->
                 when (change) {
                     "status" -> instance.status = InstanceStatus.STOPPING
                     "intent" -> instance.pendingReservation = "newer-intent"
                     "lease" -> instance.nextPollAt = lease
                 }
-                null
+                emptyReadiness(query)
             }, clock)
             newService(repository, brokerClient = broker, readiness = readiness).progressRequested(instance.instanceId)
             assertTrue(broker.reservationRequests.isEmpty(), change)
@@ -270,7 +271,7 @@ class InstanceOperationServiceTest {
         var lookups = 0
         val readiness = ImageReadinessPreference(
             ImageReadinessProperties(enabled = true, cacheTtl = Duration.ZERO),
-            ImageReadinessClient { lookups++; null }, clock,
+            ImageReadinessClient { query -> lookups++; emptyReadiness(query) }, clock,
         )
         val delegate = FakeBrokerClient()
         val broker = object : BrokerClient by delegate {
@@ -356,7 +357,7 @@ class InstanceOperationServiceTest {
             ImageReadinessProperties(enabled = true),
             ImageReadinessClient { query ->
                 queried = query
-                tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}""")
+                ReadinessLookup.Answered(tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}"""))
             }, clock,
         )
         val broker = object : BrokerClient by delegate {
@@ -380,9 +381,9 @@ class InstanceOperationServiceTest {
         val broker = FakeBrokerClient()
         val readiness = ImageReadinessPreference(
             ImageReadinessProperties(enabled = true),
-            ImageReadinessClient {
+            ImageReadinessClient { query ->
                 movingClock.advance(Duration.ofSeconds(31))
-                null
+                emptyReadiness(query)
             }, movingClock,
         )
         newService(repository, brokerClient = broker, clock = movingClock, readiness = readiness).progressRequested(instance.instanceId)
@@ -1368,6 +1369,125 @@ class InstanceOperationServiceTest {
         assertEquals(true, event.adminDetail?.contains("candidates=["))
         assertEquals(true, event.adminDetail?.contains("selected="))
         assertEquals(true, event.adminDetail?.contains("reservation="))
+    }
+
+    @Test
+    fun `records readiness off in the provisioning transition when the feature is disabled`() {
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        newService(repository, transitionEvents = transitionEvents).progressRequested(instance.instanceId)
+        val detail = transitionEvents.saved.single { it.toStatus == InstanceStatus.PROVISIONING }.adminDetail!!
+        assertTrue(detail.endsWith(", readiness=off"), detail)
+    }
+
+    @Test
+    fun `records the reserved target readiness and whether the cache answered`() {
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val first = repository.save(newRequested())
+        val second = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val original = delegate.getCandidates(BrokerCandidateRequest("test", clock.instant(), first.teamId, first.challengeId, first.instanceId, Architecture.AMD64, ResourceProfile(500, 512, 1024)))
+        val candidates = listOf("a", "b", "c").map { id -> original.candidates.first().copy(candidateId = id, runtime = original.candidates.first().runtime.copy(targetId = id)) }
+        val response = original.copy(candidates = candidates)
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest) = response
+        }
+        var lookups = 0
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient { query ->
+                lookups++
+                ReadinessLookup.Answered(tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"b","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}"""))
+            }, clock,
+        )
+        val service = newService(repository, brokerClient = broker, transitionEvents = transitionEvents, readiness = readiness)
+        service.progressRequested(first.instanceId)
+        service.progressRequested(second.instanceId)
+        val details = transitionEvents.saved.filter { it.toStatus == InstanceStatus.PROVISIONING }.map { it.adminDetail!! }
+        assertEquals(2, details.size)
+        assertEquals(listOf("b", "b"), delegate.reservationRequests.map { it.candidateId })
+        assertTrue(details[0].endsWith(", target=b, readiness=ready, readinessCache=miss"), details[0])
+        assertTrue(details[1].endsWith(", target=b, readiness=ready, readinessCache=hit"), details[1])
+        assertEquals(1, lookups)
+    }
+
+    @Test
+    fun `records readiness timeout once and skipped while lookups pause`() {
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val first = repository.save(newRequested())
+        val second = repository.save(newRequested())
+        var lookups = 0
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient { lookups++; ReadinessLookup.Timeout }, clock,
+        )
+        val service = newService(repository, transitionEvents = transitionEvents, readiness = readiness)
+        service.progressRequested(first.instanceId)
+        service.progressRequested(second.instanceId)
+        val details = transitionEvents.saved.filter { it.toStatus == InstanceStatus.PROVISIONING }.map { it.adminDetail!! }
+        assertEquals(InstanceStatus.PROVISIONING, first.status)
+        assertEquals(InstanceStatus.PROVISIONING, second.status)
+        assertTrue(details[0].endsWith(", readiness=timeout, readinessCache=miss"), details[0])
+        assertTrue(details[1].endsWith(", readiness=skipped"), details[1])
+        assertEquals(1, lookups)
+    }
+
+    @Test
+    fun `records readiness replay when a pending reservation is recovered`() {
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        var attempts = 0
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                attempts++
+                if (attempts == 1) throw IllegalStateException("response lost")
+                return delegate.createReservation(request)
+            }
+        }
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient { query -> emptyReadiness(query) }, clock,
+        )
+        val service = newService(repository, brokerClient = broker, transitionEvents = transitionEvents, readiness = readiness)
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        val detail = transitionEvents.saved.single { it.toStatus == InstanceStatus.PROVISIONING }.adminDetail!!
+        assertTrue(detail.startsWith("recovered request="), detail)
+        assertTrue(detail.endsWith(", readiness=replay"), detail)
+    }
+
+    @Test
+    fun `records the moved target when the broker reserves a different target than ranked`() {
+        val repository = TestInstanceRepository()
+        val transitionEvents = TestInstanceEventRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val original = delegate.getCandidates(BrokerCandidateRequest("test", clock.instant(), instance.teamId, instance.challengeId, instance.instanceId, Architecture.AMD64, ResourceProfile(500, 512, 1024)))
+        val candidates = listOf("a", "b").map { id -> original.candidates.first().copy(candidateId = id, runtime = original.candidates.first().runtime.copy(targetId = id)) }
+        val response = original.copy(candidates = candidates)
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest) = response
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse =
+                delegate.createReservation(request).copy(targetId = "b")
+        }
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient { query ->
+                ReadinessLookup.Answered(tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"a","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"},{"target_id":"b","ready":false,"ready_node_count":0,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}"""))
+            }, clock,
+        )
+        newService(repository, brokerClient = broker, transitionEvents = transitionEvents, readiness = readiness).progressRequested(instance.instanceId)
+        assertEquals("a", delegate.reservationRequests.single().candidateId)
+        assertEquals("b", instance.runtimeTargetId)
+        val detail = transitionEvents.saved.single { it.toStatus == InstanceStatus.PROVISIONING }.adminDetail!!
+        assertTrue(detail.endsWith(", target=b, readiness=not_ready, readinessCache=miss, readinessTargetMoved=true"), detail)
     }
 
     // HELD가 아닌 예약 응답은 선점 실패로 보고 재시도로 빠지는지 확인
@@ -5994,6 +6114,13 @@ class InstanceOperationServiceTest {
             assertEquals("operationId=$operationId, lastErrorCode=FAKE_FAILURE", error.adminDetail)
         }
     }
+
+    // 응답은 받았지만 준비된 target이 없는 정상 응답, 조회 멈춤에 걸리지 않는다
+    private fun emptyReadiness(query: ImageReadinessQuery): ReadinessLookup =
+        ReadinessLookup.Answered(
+            tools.jackson.databind.json.JsonMapper.builder().build()
+                .readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"${query.architecture}","targets":[]}"""),
+        )
 
     private fun newService(
         repository: TestInstanceRepository,

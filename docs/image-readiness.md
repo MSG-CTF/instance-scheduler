@@ -20,24 +20,73 @@ scheduler:
     lookup-timeout: 300ms
     cache-ttl: 10s
     max-observation-age: 60s
-    # Optional separate Scheduler readiness credential. Empty uses scheduler.runtime.token.
+    # Pause after timeout, 5xx, transport failure, invalid response or 401/403.
+    failure-backoff: 30s
+    # Pause after 404 (route missing) or 503 (Runtime has image preparation disabled).
+    not-found-backoff: 5m
+    # Required when enabled. Runtime answers the readiness route only to its dedicated
+    # readiness token and returns 403 to the create token, so there is no fallback.
     token: ${SCHEDULER_IMAGE_READINESS_TOKEN:}
   instance-policy:
     release-metadata-enabled: false
 ```
 
+`lookup-timeout` must stay within 1 second and both backoffs must be positive;
+startup fails otherwise. With `enabled: true` and an empty `token`, startup fails
+with the setting name in the message.
+
 The readiness transport uses `scheduler.runtime.base-url` but has a separate HTTP
 client and deadline. The deadline includes response-body transfer; create and
 operation timeout settings are not reused. Redirects are disabled. A dedicated
 response subscriber cancels transfer before buffering more than 256 KiB. A dedicated
-readiness token should be supplied when Runtime separates readiness authorization
-from create authorization. HTTP 401/403 produce a status-only warning; response
-bodies, tokens and transport exception text are never logged by this client.
+readiness token is required because Runtime grants the readiness route only to that
+credential. Response bodies, tokens and transport exception text are never logged;
+failures log the status code or the exception class name only.
 
 Disabled readiness performs no HTTP call. Missing targets, unknown observations,
 timeouts, authorization failures, missing routes, server errors and invalid
 responses give no preference and do not fail creation. Oversized requests (more
-than 50 distinct targets or 32 distinct images) skip the hint entirely.
+than 50 distinct targets or 32 distinct images) skip the hint entirely and are
+recorded as `not_attempted`.
+
+## Pausing lookups after failures
+
+A failed lookup must not cost every following create its full deadline while
+Runtime is down or not yet deployed. After a failure the Scheduler stops querying
+for a while and proceeds with the existing order; cache hits are still served.
+
+| Result | Recorded as | Pause |
+|---|---|---|
+| timeout | `timeout` | `failure-backoff` |
+| 401, 403 | `unauthorized` | `failure-backoff`, one WARN per pause naming the token setting |
+| 404, 503 | `not_found` | `not-found-backoff` |
+| 5xx, transport failure, unreadable or invalid body | `error` | `failure-backoff`, one WARN per pause |
+| other 4xx | `rejected` | none, one WARN each time the status changes (the request violates the contract) |
+| during a pause | `skipped` | no HTTP call |
+| request outside the lookup limits (image count, target count, non-immutable image) | `not_attempted` | no HTTP call |
+
+The pause starts from the failure that triggered it; concurrent failures keep the
+longest pause and do not log again. A 400 does not pause because waiting would not fix the
+request.
+
+## What the provisioning transition records
+
+Every SCHEDULING to PROVISIONING transition detail ends with the readiness
+decision so the effect of pre-pulled images can be measured against the
+PROVISIONING dwell time of PR #74 events.
+
+- `readiness=ready|not_ready|unknown` when Runtime answered: the state of the
+  target that was actually reserved. `not_ready` means Runtime observed the target
+  without the full image set; `unknown` means no usable observation (missing from
+  the response, no `observed_at`, expired, or too old).
+- `readiness=off|skipped|not_attempted|timeout|not_found|unauthorized|rejected|error`
+  when no answer was used, with the meaning from the table above.
+- `readiness=replay` when a pending reservation was recovered; readiness is never
+  consulted on that path.
+- `readinessCache=hit|miss` when a cached answer was served or an HTTP lookup ran; `skipped` carries no cache field.
+- `readinessTargetMoved=true` when the Broker reservation moved the instance to a
+  different target than the ranked candidate; the recorded state is that of the
+  reserved target.
 
 ## Evidence validation and caching
 
