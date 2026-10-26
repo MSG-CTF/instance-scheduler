@@ -763,13 +763,18 @@ class InstanceOperationService(
 
     // 다시 접수하기 전에 workload가 남았는지 묻고, 이미 지워졌으면 접수 없이 정리를 끝낸다
     // 접수를 이어 가야 하면 false를 돌려준다
-    // 조회가 실패하면 접수하지 않고 기다린다, 조회와 접수는 같은 런타임이 받으므로 조회가 안 되면 접수도 안 될 가능성이 높다
+    // 조회 실패만으로 삭제 접수까지 막지 않는다, 같은 request_id의 삭제는 별도로 재시도한다
     private fun completeIfAlreadyDeleted(instanceId: UUID): Boolean {
         val status = try {
             runtimeClient.getRuntimeStatus(instanceId)
         } catch (exception: Exception) {
-            retryCleanupLater(instanceId, "runtime status unavailable before delete resubmit, ${failureDetail(exception)}")
-            return true
+            // 삭제 접수도 실패하면 그 경로가 횟수와 backoff를 기록한다, 한 회차를 두 번 세지 않는다
+            log.warn(
+                "runtime status unavailable, continuing delete with the same request id: instanceId={}, reason={}",
+                instanceId,
+                failureDetail(exception),
+            )
+            return false
         }
         // 남아 있거나 저장된 정보가 없으면 접수에 맡긴다, 지울 것이 없으면 접수가 404로 답해 정리가 끝난다
         if (status !is RuntimeStatusResult.AlreadyDeleted) return false
