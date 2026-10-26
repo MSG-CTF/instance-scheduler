@@ -2,6 +2,8 @@ package kr.msgctf.scheduler.common.config
 
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerClient
+import kr.msgctf.scheduler.broker.FakeWindowsWorkerClient
+import kr.msgctf.scheduler.broker.WindowsWorkerClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import org.springframework.context.annotation.Bean
@@ -16,6 +18,9 @@ class FakeExternalClientConfig {
 
     @Bean
     fun brokerClient(): BrokerClient = FakeBrokerClient()
+
+    @Bean
+    fun windowsWorkerClient(): FakeWindowsWorkerClient = FakeWindowsWorkerClient()
 
     @Bean
     fun runtimeClient(): RuntimeClient = FakeRuntimeClient()

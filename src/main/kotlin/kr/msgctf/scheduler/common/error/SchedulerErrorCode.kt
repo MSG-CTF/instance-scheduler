@@ -55,6 +55,26 @@ enum class SchedulerErrorCode(
         HttpStatus.CONFLICT,
         "팀에서 실행할 수 있는 인스턴스 한도에 도달했습니다.",
     ),
+    // 같은 submission_id로 다른 내용의 Windows VM 배정 요청이 이미 저장됨
+    WINDOWS_ASSIGNMENT_CONFLICT(
+        HttpStatus.CONFLICT,
+        "같은 제출 ID로 다른 내용의 배정 요청이 이미 있습니다.",
+    ),
+    // 브로커에 지금 빌려줄 수 있는 Windows VM이 없음
+    NO_WINDOWS_WORKER_AVAILABLE(
+        HttpStatus.CONFLICT,
+        "지금 배정할 수 있는 Windows VM이 없습니다.",
+    ),
+    // 같은 submission_id의 배정이 이미 반납되었거나 만료됨
+    WINDOWS_ASSIGNMENT_ENDED(
+        HttpStatus.CONFLICT,
+        "이미 끝난 Windows VM 배정입니다.",
+    ),
+    // 스케줄러가 내준 적 없거나 브로커에 없는 lease_id
+    WINDOWS_ASSIGNMENT_NOT_FOUND(
+        HttpStatus.NOT_FOUND,
+        "Windows VM 배정을 찾을 수 없습니다.",
+    ),
     RESOURCE_UNAVAILABLE(
         HttpStatus.SERVICE_UNAVAILABLE,
         "현재 사용 가능한 리소스가 없습니다. 잠시 후 다시 시도해주세요.",
