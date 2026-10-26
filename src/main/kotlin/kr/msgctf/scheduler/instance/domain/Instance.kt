@@ -137,6 +137,10 @@ class Instance(
     @Column(name = "reservation_id")
     var reservationId: String? = null,
 
+    // 삭제 증명을 확인한 뒤 저장하는 반납 의도, Broker 확인 전에는 예약 ID와 함께 보관한다
+    @Column(name = "reservation_release_reason", length = 40)
+    var reservationReleaseReason: String? = null,
+
     // 결과를 모르는 예약 요청이다, 요청은 보냈지만 응답을 받지 못해 예약이 만들어졌는지 알 수 없다
     // 다음 주기에 이 요청을 그대로 다시 보내 결과를 확인한다
     // 후보를 새로 고르면 안 된다, 브로커는 이 인스턴스의 예약까지 빼고 자리를 세서 그 후보가 목록에서 빠질 수 있다

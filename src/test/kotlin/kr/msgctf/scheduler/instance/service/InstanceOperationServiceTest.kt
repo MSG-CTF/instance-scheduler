@@ -2547,6 +2547,55 @@ class InstanceOperationServiceTest {
         assertEquals("release-reservation-committed-SCHEDULER_CANCELLED", release.requestId)
     }
 
+    @Test
+    fun `lost release response leaves durable intent for a reconstructed service`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val requests = mutableListOf<BrokerReservationReleaseRequest>()
+        val movingClock = MutableClock(clock.instant())
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse {
+                requests += request
+                val result = delegate.releaseReservation(request)
+                if (requests.size == 1) throw IllegalStateException("response lost after release")
+                assertEquals(requests.first(), request)
+                return result
+            }
+        }
+        val instance = repository.save(newStopping().apply { reservationId = "committed-before-delete" })
+        val original = newService(repository, brokerClient = broker, clock = movingClock)
+        original.submitDelete(instance.instanceId)
+        original.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals("committed-before-delete", instance.reservationId)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED.name, instance.reservationReleaseReason)
+        movingClock.advance(Duration.ofSeconds(31))
+        newService(repository, brokerClient = broker, clock = movingClock).retryReservationRelease(instance.instanceId)
+        assertNull(instance.reservationId)
+        assertNull(instance.reservationReleaseReason)
+        assertEquals(2, requests.size)
+    }
+
+    @Test
+    fun `process death during release retains cleanup proof and reservation intent`() {
+        val repository = TestInstanceRepository()
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun releaseReservation(request: BrokerReservationReleaseRequest): BrokerReservationResponse =
+                throw Error("simulated process death before response")
+        }
+        val instance = repository.save(newStopping().apply { reservationId = "committed-before-crash" })
+        val original = newService(repository, brokerClient = broker)
+        original.submitDelete(instance.instanceId)
+        assertFailsWith<Error> { original.pollOperation(instance.instanceId) }
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals("committed-before-crash", instance.reservationId)
+        assertEquals(ReleaseReason.SCHEDULER_CANCELLED.name, instance.reservationReleaseReason)
+        newService(repository, brokerClient = delegate).retryReservationRelease(instance.instanceId)
+        assertNull(instance.reservationId)
+        assertNull(instance.reservationReleaseReason)
+    }
+
     // 자원 값 불일치가 아닌 거절은 예약을 건드리지 않는다, HELD가 아닌 예약을 반납해도 소용이 없다
     @Test
     fun `does not release reservation when commit is rejected for another reason`() {

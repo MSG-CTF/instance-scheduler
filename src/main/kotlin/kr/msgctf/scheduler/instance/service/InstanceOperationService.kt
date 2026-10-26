@@ -1297,15 +1297,15 @@ class InstanceOperationService(
         instance.attemptCount = 0
     }
 
-    // 예약 처리는 잠금 밖에서 하도록 tx 안에서는 id 회수만 한다
+    // 예약 처리는 잠금 밖에서 하며, 반납 의도는 먼저 같은 트랜잭션에 저장한다
     // 반납 사유는 행의 삭제 사유에서 정한다, 생성이 실패해 정리로 넘어온 행만 생성 실패로 알린다
     private fun takeReservation(instance: Instance): PendingRelease? {
         val reservationId = instance.reservationId ?: return null
-        instance.reservationId = null
         val reason = when (instance.deleteReason) {
             RuntimeDeleteReason.CREATE_FAILED_CLEANUP -> ReleaseReason.RUNTIME_CREATE_FAILED
             else -> ReleaseReason.SCHEDULER_CANCELLED
         }
+        instance.reservationReleaseReason = reason.name
         return PendingRelease(reservationId, instance.instanceId, reason)
     }
 
@@ -1344,21 +1344,41 @@ class InstanceOperationService(
             false
         }
 
-    // 반납 실패는 만료로 회수되므로 기록만 남긴다
+    // COMMITTED는 만료되지 않으므로 확인된 반납만 지우고 실패는 저장된 의도로 재시도한다
     // request_id에 사유를 넣는다, 같은 예약을 다른 사유로 다시 반납하면 다른 요청으로 보이게 하기 위해서다
     private fun releaseReservationQuietly(release: PendingRelease?) {
         if (release == null) return
+        val requestedAt = tx.execute {
+            instanceRepository.findByIdForUpdate(release.instanceId)?.createdAt
+        } ?: return
         try {
-            brokerClient.releaseReservation(
+            val response = brokerClient.releaseReservation(
                 BrokerReservationReleaseRequest(
                     requestId = "release-${release.reservationId}-${release.reason}",
-                    requestedAt = clock.instant(),
+                    requestedAt = requestedAt,
                     instanceId = release.instanceId,
                     reservationId = release.reservationId,
                     releaseReason = release.reason,
                 ),
             )
+            check(response.status in setOf(BrokerReservationStatus.RELEASED, BrokerReservationStatus.EXPIRED)) {
+                "Broker did not confirm reservation release"
+            }
+            tx.executeWithoutResult {
+                val instance = instanceRepository.findByIdForUpdate(release.instanceId) ?: return@executeWithoutResult
+                if (instance.reservationId == release.reservationId && instance.reservationReleaseReason == release.reason.name) {
+                    instance.reservationId = null
+                    instance.reservationReleaseReason = null
+                    if (instance.runtimeOperationId == null) instance.nextPollAt = null
+                }
+            }
         } catch (exception: Exception) {
+            tx.executeWithoutResult {
+                val instance = instanceRepository.findByIdForUpdate(release.instanceId) ?: return@executeWithoutResult
+                if (instance.reservationId == release.reservationId && instance.reservationReleaseReason == release.reason.name) {
+                    instance.nextPollAt = clock.instant().plus(operationProperties.backoffMax)
+                }
+            }
             log.warn(
                 "reservation release failed: instanceId={}, reservationId={}, releaseReason={}, reason={}",
                 release.instanceId,
@@ -1367,6 +1387,17 @@ class InstanceOperationService(
                 failureDetail(exception),
             )
         }
+    }
+
+    fun retryReservationRelease(instanceId: UUID) {
+        val release = tx.execute {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
+            val reason = instance.reservationReleaseReason ?: return@execute null
+            val reservationId = instance.reservationId ?: return@execute null
+            if (instance.nextPollAt?.isAfter(clock.instant()) == true) return@execute null
+            PendingRelease(reservationId, instanceId, ReleaseReason.valueOf(reason))
+        }
+        releaseReservationQuietly(release)
     }
 
     private fun storeAcceptedOperation(instance: Instance, accepted: RuntimeSubmitResult.Accepted) {
