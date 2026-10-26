@@ -25,3 +25,12 @@ springdoc:
     enabled: false
   swagger-ui:
     enabled: false
+
+scheduler:
+  image-readiness:
+    enabled: false
+    lookup-timeout: 300ms
+    cache-ttl: 10s
+    max-observation-age: 60s
+  instance-policy:
+    release-metadata-enabled: false

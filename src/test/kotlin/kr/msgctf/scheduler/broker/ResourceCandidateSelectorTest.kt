@@ -14,6 +14,24 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 
 class ResourceCandidateSelectorTest {
 
+    @Test
+    fun `readiness prefers targets within risk tiers while preserving spreading and mandatory checks`() {
+        val candidates = listOf(
+            newCandidate("low-a"), newCandidate("low-b"), newCandidate("low-c"),
+            newCandidate("medium", risk = ResourceRisk.MEDIUM),
+            newCandidate("high", risk = ResourceRisk.HIGH),
+            newCandidate("arm", architecture = Architecture.ARM64),
+            newCandidate("expired", validUntil = now),
+            newCandidate("full", fitCount = 0),
+        ).map { it.copy(runtime = it.runtime.copy(targetId = it.candidateId)) }
+        val response = newResponse(candidates = candidates)
+        val original = selector.rank(response, Architecture.AMD64, instanceId)
+        val preferred = original.filter { it.risk == ResourceRisk.LOW }.last().candidateId
+        val ranked = selector.rank(response, Architecture.AMD64, instanceId, setOf(preferred, "medium", "high", "arm", "expired", "full"))
+        assertEquals(listOf(preferred) + original.filter { it.candidateId != preferred }.map { it.candidateId }, ranked.map { it.candidateId })
+        assertEquals(original, selector.rank(response, Architecture.AMD64, instanceId, emptySet()))
+    }
+
     private val now = Instant.parse("2026-07-06T13:30:00Z")
     private val selector = ResourceCandidateSelector(
         clock = Clock.fixed(now, ZoneOffset.UTC),

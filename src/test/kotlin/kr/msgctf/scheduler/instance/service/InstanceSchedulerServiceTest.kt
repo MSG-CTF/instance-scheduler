@@ -52,7 +52,7 @@ class InstanceSchedulerServiceTest {
         val savedInstances = mutableListOf<Instance>()
         val instanceRepository = newInstanceRepository(savedInstances)
         val instanceSchedulerService = newService(instanceRepository = instanceRepository)
-        val command = newCommand(teamId = testUuid(201))
+        val command = newCommand(teamId = testUuid(201)).copy(releaseId = UUID.randomUUID())
 
         // when
         val result = instanceSchedulerService.createInstance(command)
@@ -69,6 +69,7 @@ class InstanceSchedulerServiceTest {
         assertEquals(command.containers, ContainerSpecCodec().decode(saved.containers!!))
         assertNull(saved.healthcheck)
         assertEquals(command.registryRevision, saved.registryRevision)
+        assertEquals(command.releaseId, saved.releaseId)
         assertEquals(command.isolationProfile, saved.isolationProfile)
         assertEquals(command.architecture, saved.architecture)
         assertEquals(command.resourceProfile.cpuMillicores, saved.cpuMillicores)
@@ -381,7 +382,14 @@ class InstanceSchedulerServiceTest {
         val instanceRepository = TestInstanceRepository()
         // 기본값이 아닌 값으로 두어야 격리 정책이 실제로 옮겨졌는지 확인된다
         val previous = instanceRepository.save(
-            newRunningInstance().apply { isolationProfile = IsolationProfile.PWN },
+            newRunningInstance().apply {
+                isolationProfile = IsolationProfile.PWN
+                releaseId = UUID.randomUUID()
+                architecture = Architecture.ARM64
+                releaseMetadataForwarded = true
+                val original = ContainerSpecCodec().decode(containers!!).single()
+                containers = ContainerSpecCodec().encode(listOf(original, original.copy(name = "helper", expose = false)))
+            },
         )
         val instanceSchedulerService = newService(instanceRepository = instanceRepository.repository)
 
@@ -405,6 +413,8 @@ class InstanceSchedulerServiceTest {
         assertEquals(previous.challengeId, fresh.challengeId)
         assertEquals(previous.containers, fresh.containers)
         assertEquals(previous.registryRevision, fresh.registryRevision)
+        assertEquals(previous.releaseId, fresh.releaseId)
+        assertNull(fresh.releaseMetadataForwarded)
         // 초기화 응답도 옛 인스턴스의 릴리스를 잇는다, 그 사이 Registry가 새 릴리스를 올렸어도 마찬가지다
         assertEquals(previous.registryRevision, result.registryRevision)
         assertEquals(IsolationProfile.PWN, fresh.isolationProfile)

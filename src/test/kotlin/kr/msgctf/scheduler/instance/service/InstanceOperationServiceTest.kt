@@ -31,6 +31,7 @@ import kr.msgctf.scheduler.broker.BrokerReservationResponse
 import kr.msgctf.scheduler.broker.BrokerReservationStatus
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.FakeBrokerMode
+import kr.msgctf.scheduler.broker.ResourceProfile
 import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
@@ -46,6 +47,10 @@ import kr.msgctf.scheduler.instance.domain.InstanceEventType
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.runtime.FakeRuntimeClient
 import kr.msgctf.scheduler.runtime.FakeRuntimeMode
+import kr.msgctf.scheduler.runtime.ImageReadinessClient
+import kr.msgctf.scheduler.runtime.ImageReadinessPreference
+import kr.msgctf.scheduler.runtime.ImageReadinessProperties
+import kr.msgctf.scheduler.runtime.ImageReadinessQuery
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeContainer
@@ -74,6 +79,152 @@ import org.springframework.web.client.HttpServerErrorException
 
 @ExtendWith(OutputCaptureExtension::class)
 class InstanceOperationServiceTest {
+
+    @Test
+    fun `expired reservation generation does not reserve an already expired candidate again`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val movingClock = MutableClock(clock.instant())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = object : BrokerClient by FakeBrokerClient() {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                movingClock.advance(Duration.ofSeconds(31))
+                return BrokerReservationResponse("expired", request.requestId, BrokerReservationStatus.EXPIRED, null)
+            }
+        }
+        newService(repository, brokerClient = broker, clock = movingClock).progressRequested(instance.instanceId)
+        assertEquals(1, requests.size)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+    }
+
+    @Test
+    fun `ambiguous reservation recovery ignores changed readiness and reuses original request`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var lookups = 0
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true, cacheTtl = Duration.ZERO),
+            ImageReadinessClient { lookups++; null }, clock,
+        )
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                if (requests.size == 1) throw IllegalStateException("response lost")
+                return delegate.createReservation(request)
+            }
+        }
+        newService(repository, brokerClient = broker, readiness = readiness).progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        newService(repository, brokerClient = broker, readiness = readiness).progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(2, requests.size)
+        assertEquals(requests.first(), requests.last())
+        assertEquals(1, lookups)
+    }
+
+    @Test
+    fun `release metadata forwarding decision survives restart flag changes and reconcile`() {
+        for (enabled in listOf(false, true)) {
+            val repository = TestInstanceRepository()
+            val release = UUID.randomUUID()
+            val instance = repository.save(newRequested().apply { releaseId = release })
+            val delegate = FakeRuntimeClient()
+            val requests = mutableListOf<RuntimeCreateRequest>()
+            val reconciles = mutableListOf<RuntimeCreateRequest>()
+            val runtime = object : RuntimeClient by delegate {
+                override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                    requests += request
+                    if (requests.size == 1) throw HttpServerErrorException(HttpStatus.BAD_GATEWAY)
+                    return delegate.submitCreate(request)
+                }
+                override fun reconcileCreate(request: RuntimeCreateRequest): RuntimeSubmitResult.Accepted? {
+                    reconciles += request
+                    return null
+                }
+                override fun getRuntimeStatus(instanceId: UUID) = RuntimeStatusResult.NotStored
+            }
+            newService(repository, runtimeClient = runtime, policyProperties = InstancePolicyProperties(releaseMetadataEnabled = enabled))
+                .progressRequested(instance.instanceId)
+            instance.nextPollAt = clock.instant()
+            val restarted = newService(repository, runtimeClient = runtime, policyProperties = InstancePolicyProperties(releaseMetadataEnabled = !enabled))
+            restarted.resubmitCreate(instance.instanceId)
+            assertEquals(2, requests.size)
+            assertEquals(if (enabled) release else null, requests.first().releaseId)
+            assertEquals(if (enabled) Architecture.AMD64 else null, requests.first().architecture)
+            assertEquals(requests.first(), requests.last())
+            instance.status = InstanceStatus.CLEANUP_PENDING
+            instance.runtimeOperationId = null
+            instance.runtimeWorkloadId = null
+            restarted.submitDelete(instance.instanceId)
+            assertEquals(requests.first(), reconciles.single())
+        }
+    }
+
+    @Test
+    fun `predeployment provisioning rows never acquire metadata on replay`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newStalledProvisioning().apply { releaseId = UUID.randomUUID() })
+        val runtime = CapturingRuntimeClient()
+        newService(repository, runtimeClient = runtime, policyProperties = InstancePolicyProperties(releaseMetadataEnabled = true))
+            .resubmitCreate(instance.instanceId)
+        assertNull(runtime.creates.single().releaseId)
+        assertNull(runtime.creates.single().architecture)
+    }
+
+    @Test
+    fun `readiness queries full durable images and reserves preferred eligible target`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val codec = ContainerSpecCodec()
+        val primary = codec.decode(instance.containers!!).single()
+        val helper = primary.copy(name = "helper", image = TEST_DIGEST_IMAGE.replace("@sha256:", "-helper@sha256:"), expose = false)
+        instance.containers = codec.encode(listOf(primary, helper))
+        val delegate = FakeBrokerClient()
+        val original = delegate.getCandidates(BrokerCandidateRequest("test", clock.instant(), instance.teamId, instance.challengeId, instance.instanceId, Architecture.AMD64, ResourceProfile(500, 512, 1024)))
+        val candidates = listOf("a", "b", "c").map { id -> original.candidates.first().copy(candidateId = id, runtime = original.candidates.first().runtime.copy(targetId = id)) }
+        val response = original.copy(candidates = candidates)
+        val preferred = ResourceCandidateSelector(clock).rank(response, Architecture.AMD64, instance.instanceId).last().runtime.targetId
+        var queried: ImageReadinessQuery? = null
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient { query ->
+                queried = query
+                tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}""")
+            }, clock,
+        )
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest) = response
+        }
+        val runtime = CapturingRuntimeClient()
+        newService(repository, brokerClient = broker, runtimeClient = runtime, readiness = readiness).progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals(preferred, delegate.reservationRequests.single().candidateId)
+        assertEquals(setOf(primary.image, helper.image), queried!!.images.toSet())
+        assertEquals(Architecture.AMD64, queried!!.architecture)
+        assertEquals(3, queried!!.targetIds.size)
+        assertEquals(listOf(primary.image, helper.image), runtime.creates.single().workload.containers.map { it.image })
+    }
+
+    @Test
+    fun `candidate that expires during readiness lookup is never reserved`() {
+        val movingClock = MutableClock(clock.instant())
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val broker = FakeBrokerClient()
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient {
+                movingClock.advance(Duration.ofSeconds(31))
+                null
+            }, movingClock,
+        )
+        newService(repository, brokerClient = broker, clock = movingClock, readiness = readiness).progressRequested(instance.instanceId)
+        assertTrue(broker.reservationRequests.isEmpty())
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+    }
 
     private val clock = Clock.fixed(Instant.parse("2026-08-12T00:00:00Z"), ZoneOffset.UTC)
 
@@ -5391,6 +5542,7 @@ class InstanceOperationServiceTest {
         clock: Clock = this.clock,
         policyProperties: InstancePolicyProperties = InstancePolicyProperties(),
         transitionEvents: TestInstanceEventRepository = TestInstanceEventRepository(),
+        readiness: ImageReadinessPreference = ImageReadinessPreference(),
     ): InstanceOperationService =
         InstanceOperationService(
             transitionService = InstanceStateTransitionService(transitionEvents.repository),
@@ -5407,6 +5559,7 @@ class InstanceOperationServiceTest {
             operationProperties = operationProperties,
             clock = clock,
             tx = tx,
+            imageReadinessPreference = readiness,
         )
 
     // 같은 조건의 후보를 여러 개 돌려주는 브로커, reject가 예외를 주면 그 예약을 거절한다

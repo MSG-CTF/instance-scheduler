@@ -35,6 +35,7 @@ import kr.msgctf.scheduler.instance.domain.ServiceEndpoint
 import kr.msgctf.scheduler.instance.dto.InstanceResult
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.runtime.ImageReadinessPreference
 import kr.msgctf.scheduler.runtime.IsolationProfile
 import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeContainer
@@ -74,6 +75,7 @@ class InstanceOperationService(
     private val operationProperties: OperationProperties,
     private val clock: Clock,
     private val tx: TransactionOperations,
+    private val imageReadinessPreference: ImageReadinessPreference = ImageReadinessPreference(),
 ) {
 
     private val log = LoggerFactory.getLogger(javaClass)
@@ -129,6 +131,7 @@ class InstanceOperationService(
         var reservationTaken = false
         // 재접수가 같은 요청을 보내도록 첫 접수 전에 정해 행에 남긴다
         val forwardHealthcheck = spec.healthcheck != null && policyProperties.healthcheckEnabled
+        val submittedSpec = spec.copy(forwardReleaseMetadata = policyProperties.releaseMetadataEnabled)
         val target = tx.execute {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute null
             // 예약을 잡는 사이 행이 SCHEDULING을 떠났으면 진행하지 않는다
@@ -150,6 +153,7 @@ class InstanceOperationService(
             instance.runtimeTargetId = placement.runtimeTargetId
             instance.pendingReservation = null
             instance.healthcheckForwarded = forwardHealthcheck
+            instance.releaseMetadataForwarded = submittedSpec.forwardReleaseMetadata
             transitionService.move(
                 instance,
                 InstanceStatus.PROVISIONING,
@@ -174,7 +178,7 @@ class InstanceOperationService(
             return
         }
 
-        submitCreateAndStore(instanceId, spec, target, forwardHealthcheck, firstSubmit = true)
+        submitCreateAndStore(instanceId, submittedSpec, target, forwardHealthcheck, firstSubmit = true)
     }
 
     // 이전 실행을 지우는 동안 워커와 DB 잠금을 붙잡지 않고 다음 주기로 미룬다
@@ -351,6 +355,8 @@ class InstanceOperationService(
         instanceId = instanceId,
         teamId = spec.teamId,
         isolationProfile = spec.isolationProfile,
+        releaseId = spec.releaseId.takeIf { spec.forwardReleaseMetadata },
+        architecture = spec.architecture.takeIf { spec.forwardReleaseMetadata },
         target = target,
         workload = RuntimeWorkload(
             containers = spec.containers.map { container ->
@@ -1343,7 +1349,11 @@ class InstanceOperationService(
                     resourceProfile = spec.resourceProfile,
                 ),
             )
-            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId)
+            val eligible = resourceCandidateSelector.rank(response, spec.architecture, instanceId)
+            val readyTargets = imageReadinessPreference.readyTargets(
+                spec.architecture, spec.containers.map { it.image }, eligible.map { it.runtime.targetId },
+            )
+            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readyTargets)
         } catch (exception: Exception) {
             handleBrokerFailure(instanceId, exception)
             return null
@@ -1445,6 +1455,7 @@ class InstanceOperationService(
         var lastRejection: BrokerRejectedException? = null
         var heldElsewhere = false
         for (candidate in candidates.take(MAX_RESERVATION_CANDIDATES)) {
+            if (!candidate.validUntil.isAfter(clock.instant())) continue
             try {
                 return candidate to reserve(instanceId, spec, candidate)
             } catch (exception: BrokerRejectedException) {
@@ -1477,7 +1488,10 @@ class InstanceOperationService(
         if (heldElsewhere) {
             waitForHeldReservation(instanceId, checkNotNull(lastRejection))
         } else {
-            handleBrokerFailure(instanceId, checkNotNull(lastRejection))
+            handleBrokerFailure(instanceId, lastRejection ?: SchedulerException(
+                errorCode = SchedulerErrorCode.RESOURCE_UNAVAILABLE,
+                adminDetail = "all candidates expired before reservation",
+            ))
         }
         return null
     }
@@ -1511,6 +1525,12 @@ class InstanceOperationService(
         val baseRequestId = "resv-$instanceId-${candidate.candidateId}"
         var reservation: BrokerReservationResponse? = null
         for (generation in 1..MAX_RESERVATION_GENERATIONS) {
+            if (!candidate.validUntil.isAfter(clock.instant())) {
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.RESOURCE_UNAVAILABLE,
+                    adminDetail = "candidate expired before reservation: ${candidate.candidateId}",
+                )
+            }
             val requestId = if (generation == 1) baseRequestId else "$baseRequestId-$generation"
             // 확실한 거절이 아니면 예약이 만들어졌는지 모른다, 호출자가 이 요청을 저장하도록 넘긴다
             // 5xx나 이유 코드가 없는 응답도 같다, 브로커가 예약을 저장한 뒤 프록시 연결이 끊겼을 수 있다
@@ -1719,6 +1739,8 @@ class InstanceOperationService(
             // 저장된 행은 항상 값이 있다, 없는 것은 저장을 거치지 않은 테스트 행뿐이다
             requestedAt = instance.createdAt ?: clock.instant(),
             pendingReservation = PendingReservationCodec.decodeOrNull(instance.pendingReservation, instance.instanceId),
+            releaseId = instance.releaseId,
+            forwardReleaseMetadata = instance.releaseMetadataForwarded == true,
         )
     }
 
@@ -1784,6 +1806,8 @@ private data class WorkloadSpec(
     // 브로커 예약의 requested_at, 재시도마다 같아야 새 예약 대신 기존 예약을 돌려받는다
     val requestedAt: Instant,
     val pendingReservation: PendingReservation? = null,
+    val releaseId: UUID? = null,
+    val forwardReleaseMetadata: Boolean = false,
 )
 
 // 결과를 모르는 예약 요청을 다시 보낸 결과

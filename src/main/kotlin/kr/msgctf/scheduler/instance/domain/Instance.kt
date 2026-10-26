@@ -88,6 +88,10 @@ class Instance(
     @Column(name = "healthcheck_forwarded")
     var healthcheckForwarded: Boolean? = null,
 
+    // Persist before the first Runtime call. Null belongs to predeployment requests.
+    @Column(name = "release_metadata_forwarded")
+    var releaseMetadataForwarded: Boolean? = null,
+
     // 런타임이 생성 operation을 FAILED로 끝냈다고 알려 줬는지
     // true면 런타임 큐에 이 생성이 남아 있지 않다, 운영자 강제 정리는 이 행만 받는다
     // 실패한 생성이 남긴 자원이 없다는 뜻은 아니다, 그것은 강제 정리가 runtime-status로 따로 묻는다

@@ -20,6 +20,7 @@ class ResourceCandidateSelector(
         response: BrokerCandidateResponse,
         requestedArchitecture: Architecture,
         instanceId: UUID,
+        readyTargetIds: Set<String> = emptySet(),
     ): List<ResourceCandidate> {
         if (response.status != BrokerCandidateStatus.OK) {
             throw unavailable(
@@ -35,7 +36,9 @@ class ResourceCandidateSelector(
         val ranked = verdicts
             .filter { (_, verdict) -> verdict == ELIGIBLE }
             .map { (candidate, _) -> candidate }
-            .sortedWith(compareBy<ResourceCandidate> { riskOrder(it.risk) }.thenBy { spreadKey(instanceId, it) })
+            .sortedWith(compareBy<ResourceCandidate> { riskOrder(it.risk) }
+                .thenBy { it.runtime.targetId !in readyTargetIds }
+                .thenBy { spreadKey(instanceId, it) })
 
         log.info(
             "candidate screening: requestId={}, requestedArchitecture={}, verdicts=[{}], ranked={}",
