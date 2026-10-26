@@ -29,6 +29,7 @@ scheduler:
 The readiness transport uses `scheduler.runtime.base-url` but has a separate HTTP
 client and deadline. The deadline includes response-body transfer; create and
 operation timeout settings are not reused. Redirects are disabled. A dedicated
+response subscriber cancels transfer before buffering more than 256 KiB. A dedicated
 readiness token should be supplied when Runtime separates readiness authorization
 from create authorization. HTTP 401/403 produce a status-only warning; response
 bodies, tokens and transport exception text are never logged by this client.

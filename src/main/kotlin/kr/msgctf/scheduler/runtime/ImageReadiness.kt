@@ -5,12 +5,15 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CompletionStage
+import java.util.concurrent.Flow
 import kr.msgctf.scheduler.broker.Architecture
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.slf4j.LoggerFactory
@@ -69,17 +72,56 @@ class HttpImageReadinessClient(
             .header("Authorization", "Bearer $token")
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(query), UTF_8)).build()
-        val pending = client.sendAsync(request, HttpResponse.BodyHandlers.ofString(UTF_8))
+        val pending = client.sendAsync(request, HttpResponse.BodyHandler { LimitedBodySubscriber(262144) })
         return try {
             val response = pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS)
             if (response.statusCode() == 401 || response.statusCode() == 403) {
                 log.warn("image readiness authorization rejected: status={}", response.statusCode())
             }
-            if (response.statusCode() != 200 || response.body().length > 262144) null
+            if (response.statusCode() != 200) null
             else MAPPER.readTree(response.body())
         } finally {
             if (!pending.isDone) pending.cancel(true)
         }
+    }
+}
+
+// Check bytes before passing buffers to the accumulating delegate. Cancellation stops
+// a large/streaming response instead of waiting for the request deadline or allocating it.
+private class LimitedBodySubscriber(private val maxBytes: Long) : HttpResponse.BodySubscriber<ByteArray> {
+    private val delegate = HttpResponse.BodySubscribers.ofByteArray()
+    private var subscription: Flow.Subscription? = null
+    private var received = 0L
+    private var terminated = false
+
+    override fun getBody(): CompletionStage<ByteArray> = delegate.body
+
+    override fun onSubscribe(subscription: Flow.Subscription) {
+        this.subscription = subscription
+        delegate.onSubscribe(subscription)
+    }
+
+    override fun onNext(buffers: List<ByteBuffer>) {
+        if (terminated) return
+        received += buffers.sumOf { it.remaining().toLong() }
+        if (received > maxBytes) {
+            subscription?.cancel()
+            onError(IllegalStateException("image readiness response exceeds byte limit"))
+        } else {
+            delegate.onNext(buffers)
+        }
+    }
+
+    override fun onError(error: Throwable) {
+        if (terminated) return
+        terminated = true
+        delegate.onError(error)
+    }
+
+    override fun onComplete() {
+        if (terminated) return
+        terminated = true
+        delegate.onComplete()
     }
 }
 

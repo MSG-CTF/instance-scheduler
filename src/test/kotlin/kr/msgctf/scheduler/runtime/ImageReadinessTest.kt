@@ -93,6 +93,34 @@ class ImageReadinessTest {
     }
 
     @Test
+    fun `oversized streamed response is cancelled before waiting for the remaining body`() {
+        val releaseServer = java.util.concurrent.CountDownLatch(1)
+        withServer { server ->
+            server.createContext("/v1/image-readiness/query") { exchange ->
+                runCatching {
+                    exchange.sendResponseHeaders(200, 1024 * 1024L)
+                    exchange.responseBody.write(ByteArray(262145) { ' '.code.toByte() })
+                    exchange.responseBody.flush()
+                    releaseServer.await(3, java.util.concurrent.TimeUnit.SECONDS)
+                    exchange.responseBody.close()
+                }
+            }
+            val preference = ImageReadinessPreference(
+                ImageReadinessProperties(enabled = true),
+                HttpImageReadinessClient("http://127.0.0.1:${server.address.port}", "readiness-secret", Duration.ofSeconds(2)),
+                Clock.fixed(now, ZoneOffset.UTC),
+            )
+            try {
+                val started = System.nanoTime()
+                assertEquals(emptySet(), preference.readyTargets(Architecture.AMD64, listOf(image), listOf("a")))
+                assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(1))
+            } finally {
+                releaseServer.countDown()
+            }
+        }
+    }
+
+    @Test
     fun `invalid evidence never becomes a positive preference`() {
         val query = ImageReadinessQuery(Architecture.AMD64, listOf(image), listOf("a"))
         val valid = response(query)
