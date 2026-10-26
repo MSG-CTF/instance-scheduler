@@ -20,3 +20,5 @@ MSG CTF 문제 인스턴스의 생성과 정리를 맡는 스케줄러다.
 실행 설정 계약: [환경변수와 비밀값](docs/execution-settings.md)
 
 초기화 동작과 대기 설정: [이전 실행 정리와 용량 관측 대기](docs/replacement-wait.md)
+
+Gateway 연동: [공개 연결 정보와 정리 확인·재시도](docs/gateway-v1-transport-cleanup.md)

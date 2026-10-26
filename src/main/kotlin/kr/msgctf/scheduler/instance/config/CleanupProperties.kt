@@ -16,7 +16,8 @@ data class CleanupProperties(
     val fixedDelay: Duration = Duration.ofSeconds(30),
     // runtime 삭제 재시도 한도
     // 이 횟수에 닿아도 FAILED로 바꾸지 않는다, 오류 이벤트를 한 번 남기는 시점으로만 쓴다
-    // 정리는 workload가 지워진 것을 확인할 때까지 재시도 간격 상한마다 이어 간다
+    // 접수 실패와 조회 실패 같은 일시적인 실패는 재시도 간격 상한마다 이어 간다
+    // 런타임이 삭제 실패를 확정하면 횟수와 상관없이 FAILED로 두고 운영자 retry-cleanup을 기다린다
     val retryLimit: Int = 5,
     // workload id를 모르는 채로 정리할 때 runtime에 정보가 저장되기를 기다리는 시간
     // 넘어서도 정리를 끝내지 않는다, 오류 이벤트로 알리고 다음 알림 시각을 이만큼 뒤로 민다

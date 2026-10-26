@@ -60,6 +60,16 @@ class ApiAuthIntegrationTest {
     }
 
     @Test
+    fun `rejects retry cleanup without token`() {
+        // when & then
+        mockMvc.post("/api/instances/${UUID.randomUUID()}/retry-cleanup")
+            .andExpect {
+                status { isUnauthorized() }
+                jsonPath("$.code") { value("UNAUTHORIZED") }
+            }
+    }
+
+    @Test
     fun `windows assignment requires the api token`() {
         mockMvc.post("/api/windows-assignments") {
             contentType = MediaType.APPLICATION_JSON
