@@ -4896,34 +4896,109 @@ class InstanceOperationServiceTest {
         assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
-    // 한도를 넘긴 뒤 확인 조회까지 실패하면 접수하지 않고 기다린다, 상태와 예약도 그대로 둔다
+    // 조회 경로만 실패해도 정상 삭제는 같은 request_id로 이어 가고, 삭제 확인 뒤 한 번만 반납한다
     @Test
-    fun `waits past the limit when runtime status lookup fails`() {
+    fun `retries the same delete and releases once when only runtime status lookup fails`() {
+        for (initial in listOf(newStopping(), newCleanupPending())) {
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val events = TestInstanceEventRepository()
+            val movingClock = MutableClock(clock.instant())
+            val instance = repository.save(initial.apply { reservationId = "reservation-held" })
+            val delegate = FakeRuntimeClient()
+            val deletes = mutableListOf<RuntimeDeleteRequest>()
+            var rejectFirstDelete = true
+            var lookups = 0
+            val runtimeClient = object : RuntimeClient by delegate {
+                override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                    lookups += 1
+                    throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "status route unavailable")
+                }
+
+                override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                    deletes += request
+                    if (rejectFirstDelete) {
+                        rejectFirstDelete = false
+                        throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "first delete unavailable")
+                    }
+                    return delegate.submitDelete(request)
+                }
+            }
+            newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events, clock = movingClock)
+                .submitDelete(instance.instanceId)
+            assertEquals(1, instance.cleanupRetryCount)
+            assertNull(instance.runtimeOperationId)
+            assertEquals("reservation-held", instance.reservationId)
+            assertTrue(broker.releaseRequests.isEmpty())
+            movingClock.advance(Duration.between(movingClock.instant(), assertNotNull(instance.nextPollAt)))
+
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events, clock = movingClock)
+            service.submitDelete(instance.instanceId)
+            assertEquals(1, lookups)
+            assertEquals(2, deletes.size)
+            assertEquals(setOf("runtime-delete-${instance.instanceId}"), deletes.map { it.requestId }.toSet())
+            assertEquals(1, instance.cleanupRetryCount)
+            assertNotNull(instance.runtimeOperationId)
+            assertEquals("reservation-held", instance.reservationId)
+            service.pollOperation(instance.instanceId)
+            service.submitDelete(instance.instanceId)
+            service.pollOperation(instance.instanceId)
+            assertEquals(InstanceStatus.CLEANED, instance.status)
+            assertNull(instance.reservationId)
+            assertEquals(listOf("reservation-held"), broker.releaseRequests.map { it.reservationId })
+            assertEquals(2, deletes.size)
+            assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+        }
+    }
+
+    // 조회와 접수가 모두 실패하면 한 회차에 실패를 한 번만 세고, backoff와 예약을 유지한다
+    @Test
+    fun `backs off past the limit when runtime status and delete both fail`() {
         // given
         val repository = TestInstanceRepository()
         val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val movingClock = MutableClock(clock.instant())
         val instance = repository.save(
             newCleanupPending().apply {
-                cleanupRetryCount = CleanupProperties().retryLimit
+                cleanupRetryCount = 1
                 reservationId = "reservation-held"
             },
         )
+        val deletes = mutableListOf<RuntimeDeleteRequest>()
+        var lookups = 0
         val runtimeClient = SubmitCountingRuntimeClient(
-            status = { throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "k3s unavailable") },
+            status = {
+                lookups += 1
+                throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "status unavailable")
+            },
+            submit = { request ->
+                deletes += request
+                throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "delete unavailable")
+            },
         )
-        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events, clock = movingClock)
 
         // when
-        service.submitDelete(instance.instanceId)
+        repeat(10) { pass ->
+            service.submitDelete(instance.instanceId)
+            assertEquals(pass + 2, instance.cleanupRetryCount)
+            val delay = Duration.between(movingClock.instant(), assertNotNull(instance.nextPollAt))
+            assertTrue(delay.isPositive)
+            assertTrue(delay <= OperationProperties().backoffMax)
+            movingClock.advance(delay)
+        }
 
         // then
-        assertEquals(0, runtimeClient.deleteSubmits)
+        assertEquals(10, lookups)
+        assertEquals(10, runtimeClient.deleteSubmits)
+        assertEquals(setOf("runtime-delete-${instance.instanceId}"), deletes.map { it.requestId }.toSet())
         assertNull(instance.runtimeOperationId)
         assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
-        assertEquals(CleanupProperties().retryLimit + 1, instance.cleanupRetryCount)
+        assertEquals(11, instance.cleanupRetryCount)
         assertEquals("reservation-held", instance.reservationId)
         assertEquals(emptyList(), broker.releasedReservations)
-        assertNotNull(instance.nextPollAt)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
     // 런타임이 한동안 접수를 못 받다가 돌아오면 그때 삭제가 접수되어 정리가 끝나야 한다
