@@ -81,6 +81,168 @@ import org.springframework.web.client.HttpServerErrorException
 class InstanceOperationServiceTest {
 
     @Test
+    fun `process loss after readiness preferred reservation recovers exact intent before fresh selection`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val delegate = FakeBrokerClient()
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        var response: BrokerCandidateResponse? = null
+        var preferred = ""
+        val broker = object : BrokerClient by delegate {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                val original = delegate.getCandidates(request)
+                val candidates = listOf("a", "b", "c", "d").map { id -> original.candidates.single().copy(
+                    candidateId = id, runtime = original.candidates.single().runtime.copy(targetId = id),
+                ) }
+                return original.copy(candidates = candidates).also {
+                    response = it
+                    preferred = ResourceCandidateSelector(clock).rank(it, Architecture.AMD64, instance.instanceId).last().candidateId
+                }
+            }
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                if (requests.size == 1) throw SimulatedProcessDeath()
+                if (request != requests.first()) throw BrokerRejectedException("INSTANCE_ALREADY_RESERVED", "already held", httpStatus = 409)
+                return BrokerReservationResponse("accepted-before-crash", request.requestId, BrokerReservationStatus.HELD, null)
+            }
+        }
+        val readiness = ImageReadinessPreference(ImageReadinessProperties(enabled = true), ImageReadinessClient { query ->
+            tools.jackson.databind.json.JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${clock.instant()}","valid_until":"${clock.instant().plusSeconds(10)}"}]}""")
+        }, clock)
+        assertFailsWith<SimulatedProcessDeath> {
+            newService(repository, brokerClient = broker, readiness = readiness).progressRequested(instance.instanceId)
+        }
+        assertEquals(InstanceStatus.SCHEDULING, instance.status)
+        assertNotNull(instance.pendingReservation)
+        assertEquals(preferred, requests.single().candidateId)
+        assertEquals(preferred, ResourceCandidateSelector(clock).rank(response!!, Architecture.AMD64, instance.instanceId).last().candidateId)
+        newService(repository, brokerClient = broker).progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertEquals("accepted-before-crash", instance.reservationId)
+        assertEquals(2, requests.size)
+        assertEquals(requests.first(), requests.last())
+        assertEquals(1, candidateQueries)
+        assertNull(instance.pendingReservation)
+    }
+
+    @Test
+    fun `process loss in later reservation generation recovers that exact generation`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        val broker = object : BrokerClient by FakeBrokerClient() {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                if (requests.size == 1) return BrokerReservationResponse("expired", request.requestId, BrokerReservationStatus.EXPIRED, null)
+                if (requests.size == 2) throw SimulatedProcessDeath()
+                return BrokerReservationResponse("generation-two", request.requestId, BrokerReservationStatus.HELD, null)
+            }
+        }
+        assertFailsWith<SimulatedProcessDeath> { newService(repository, brokerClient = broker).progressRequested(instance.instanceId) }
+        val pending = PendingReservationCodec.decodeOrNull(instance.pendingReservation, instance.instanceId)
+        assertEquals("${requests.first().requestId}-2", pending?.requestId)
+        newService(repository, brokerClient = broker).progressRequested(instance.instanceId)
+        assertEquals(3, requests.size)
+        assertEquals(requests[1], requests[2])
+        assertEquals("generation-two", instance.reservationId)
+    }
+
+    @Test
+    fun `reservation intent claim cannot overwrite changed status intent or scheduling lease`() {
+        for (change in listOf("status", "intent", "lease")) {
+            val repository = TestInstanceRepository()
+            val instance = repository.save(newRequested())
+            val broker = FakeBrokerClient()
+            val lease = clock.instant().plusSeconds(300)
+            val readiness = ImageReadinessPreference(ImageReadinessProperties(enabled = true), ImageReadinessClient {
+                when (change) {
+                    "status" -> instance.status = InstanceStatus.STOPPING
+                    "intent" -> instance.pendingReservation = "newer-intent"
+                    "lease" -> instance.nextPollAt = lease
+                }
+                null
+            }, clock)
+            newService(repository, brokerClient = broker, readiness = readiness).progressRequested(instance.instanceId)
+            assertTrue(broker.reservationRequests.isEmpty(), change)
+            if (change == "intent") assertEquals("newer-intent", instance.pendingReservation)
+            if (change == "lease") assertEquals(lease, instance.nextPollAt)
+        }
+    }
+
+    @Test
+    fun `late ambiguous response cannot overwrite a newer pending intent or lease`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        val lease = clock.instant().plusSeconds(300)
+        val broker = object : BrokerClient by FakeBrokerClient() {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                instance.pendingReservation = "newer-intent"
+                instance.nextPollAt = lease
+                throw IllegalStateException("late response lost")
+            }
+        }
+        newService(repository, brokerClient = broker).progressRequested(instance.instanceId)
+        assertEquals("newer-intent", instance.pendingReservation)
+        assertEquals(lease, instance.nextPollAt)
+        assertEquals(0, instance.attemptCount)
+    }
+
+    @Test
+    fun `late held response cannot finalize over a newer intent or scheduling lease`() {
+        for (change in listOf("intent", "lease")) {
+            val repository = TestInstanceRepository()
+            val instance = repository.save(newRequested())
+            val lease = clock.instant().plusSeconds(300)
+            val delegate = FakeBrokerClient()
+            var originalIntent: String? = null
+            val broker = object : BrokerClient by delegate {
+                override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                    originalIntent = instance.pendingReservation
+                    if (change == "intent") instance.pendingReservation = "newer-intent"
+                    else instance.nextPollAt = lease
+                    return delegate.createReservation(request)
+                }
+            }
+            val runtime = CapturingRuntimeClient()
+            newService(repository, brokerClient = broker, runtimeClient = runtime).progressRequested(instance.instanceId)
+            assertEquals(InstanceStatus.SCHEDULING, instance.status)
+            assertTrue(runtime.creates.isEmpty())
+            assertTrue(delegate.releasedReservations.isEmpty())
+            assertEquals(if (change == "intent") "newer-intent" else originalIntent, instance.pendingReservation)
+            if (change == "lease") assertEquals(lease, instance.nextPollAt)
+        }
+    }
+
+    @Test
+    fun `reservation HTTP runs after its intent transaction commits and intent remains through acceptance`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested())
+        var insideTransaction = false
+        val tx = object : TransactionOperations {
+            override fun <T> execute(action: TransactionCallback<T>): T {
+                insideTransaction = true
+                return try { action.doInTransaction(org.springframework.transaction.support.SimpleTransactionStatus()) }
+                finally { insideTransaction = false }
+            }
+        }
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                assertFalse(insideTransaction)
+                assertEquals(request.requestId, PendingReservationCodec.decodeOrNull(instance.pendingReservation, instance.instanceId)?.requestId)
+                return delegate.createReservation(request)
+            }
+        }
+        newService(repository, brokerClient = broker, tx = tx).progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instance.status)
+        assertNull(instance.pendingReservation)
+    }
+
+    private class SimulatedProcessDeath : Error("simulated process loss after Broker acceptance")
+
+    @Test
     fun `expired reservation generation does not reserve an already expired candidate again`() {
         val repository = TestInstanceRepository()
         val instance = repository.save(newRequested())

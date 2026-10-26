@@ -54,12 +54,12 @@ class ReleaseIdMigrationTest {
         }
 
         val current = flyway()
-        // V19 release_id, V20 replaced_instance_id, V21 event_seq
-        assertEquals(3, current.migrate().migrationsExecuted)
+        // V19 release_id, V20 replaced_instance_id, V21 event_seq, V22 metadata latch
+        assertEquals(4, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
-                "SELECT status, containers, create_failure_confirmed, release_id FROM challenge_instance WHERE instance_id = ?",
+                "SELECT status, containers, create_failure_confirmed, release_id, release_metadata_forwarded FROM challenge_instance WHERE instance_id = ?",
             ).use { statement ->
                 statement.setObject(1, instanceId)
                 statement.executeQuery().use { result ->
@@ -68,6 +68,23 @@ class ReleaseIdMigrationTest {
                     assertEquals(settings, result.getString("containers"))
                     assertTrue(result.getBoolean("create_failure_confirmed"))
                     assertNull(result.getObject("release_id"))
+                    assertNull(result.getObject("release_metadata_forwarded"))
+                }
+            }
+            connection.prepareStatement(
+                "UPDATE challenge_instance SET release_metadata_forwarded = ? WHERE instance_id = ?",
+            ).use { statement ->
+                statement.setBoolean(1, true)
+                statement.setObject(2, instanceId)
+                assertEquals(1, statement.executeUpdate())
+            }
+            connection.prepareStatement(
+                "SELECT release_metadata_forwarded FROM challenge_instance WHERE instance_id = ?",
+            ).use { statement ->
+                statement.setObject(1, instanceId)
+                statement.executeQuery().use { result ->
+                    assertTrue(result.next())
+                    assertEquals(true, result.getObject(1))
                 }
             }
             // 새 이벤트는 기존 번호 다음을 받는다, identity 시작값을 옮기지 않으면 1부터 다시 매겨 기존 번호와 겹친다

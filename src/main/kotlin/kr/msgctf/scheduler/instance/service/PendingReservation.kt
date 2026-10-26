@@ -29,7 +29,8 @@ fun ResourceCandidate.toPlacement(): Placement =
         runtimeTargetId = runtime.targetId,
     )
 
-// 결과를 모르는 예약 요청, 같은 request_id로 다시 보내면 브로커가 처음 만든 예약을 돌려준다
+// HTTP 호출 전에 커밋한 예약 의도, 응답 저장 전 프로세스가 끝나도 같은 요청을 복구한다
+// 같은 request_id로 다시 보내면 브로커가 처음 만든 예약을 돌려준다
 // 그 후보가 다음 조회에 안 나올 수 있어 후보 정보도 같이 저장한다
 data class PendingReservation(
     val requestId: String,

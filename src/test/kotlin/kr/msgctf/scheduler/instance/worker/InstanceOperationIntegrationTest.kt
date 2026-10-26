@@ -9,25 +9,42 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
 import kr.msgctf.scheduler.broker.Architecture
+import kr.msgctf.scheduler.broker.BrokerCandidateRequest
+import kr.msgctf.scheduler.broker.BrokerCandidateResponse
 import kr.msgctf.scheduler.broker.BrokerClient
 import kr.msgctf.scheduler.broker.BrokerReservationReleaseRequest
+import kr.msgctf.scheduler.broker.BrokerReservationRequest
+import kr.msgctf.scheduler.broker.BrokerReservationResponse
 import kr.msgctf.scheduler.broker.FakeBrokerClient
 import kr.msgctf.scheduler.broker.ReleaseReason
+import kr.msgctf.scheduler.broker.ResourceCandidateSelector
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.model.RuntimeType
+import kr.msgctf.scheduler.instance.config.CleanupProperties
+import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
 import kr.msgctf.scheduler.instance.config.OperationProperties
 import kr.msgctf.scheduler.instance.domain.Instance
 import kr.msgctf.scheduler.instance.domain.InstanceAction
 import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
+import kr.msgctf.scheduler.instance.service.ContainerSpecCodec
+import kr.msgctf.scheduler.instance.service.HealthcheckCodec
 import kr.msgctf.scheduler.instance.service.InstanceOperationService
+import kr.msgctf.scheduler.instance.service.InstanceStateTransitionService
+import kr.msgctf.scheduler.instance.service.PendingReservationCodec
+import kr.msgctf.scheduler.instance.service.ServiceEndpointCodec
+import kr.msgctf.scheduler.runtime.ImageReadinessClient
+import kr.msgctf.scheduler.runtime.ImageReadinessPreference
+import kr.msgctf.scheduler.runtime.ImageReadinessProperties
 import kr.msgctf.scheduler.runtime.IsolationProfile
+import kr.msgctf.scheduler.runtime.RuntimeClient
 import kr.msgctf.scheduler.runtime.RuntimeDeleteReason
 import kr.msgctf.scheduler.testContainersJson
 import kr.msgctf.scheduler.testUuid
@@ -35,9 +52,12 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Import
 import org.springframework.test.context.ActiveProfiles
+import org.springframework.transaction.support.TransactionOperations
 import org.testcontainers.junit.jupiter.Testcontainers
+import tools.jackson.databind.json.JsonMapper
 
 // 워커부터 operation 서비스, repository, JPA까지 실제 DB로 이어서 검증한다
 // 스케줄러가 임의 시점에 끼어들지 않도록 워커를 직접 만들어 호출한다
@@ -46,6 +66,90 @@ import org.testcontainers.junit.jupiter.Testcontainers
 @SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
 class InstanceOperationIntegrationTest {
+
+    @Autowired
+    private lateinit var context: ApplicationContext
+
+    @Test
+    fun `replacement intent claim survives PostgreSQL scheduling timestamp precision`() {
+        val previous = instanceRepository.saveAndFlush(newRequested().apply { status = InstanceStatus.CLEANED })
+        val replacement = instanceRepository.saveAndFlush(newRequested(previous.instanceId, previous.userId))
+        val fixed = Clock.fixed(Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).plusNanos(123456789), java.time.ZoneOffset.UTC)
+        operationServiceWith(fakeBroker, ImageReadinessPreference(), fixed).progressRequested(replacement.instanceId)
+        assertEquals(InstanceStatus.PROVISIONING, instanceRepository.findById(replacement.instanceId).orElseThrow().status)
+    }
+
+    @Test
+    fun `committed reservation intent survives process loss and changed readiness against PostgreSQL`() {
+        val saved = instanceRepository.saveAndFlush(newRequested())
+        val requests = mutableListOf<BrokerReservationRequest>()
+        var candidateQueries = 0
+        var preferred = ""
+        val runtimeClock = context.getBean(Clock::class.java)
+        val broker = object : BrokerClient by fakeBroker {
+            override fun getCandidates(request: BrokerCandidateRequest): BrokerCandidateResponse {
+                candidateQueries++
+                val response = fakeBroker.getCandidates(request)
+                return response.copy(candidates = listOf("a", "b", "c", "d").map { id ->
+                    response.candidates.single().copy(candidateId = id, runtime = response.candidates.single().runtime.copy(targetId = id))
+                }).also {
+                    preferred = ResourceCandidateSelector(runtimeClock)
+                        .rank(it, Architecture.AMD64, saved.instanceId).last().candidateId
+                }
+            }
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                requests += request
+                val accepted = fakeBroker.createReservation(request)
+                if (requests.size == 1) throw SimulatedProcessDeath()
+                return accepted
+            }
+        }
+        val readiness = ImageReadinessPreference(
+            ImageReadinessProperties(enabled = true),
+            ImageReadinessClient { query ->
+                JsonMapper.builder().build().readTree("""{"image_set_id":"${query.imageSetId()}","architecture":"AMD64","targets":[{"target_id":"$preferred","ready":true,"ready_node_count":1,"eligible_node_count":1,"observed_at":"${runtimeClock.instant()}","valid_until":"${runtimeClock.instant().plusSeconds(30)}"}]}""")
+            }, runtimeClock,
+        )
+        assertFailsWith<SimulatedProcessDeath> {
+            operationServiceWith(broker, readiness).progressRequested(saved.instanceId)
+        }
+        // This repository read is outside the service transactions: the intent
+        // must exist in PostgreSQL even though no exception handler was reached.
+        val afterCrash = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.SCHEDULING, afterCrash.status)
+        assertNotNull(afterCrash.pendingReservation)
+        assertEquals(preferred, PendingReservationCodec
+            .decodeOrNull(afterCrash.pendingReservation, saved.instanceId)?.placement?.candidateId)
+        operationServiceWith(broker, ImageReadinessPreference()).progressRequested(saved.instanceId)
+        val recovered = instanceRepository.findById(saved.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.PROVISIONING, recovered.status)
+        assertEquals(2, requests.size)
+        assertEquals(requests.first(), requests.last())
+        assertEquals(1, candidateQueries)
+        assertNull(recovered.pendingReservation)
+        assertEquals(preferred, recovered.runtimeTargetId)
+    }
+
+    private fun operationServiceWith(broker: BrokerClient, readiness: ImageReadinessPreference, clock: Clock = context.getBean(Clock::class.java)) =
+        InstanceOperationService(
+            transitionService = context.getBean(InstanceStateTransitionService::class.java),
+            instanceRepository = instanceRepository,
+            instanceEventRepository = instanceEventRepository,
+            brokerClient = broker,
+            resourceCandidateSelector = ResourceCandidateSelector(clock),
+            runtimeClient = context.getBean(RuntimeClient::class.java),
+            containerSpecCodec = context.getBean(ContainerSpecCodec::class.java),
+            healthcheckCodec = context.getBean(HealthcheckCodec::class.java),
+            serviceEndpointCodec = context.getBean(ServiceEndpointCodec::class.java),
+            policyProperties = context.getBean(InstancePolicyProperties::class.java),
+            cleanupProperties = context.getBean(CleanupProperties::class.java),
+            operationProperties = context.getBean(OperationProperties::class.java),
+            clock = clock,
+            tx = context.getBean(TransactionOperations::class.java),
+            imageReadinessPreference = readiness,
+        )
+
+    private class SimulatedProcessDeath : Error("process loss after Broker accepted the reservation")
 
     @Autowired
     private lateinit var instanceRepository: InstanceRepository
@@ -304,12 +408,13 @@ class InstanceOperationIntegrationTest {
             operationProperties = OperationProperties(),
         )
 
-    private fun newRequested(): Instance {
+    private fun newRequested(replacedInstanceId: UUID? = null, userId: UUID = UUID.randomUUID()): Instance {
         val now = Instant.now()
         return Instance(
             teamId = testUuid(900),
-            userId = UUID.randomUUID(),
+            userId = userId,
             challengeId = testUuid(10),
+            replacedInstanceId = replacedInstanceId,
             status = InstanceStatus.REQUESTED,
             isolationProfile = IsolationProfile.WEB,
             action = InstanceAction.CREATE,

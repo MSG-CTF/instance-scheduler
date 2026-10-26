@@ -81,7 +81,18 @@ new instance; a new forwarding decision is recorded before its own first create.
    pull load before broad enablement. No production performance claim is made by
    local HTTP tests.
 
-An ambiguous Broker reservation is recovered with its saved request ID, candidate
-and original request body before any new candidate/readiness lookup. Readiness
-cannot move an in-flight reservation to a different target. Runtime create and
-reconcile continue using the saved target and full original workload.
+Before every Broker reservation attempt, including a new generation after an
+EXPIRED response, Scheduler commits the exact request ID and candidate placement
+as `pending_reservation` in a short transaction. The HTTP call runs outside that
+transaction. A process exit after Broker acceptance therefore retains the original
+intent even when no exception handler ran. A restart recovers that request and its
+original durable body before any new candidate/readiness lookup.
+
+Intent claims require the row to remain SCHEDULING with no competing intent and the
+same scheduling retry time observed by the worker. Clearing an authoritative
+rejection/expired intent and applying later outcomes also compare the exact intent
+and retry time. A late worker leaves a newer intent or lease untouched. A HELD
+intent remains until the PROVISIONING transaction commits its reservation and
+target. Readiness cannot move an in-flight reservation to a different target.
+Runtime create and reconcile continue using the saved target and full original
+workload.

@@ -3,6 +3,7 @@ package kr.msgctf.scheduler.instance.service
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kr.msgctf.scheduler.broker.Architecture
 import kr.msgctf.scheduler.broker.BrokerCandidateRequest
@@ -102,7 +103,7 @@ class InstanceOperationService(
             spec
         } ?: return
 
-        val (chosenPlacement, reservation, candidateSummary) = obtainReservation(instanceId, spec) ?: return
+        val (chosenPlacement, reservation, candidateSummary, pendingReservationJson) = obtainReservation(instanceId, spec) ?: return
 
         // 만료나 반납된 예약의 재사용을 막는다, HELD가 아니면 선점된 용량이 없다
         if (reservation.status != BrokerReservationStatus.HELD) {
@@ -112,6 +113,7 @@ class InstanceOperationService(
                     errorCode = SchedulerErrorCode.BROKER_CALL_FAILED,
                     adminDetail = "reservationId=${reservation.reservationId}, status=${reservation.status}",
                 ),
+                reservationGuard = ReservationGuard(null, spec.schedulingLease),
             )
             return
         }
@@ -139,6 +141,12 @@ class InstanceOperationService(
             if (instance.status != InstanceStatus.SCHEDULING) {
                 // 같은 후보면 브로커가 같은 예약을 돌려주므로 앞선 노드가 이미 그 예약을 쥐고 있다
                 reservationTaken = instance.reservationId == reservation.reservationId
+                return@execute null
+            }
+            if (!ReservationGuard(pendingReservationJson, spec.schedulingLease).matches(instance)) {
+                // Another worker now owns scheduling. Keep its intent/lease and let it
+                // recover the idempotent reservation rather than releasing it underneath it.
+                reservationTaken = true
                 return@execute null
             }
             // 후보 조회와 예약 왕복 중에도 기존 만료 시각을 넘을 수 있다
@@ -225,7 +233,11 @@ class InstanceOperationService(
             return false
         }
         // 외부 호출이 진행 중인 동안 다른 노드가 같은 행을 다시 집지 않게 미룬다
+        // The following intent transaction compares this lease after a DB roundtrip.
+        // PostgreSQL timestamps retain microseconds, so choose a representable value
+        // before capturing the exact lease; do not weaken the ownership comparison.
         instance.nextPollAt = clampToDeadline(now.plus(operationProperties.resubmitDelay), instance.pollDeadlineAt)
+            .truncatedTo(ChronoUnit.MICROS)
         return true
     }
 
@@ -1327,15 +1339,20 @@ class InstanceOperationService(
     private fun obtainReservation(
         instanceId: UUID,
         spec: WorkloadSpec,
-    ): Triple<Placement, BrokerReservationResponse, String>? {
+    ): ObtainedReservation? {
         spec.pendingReservation?.let { pending ->
             when (val outcome = replayPendingReservation(instanceId, spec, pending)) {
                 is ReplayOutcome.Held ->
-                    return Triple(pending.placement, outcome.reservation, "recovered request=${pending.requestId}")
+                    return ObtainedReservation(pending.placement, outcome.reservation, "recovered request=${pending.requestId}", checkNotNull(spec.pendingReservationJson))
                 ReplayOutcome.Unresolved -> return null
-                ReplayOutcome.Gone -> forgetPendingReservation(instanceId, pending)
+                ReplayOutcome.Gone -> if (!forgetPendingReservation(instanceId, checkNotNull(spec.pendingReservationJson), spec.schedulingLease)) return null
             }
         }
+        // Retain the old unreadable-row fallback, but only clear the exact snapshot
+        // we read. Never replace a new intent that appeared while this worker ran.
+        if (spec.pendingReservation == null && spec.pendingReservationJson != null &&
+            !forgetPendingReservation(instanceId, spec.pendingReservationJson, spec.schedulingLease)
+        ) return null
 
         val (response, candidates) = try {
             val response = brokerClient.getCandidates(
@@ -1355,12 +1372,12 @@ class InstanceOperationService(
             )
             response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readyTargets)
         } catch (exception: Exception) {
-            handleBrokerFailure(instanceId, exception)
+            handleBrokerFailure(instanceId, exception, ReservationGuard(null, spec.schedulingLease))
             return null
         }
 
-        val (candidate, reservation) = reserveFirstAvailable(instanceId, spec, candidates) ?: return null
-        return Triple(candidate.toPlacement(), reservation, candidateSummary(response, candidate))
+        val (candidate, reservation, pendingJson) = reserveFirstAvailable(instanceId, spec, candidates) ?: return null
+        return ObtainedReservation(candidate.toPlacement(), reservation, candidateSummary(response, candidate), pendingJson)
     }
 
     // 결과를 모르는 예약 요청을 같은 request_id와 본문으로 다시 보낸다
@@ -1375,12 +1392,14 @@ class InstanceOperationService(
         spec: WorkloadSpec,
         pending: PendingReservation,
     ): ReplayOutcome {
+        val guard = ReservationGuard(spec.pendingReservationJson, spec.schedulingLease)
+        if (!ownsReservationIntent(instanceId, guard)) return ReplayOutcome.Unresolved
         val reservation = try {
             brokerClient.createReservation(
                 reservationRequest(instanceId, spec, pending.requestId, pending.placement.candidateId),
             )
         } catch (exception: BrokerRejectedException) {
-            if (exception.nothingToRecover) {
+            if (exception.definite && exception.nothingToRecover) {
                 log.info(
                     "pending reservation was not made, choosing again: instanceId={}, requestId={}, code={}",
                     instanceId,
@@ -1389,10 +1408,10 @@ class InstanceOperationService(
                 )
                 return ReplayOutcome.Gone
             }
-            handleBrokerFailure(instanceId, exception)
+            handleBrokerFailure(instanceId, exception, guard)
             return ReplayOutcome.Unresolved
         } catch (exception: Exception) {
-            handleBrokerFailure(instanceId, exception)
+            handleBrokerFailure(instanceId, exception, guard)
             return ReplayOutcome.Unresolved
         }
         if (reservation.status == BrokerReservationStatus.HELD) {
@@ -1429,14 +1448,28 @@ class InstanceOperationService(
 
     // 다시 보낸 요청과 저장된 값이 같을 때만 지운다
     // 그사이 다른 노드가 다른 요청을 저장했으면 그 값은 남긴다
-    private fun forgetPendingReservation(instanceId: UUID, pending: PendingReservation) {
-        tx.executeWithoutResult {
-            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
-            if (instance.status != InstanceStatus.SCHEDULING) return@executeWithoutResult
-            if (instance.pendingReservation != PendingReservationCodec.encode(pending)) return@executeWithoutResult
+    private fun forgetPendingReservation(instanceId: UUID, pendingJson: String, schedulingLease: Instant?): Boolean =
+        tx.execute {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute false
+            if (!ReservationGuard(pendingJson, schedulingLease).matches(instance)) return@execute false
             instance.pendingReservation = null
-        }
-    }
+            true
+        } == true
+
+    private fun ownsReservationIntent(instanceId: UUID, guard: ReservationGuard): Boolean =
+        tx.execute {
+            instanceRepository.findByIdForUpdate(instanceId)?.let { guard.matches(it) } ?: false
+        } == true
+
+    // Commit the original request identity before HTTP. An abrupt process exit
+    // after Broker acceptance must leave enough durable information for replay.
+    private fun rememberReservationIntent(instanceId: UUID, spec: WorkloadSpec, pendingJson: String): Boolean =
+        tx.execute {
+            val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@execute false
+            if (!ReservationGuard(null, spec.schedulingLease).matches(instance)) return@execute false
+            instance.pendingReservation = pendingJson
+            true
+        } == true
 
     // 순서대로 후보에 예약을 요청한다
     // 자리 부족(INSUFFICIENT_CAPACITY)이면 같은 주기에 다음 후보로 넘어간다
@@ -1451,16 +1484,19 @@ class InstanceOperationService(
         instanceId: UUID,
         spec: WorkloadSpec,
         candidates: List<ResourceCandidate>,
-    ): Pair<ResourceCandidate, BrokerReservationResponse>? {
+    ): Triple<ResourceCandidate, BrokerReservationResponse, String>? {
         var lastRejection: BrokerRejectedException? = null
         var heldElsewhere = false
         for (candidate in candidates.take(MAX_RESERVATION_CANDIDATES)) {
             if (!candidate.validUntil.isAfter(clock.instant())) continue
             try {
-                return candidate to reserve(instanceId, spec, candidate)
+                val (reservation, pendingJson) = reserve(instanceId, spec, candidate)
+                return Triple(candidate, reservation, pendingJson)
+            } catch (exception: ReservationOwnershipLostException) {
+                return null
             } catch (exception: BrokerRejectedException) {
                 if (exception.brokerCode !in NEXT_CANDIDATE_CODES) {
-                    handleBrokerFailure(instanceId, exception)
+                    handleBrokerFailure(instanceId, exception, ReservationGuard(null, spec.schedulingLease))
                     return null
                 }
                 log.info(
@@ -1472,36 +1508,36 @@ class InstanceOperationService(
                 lastRejection = exception
                 heldElsewhere = heldElsewhere || exception.brokerCode == INSTANCE_ALREADY_RESERVED_CODE
             } catch (exception: UnconfirmedReservationException) {
-                // 다음 주기에 후보를 새로 고르지 않고 이 요청을 그대로 다시 보내도록 저장한다
+                // Intent was committed before HTTP; only its owner may update retries.
                 handleBrokerFailure(
                     instanceId,
                     exception.failure,
-                    PendingReservation(exception.requestId, candidate.toPlacement()),
+                    ReservationGuard(PendingReservationCodec.encode(PendingReservation(exception.requestId, candidate.toPlacement())), spec.schedulingLease),
                 )
                 return null
             } catch (exception: Exception) {
-                handleBrokerFailure(instanceId, exception)
+                handleBrokerFailure(instanceId, exception, ReservationGuard(null, spec.schedulingLease))
                 return null
             }
         }
         // 선택기는 빈 목록을 돌려주지 않으므로 여기 오면 시도한 후보가 모두 다음 후보로 넘기는 이유로 거절됐다
         if (heldElsewhere) {
-            waitForHeldReservation(instanceId, checkNotNull(lastRejection))
+            waitForHeldReservation(instanceId, checkNotNull(lastRejection), spec.schedulingLease)
         } else {
             handleBrokerFailure(instanceId, lastRejection ?: SchedulerException(
                 errorCode = SchedulerErrorCode.RESOURCE_UNAVAILABLE,
                 adminDetail = "all candidates expired before reservation",
-            ))
+            ), ReservationGuard(null, spec.schedulingLease))
         }
         return null
     }
 
     // 이 인스턴스의 예약을 찾지 못한 행을 재시도 횟수를 쓰지 않고 다음 확인 시각만 뒤로 미룬다
     // 예약이 끝내 만료되지 않으면 하드타임아웃이 행을 끝낸다
-    private fun waitForHeldReservation(instanceId: UUID, rejection: BrokerRejectedException) {
+    private fun waitForHeldReservation(instanceId: UUID, rejection: BrokerRejectedException, schedulingLease: Instant?) {
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
-            if (instance.status != InstanceStatus.SCHEDULING) return@executeWithoutResult
+            if (!ReservationGuard(null, schedulingLease).matches(instance)) return@executeWithoutResult
             instance.nextPollAt = clock.instant().plus(operationProperties.backoffMax)
             log.warn(
                 "reservation held on a candidate not offered, waiting for it to expire: instanceId={}, reason={}",
@@ -1521,9 +1557,10 @@ class InstanceOperationService(
         instanceId: UUID,
         spec: WorkloadSpec,
         candidate: ResourceCandidate,
-    ): BrokerReservationResponse {
+    ): Pair<BrokerReservationResponse, String> {
         val baseRequestId = "resv-$instanceId-${candidate.candidateId}"
         var reservation: BrokerReservationResponse? = null
+        var pendingJson = ""
         for (generation in 1..MAX_RESERVATION_GENERATIONS) {
             if (!candidate.validUntil.isAfter(clock.instant())) {
                 throw SchedulerException(
@@ -1532,22 +1569,29 @@ class InstanceOperationService(
                 )
             }
             val requestId = if (generation == 1) baseRequestId else "$baseRequestId-$generation"
+            pendingJson = PendingReservationCodec.encode(PendingReservation(requestId, candidate.toPlacement()))
+            if (!rememberReservationIntent(instanceId, spec, pendingJson)) throw ReservationOwnershipLostException()
             // 확실한 거절이 아니면 예약이 만들어졌는지 모른다, 호출자가 이 요청을 저장하도록 넘긴다
             // 5xx나 이유 코드가 없는 응답도 같다, 브로커가 예약을 저장한 뒤 프록시 연결이 끊겼을 수 있다
             reservation = try {
                 brokerClient.createReservation(reservationRequest(instanceId, spec, requestId, candidate.candidateId))
             } catch (exception: BrokerRejectedException) {
-                if (exception.definite) throw exception
+                if (exception.definite) {
+                    if (!forgetPendingReservation(instanceId, pendingJson, spec.schedulingLease)) throw ReservationOwnershipLostException()
+                    throw exception
+                }
                 throw UnconfirmedReservationException(requestId, exception)
             } catch (exception: Exception) {
                 throw UnconfirmedReservationException(requestId, exception)
             }
-            if (reservation.status != BrokerReservationStatus.EXPIRED) {
-                return reservation
+            if (reservation.status == BrokerReservationStatus.HELD) {
+                return reservation to pendingJson
             }
+            if (!forgetPendingReservation(instanceId, pendingJson, spec.schedulingLease)) throw ReservationOwnershipLostException()
+            if (reservation.status != BrokerReservationStatus.EXPIRED) return reservation to pendingJson
             log.info("reservation expired, reserving again: instanceId={}, requestId={}", instanceId, requestId)
         }
-        return checkNotNull(reservation)
+        return checkNotNull(reservation) to pendingJson
     }
 
     private fun reservationRequest(
@@ -1569,18 +1613,18 @@ class InstanceOperationService(
 
     // broker 실패는 간격을 늘려 다시 시도하고 한도에 닿으면 FAILED로 확정한다
     // 후보가 없어서 실패하면 RESOURCE_UNAVAILABLE, 호출 자체가 안 되면 BROKER_CALL_FAILED로 기록한다
-    // pendingReservation을 넘기면 결과를 모르는 그 요청을 저장한다, 넘기지 않으면 저장된 값을 그대로 둔다
+    // Reservation outcomes only update the exact intent/lease read by their worker.
     private fun handleBrokerFailure(
         instanceId: UUID,
         exception: Exception,
-        pendingReservation: PendingReservation? = null,
+        reservationGuard: ReservationGuard? = null,
     ) {
         val errorCode = (exception as? SchedulerException)?.errorCode ?: SchedulerErrorCode.BROKER_CALL_FAILED
         tx.executeWithoutResult {
             val instance = instanceRepository.findByIdForUpdate(instanceId) ?: return@executeWithoutResult
             // broker를 부르는 사이 다른 워커가 상태를 바꿨으면 재시도하지 않는다
             if (instance.status != InstanceStatus.SCHEDULING) return@executeWithoutResult
-            pendingReservation?.let { instance.pendingReservation = PendingReservationCodec.encode(it) }
+            if (reservationGuard != null && !reservationGuard.matches(instance)) return@executeWithoutResult
             // 삭제 직후의 용량 관측은 아직 이전 실행을 포함할 수 있다
             // 정상적인 용량 부족 응답은 통신 장애 재시도 예산을 쓰지 않고 정해진 기한까지 기다린다
             val capacityUnavailable = errorCode == SchedulerErrorCode.RESOURCE_UNAVAILABLE ||
@@ -1741,6 +1785,8 @@ class InstanceOperationService(
             pendingReservation = PendingReservationCodec.decodeOrNull(instance.pendingReservation, instance.instanceId),
             releaseId = instance.releaseId,
             forwardReleaseMetadata = instance.releaseMetadataForwarded == true,
+            pendingReservationJson = instance.pendingReservation,
+            schedulingLease = instance.nextPollAt,
         )
     }
 
@@ -1808,7 +1854,23 @@ private data class WorkloadSpec(
     val pendingReservation: PendingReservation? = null,
     val releaseId: UUID? = null,
     val forwardReleaseMetadata: Boolean = false,
+    val pendingReservationJson: String? = null,
+    val schedulingLease: Instant? = null,
 )
+
+private data class ObtainedReservation(
+    val placement: Placement,
+    val reservation: BrokerReservationResponse,
+    val summary: String,
+    val pendingReservationJson: String,
+)
+
+private data class ReservationGuard(val pendingReservationJson: String?, val schedulingLease: Instant?) {
+    fun matches(instance: Instance): Boolean = instance.status == InstanceStatus.SCHEDULING &&
+        instance.pendingReservation == pendingReservationJson && instance.nextPollAt == schedulingLease
+}
+
+private class ReservationOwnershipLostException : RuntimeException()
 
 // 결과를 모르는 예약 요청을 다시 보낸 결과
 private sealed interface ReplayOutcome {
