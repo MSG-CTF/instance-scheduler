@@ -140,6 +140,53 @@ class InstanceOperationServiceTest {
         assertNull(instance.deleteReason)
     }
 
+    // 이전 인스턴스의 정리는 한도를 넘겨도 FAILED로 가지 않으므로 교체는 대기 기한까지 기다린다
+    // 그때 정리가 막혀 있었으면 자리 부족이 아니라 정리 실패로 알려야 백엔드가 사유를 맞게 보여 준다
+    // 한도 전이면 아직 재시도 중이라 기존처럼 대기 만료로 본다
+    @Test
+    fun `replacement reports stuck previous cleanup when its wait expires`() {
+        val limit = CleanupProperties().retryLimit
+        val cases = listOf(
+            limit to SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+            limit - 1 to SchedulerErrorCode.RESOURCE_UNAVAILABLE,
+        )
+        for ((retries, expected) in cases) {
+            val repository = TestInstanceRepository()
+            val previous = repository.save(newCleanupPending().apply { cleanupRetryCount = retries })
+            val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+            val movingClock = MutableClock(clock.instant())
+            val events = TestInstanceEventRepository()
+            val service = newService(repository, events = events, clock = movingClock)
+            service.progressRequested(instance.instanceId)
+            movingClock.advance(Duration.ofMinutes(10))
+            service.progressRequested(instance.instanceId)
+            assertEquals(InstanceStatus.FAILED, instance.status, "retries=$retries")
+            assertEquals(expected, events.saved.single().errorCode, "retries=$retries")
+            assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status, "retries=$retries")
+        }
+    }
+
+    // 한도를 0으로 두면 정상 삭제 중인 0회도 한도 이상이 된다, 실패가 없었으면 정리 실패로 보지 않는다
+    @Test
+    fun `replacement does not blame a previous cleanup without failures when the limit is zero`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newCleanupPending())
+        val instance = repository.save(newRequested(previous.instanceId, previous.userId))
+        val movingClock = MutableClock(clock.instant())
+        val events = TestInstanceEventRepository()
+        val service = newService(
+            repository,
+            events = events,
+            clock = movingClock,
+            cleanupProperties = CleanupProperties(retryLimit = 0),
+        )
+        service.progressRequested(instance.instanceId)
+        movingClock.advance(Duration.ofMinutes(10))
+        service.progressRequested(instance.instanceId)
+        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(SchedulerErrorCode.RESOURCE_UNAVAILABLE, events.saved.single().errorCode)
+    }
+
     @Test
     fun `replacement waits no longer than inherited expiry even when cleanup stalls`() {
         val repository = TestInstanceRepository()
@@ -4298,15 +4345,24 @@ class InstanceOperationServiceTest {
         assertEquals(clock.instant().plusSeconds(2), instance.nextPollAt)
     }
 
-    // 접수 실패는 재시도 횟수를 세고 한도 도달 시 FAILED로 남기는지 확인
+    // 접수 실패가 한도에 닿아도 FAILED로 보내지 않는다
+    // FAILED는 워커가 보는 상태가 아니라서 런타임이 돌아와도 workload를 지우지 않는다
+    // 예약을 반납하면 브로커는 workload가 남은 자리를 빈 자리로 보고 다시 배정한다
     @Test
-    fun `counts retry on submit failure and parks failed at limit`() {
+    fun `keeps cleanup and reservation when delete submit retries reach the limit`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
-        val instance = repository.save(newCleanupPending().apply { cleanupRetryCount = 4 })
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                cleanupRetryCount = CleanupProperties().retryLimit - 1
+                reservationId = "reservation-held"
+            },
+        )
         val service = newService(
             repository,
+            brokerClient = broker,
             runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
             events = events,
         )
@@ -4315,30 +4371,462 @@ class InstanceOperationServiceTest {
         service.submitDelete(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
-        assertEquals(5, instance.cleanupRetryCount)
-        assertEquals(1, events.saved.size)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(CleanupProperties().retryLimit, instance.cleanupRetryCount)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertNotNull(instance.nextPollAt)
+        // FAILED를 대신하는 운영자 신호다
+        val error = events.saved.single()
+        assertEquals(InstanceEventType.ERROR_RECORDED, error.eventType)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, error.errorCode)
     }
 
-    // operation 최종 실패는 재접수 없이 FAILED로 남기는지 확인
+    // 한도를 넘긴 뒤에도 실패가 이어지면 오류 기록은 넘어서는 순간 한 번만 남는다
+    // 주기마다 남기면 멈춘 인스턴스 하나가 이벤트를 채운다
     @Test
-    fun `parks failed without resubmit when delete operation failed`() {
+    fun `records the delete retry limit once while submits keep failing`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
-        val runtimeClient = FakeRuntimeClient()
-        val instance = repository.save(newStopping())
-        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+        val instance = repository.save(newCleanupPending().apply { cleanupRetryCount = CleanupProperties().retryLimit - 1 })
+        val service = newService(
+            repository,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+        )
+
+        // when
+        repeat(3) { service.submitDelete(instance.instanceId) }
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 한도를 넘긴 뒤에는 다시 접수하기 전에 workload가 남았는지 먼저 묻는다
+    // 이미 지워진 workload에 삭제를 접수하면 런타임이 상태 전이 위반(409)으로 거절해서 실패가 끝없이 이어진다
+    @Test
+    fun `completes cleanup past the limit when runtime reports the workload already deleted`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newStopping().apply {
+                cleanupRetryCount = CleanupProperties().retryLimit
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = SubmitCountingRuntimeClient(status = { RuntimeStatusResult.AlreadyDeleted("workload-1") })
+        val transitions = TestInstanceEventRepository()
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, transitionEvents = transitions)
+
+        // when
         service.submitDelete(instance.instanceId)
-        runtimeClient.mode = FakeRuntimeMode.OPERATION_FAIL
+
+        // then
+        assertEquals(0, runtimeClient.deleteSubmits)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        // 삭제 operation 성공으로 끝난 정리와 이벤트로 구분된다
+        val cleaned = transitions.saved.single { it.toStatus == InstanceStatus.CLEANED }
+        assertEquals("confirmed by runtime status, runtimeWorkloadId=workload-1", cleaned.adminDetail)
+    }
+
+    // 지워진 workload에 접수해 409를 받으면 다음 회차에 바로 확인해서 끝낸다
+    // 한도까지 기다렸다 확인하면 정상으로 끝날 인스턴스에 삭제 실패 기록이 남고 예약 반납이 늦어진다
+    @Test
+    fun `checks runtime status right after the first delete submit failure`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-held" })
+        val runtimeClient = SubmitCountingRuntimeClient(
+            status = { RuntimeStatusResult.AlreadyDeleted("workload-1") },
+            submit = { request -> throw stateConflict(request) },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+
+        // when: 첫 접수가 409로 실패하고, 다음 회차는 확인부터 한다
+        service.submitDelete(instance.instanceId)
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(1, runtimeClient.deleteSubmits)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 삭제가 진행 중(TERMINATING)이면 확인은 Found를 주고, 다시 접수하면 런타임이 409로 거절한다
+    // TERMINATED가 될 때까지 기다렸다가 끝내고, 그 사이 예약은 쥐고 있으며 오류 기록도 더 쌓지 않는다
+    @Test
+    fun `waits through a terminating workload until runtime reports it deleted`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                cleanupRetryCount = CleanupProperties().retryLimit
+                reservationId = "reservation-held"
+            },
+        )
+        val answers = ArrayDeque(
+            listOf(
+                RuntimeStatusResult.Found("workload-1"),
+                RuntimeStatusResult.Found("workload-1"),
+                RuntimeStatusResult.AlreadyDeleted("workload-1"),
+            ),
+        )
+        val runtimeClient = SubmitCountingRuntimeClient(
+            status = { answers.removeFirst() },
+            submit = { request -> throw stateConflict(request) },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+
+        // when
+        repeat(2) { service.submitDelete(instance.instanceId) }
+
+        // then: 아직 끝나지 않았고 예약도 쥐고 있다
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(emptyList(), broker.releasedReservations)
+
+        // when
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(2, runtimeClient.deleteSubmits)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 한도 뒤 확인에서 저장된 정보가 없다는 답이 오면 접수에 맡긴다
+    // 기다리면 workload id가 있는 인스턴스가 영영 정리되지 않고, 끝내면 workload가 남은 채 예약이 반납된다
+    @Test
+    fun `submits delete past the limit when runtime has not stored the instance`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newStopping().apply {
+                cleanupRetryCount = CleanupProperties().retryLimit
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = SubmitCountingRuntimeClient(
+            status = { RuntimeStatusResult.NotStored },
+            submit = { RuntimeSubmitResult.TargetMissing },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(1, runtimeClient.deleteSubmits)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+    }
+
+    // 한도를 0으로 두어도 첫 실패에서 한 번은 운영자 신호가 남아야 한다
+    @Test
+    fun `records the delete retry limit once even when the limit is zero`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newCleanupPending())
+        val service = newService(
+            repository,
+            runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
+            events = events,
+            cleanupProperties = CleanupProperties(retryLimit = 0),
+        )
+
+        // when
+        repeat(3) { service.submitDelete(instance.instanceId) }
+
+        // then
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 확인하는 사이 다른 노드가 삭제를 접수했으면 그 operation의 결과로 끝내야 한다
+    // 늦게 도착한 확인 결과로 정리를 끝내면 그쪽이 쥔 operation과 예약이 함께 지워진다
+    @Test
+    fun `does not complete cleanup when another node submitted delete during the status check`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(
+            newStopping().apply {
+                cleanupRetryCount = CleanupProperties().retryLimit
+                reservationId = "reservation-held"
+            },
+        )
+        val runtimeClient = SubmitCountingRuntimeClient(
+            status = {
+                instance.runtimeOperationId = "op-delete-from-another-node"
+                RuntimeStatusResult.AlreadyDeleted("workload-1")
+            },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(0, runtimeClient.deleteSubmits)
+        assertEquals(InstanceStatus.STOPPING, instance.status)
+        assertEquals("op-delete-from-another-node", instance.runtimeOperationId)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+    }
+
+    // 이 노드의 접수가 실패하는 사이 다른 노드가 접수에 성공해 operation을 저장했으면 그 결과 조회를 늦추지 않는다
+    // 실패로 세면 이미 접수된 인스턴스의 조회가 재시도 간격만큼 밀리고, 한도에 걸리면 삭제 실패 기록까지 남는다
+    @Test
+    fun `does not count a submit failure when another node already stored the delete operation`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping().apply { cleanupRetryCount = CleanupProperties().retryLimit - 1 })
+        val runtimeClient = SubmitCountingRuntimeClient(
+            status = { RuntimeStatusResult.Found("workload-1") },
+            submit = { request ->
+                instance.runtimeOperationId = "op-delete-from-another-node"
+                instance.nextPollAt = clock.instant()
+                throw stateConflict(request)
+            },
+        )
+        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+
+        // when
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals("op-delete-from-another-node", instance.runtimeOperationId)
+        assertEquals(clock.instant(), instance.nextPollAt)
+        assertEquals(CleanupProperties().retryLimit - 1, instance.cleanupRetryCount)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 조회 경로만 실패해도 정상 삭제는 같은 request_id로 이어 가고, 삭제 확인 뒤 한 번만 반납한다
+    @Test
+    fun `retries the same delete and releases once when only runtime status lookup fails`() {
+        for (initial in listOf(newStopping(), newCleanupPending())) {
+            val repository = TestInstanceRepository()
+            val broker = FakeBrokerClient()
+            val events = TestInstanceEventRepository()
+            val movingClock = MutableClock(clock.instant())
+            val instance = repository.save(initial.apply { reservationId = "reservation-held" })
+            val delegate = FakeRuntimeClient()
+            val deletes = mutableListOf<RuntimeDeleteRequest>()
+            var rejectFirstDelete = true
+            var lookups = 0
+            val runtimeClient = object : RuntimeClient by delegate {
+                override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                    lookups += 1
+                    throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "status route unavailable")
+                }
+
+                override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                    deletes += request
+                    if (rejectFirstDelete) {
+                        rejectFirstDelete = false
+                        throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "first delete unavailable")
+                    }
+                    return delegate.submitDelete(request)
+                }
+            }
+            newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events, clock = movingClock)
+                .submitDelete(instance.instanceId)
+            assertEquals(1, instance.cleanupRetryCount)
+            assertNull(instance.runtimeOperationId)
+            assertEquals("reservation-held", instance.reservationId)
+            assertTrue(broker.releaseRequests.isEmpty())
+            movingClock.advance(Duration.between(movingClock.instant(), assertNotNull(instance.nextPollAt)))
+
+            val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events, clock = movingClock)
+            service.submitDelete(instance.instanceId)
+            assertEquals(1, lookups)
+            assertEquals(2, deletes.size)
+            assertEquals(setOf("runtime-delete-${instance.instanceId}"), deletes.map { it.requestId }.toSet())
+            assertEquals(1, instance.cleanupRetryCount)
+            assertNotNull(instance.runtimeOperationId)
+            assertEquals("reservation-held", instance.reservationId)
+            service.pollOperation(instance.instanceId)
+            service.submitDelete(instance.instanceId)
+            service.pollOperation(instance.instanceId)
+            assertEquals(InstanceStatus.CLEANED, instance.status)
+            assertNull(instance.reservationId)
+            assertEquals(listOf("reservation-held"), broker.releaseRequests.map { it.reservationId })
+            assertEquals(2, deletes.size)
+            assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+        }
+    }
+
+    // 조회와 접수가 모두 실패하면 한 회차에 실패를 한 번만 세고, backoff와 예약을 유지한다
+    @Test
+    fun `backs off past the limit when runtime status and delete both fail`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val events = TestInstanceEventRepository()
+        val movingClock = MutableClock(clock.instant())
+        val instance = repository.save(
+            newCleanupPending().apply {
+                cleanupRetryCount = 1
+                reservationId = "reservation-held"
+            },
+        )
+        val deletes = mutableListOf<RuntimeDeleteRequest>()
+        var lookups = 0
+        val runtimeClient = SubmitCountingRuntimeClient(
+            status = {
+                lookups += 1
+                throw HttpServerErrorException(HttpStatus.BAD_GATEWAY, "status unavailable")
+            },
+            submit = { request ->
+                deletes += request
+                throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "delete unavailable")
+            },
+        )
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events, clock = movingClock)
+
+        // when
+        repeat(10) { pass ->
+            service.submitDelete(instance.instanceId)
+            assertEquals(pass + 2, instance.cleanupRetryCount)
+            val delay = Duration.between(movingClock.instant(), assertNotNull(instance.nextPollAt))
+            assertTrue(delay.isPositive)
+            assertTrue(delay <= OperationProperties().backoffMax)
+            movingClock.advance(delay)
+        }
+
+        // then
+        assertEquals(10, lookups)
+        assertEquals(10, runtimeClient.deleteSubmits)
+        assertEquals(setOf("runtime-delete-${instance.instanceId}"), deletes.map { it.requestId }.toSet())
+        assertNull(instance.runtimeOperationId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instance.status)
+        assertEquals(11, instance.cleanupRetryCount)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // 런타임이 한동안 접수를 못 받다가 돌아오면 그때 삭제가 접수되어 정리가 끝나야 한다
+    // 부하 시험에서 런타임 503이 2분 이어지면 지우던 인스턴스가 모두 FAILED로 남던 경로다
+    @Test
+    fun `deletes the workload when runtime recovers after the delete retry limit`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-held" })
+        val delegate = FakeRuntimeClient()
+        var down = true
+        var deleteSubmits = 0
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult =
+                RuntimeStatusResult.Found("workload-1")
+
+            override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+                if (down) throw HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE, "runtime unavailable")
+                deleteSubmits += 1
+                return delegate.submitDelete(request)
+            }
+        }
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient)
+
+        // when: 한도를 넘도록 실패시킨 뒤 복구한다
+        repeat(CleanupProperties().retryLimit + 2) { service.submitDelete(instance.instanceId) }
+        assertEquals(InstanceStatus.STOPPING, instance.status)
+        assertEquals(emptyList(), broker.releasedReservations)
+        down = false
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(1, deleteSubmits)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+    }
+
+    // 삭제 operation이 실패로 끝나도 workload가 남았을 수 있다, 예약을 쥔 채 정리를 이어 간다
+    // 다음 주기에는 다시 접수하기 전에 workload가 남았는지부터 묻는다
+    @Test
+    fun `keeps cleanup and checks runtime status when delete operation failed`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val broker = FakeBrokerClient()
+        val delegate = FakeRuntimeClient()
+        var statusChecks = 0
+        val runtimeClient = object : RuntimeClient by delegate {
+            override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult {
+                statusChecks += 1
+                return RuntimeStatusResult.AlreadyDeleted("workload-1")
+            }
+        }
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-held" })
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtimeClient, events = events)
+        service.submitDelete(instance.instanceId)
+        delegate.mode = FakeRuntimeMode.OPERATION_FAIL
 
         // when
         service.pollOperation(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(InstanceStatus.STOPPING, instance.status)
         assertNull(instance.runtimeOperationId)
-        assertEquals(1, events.saved.size)
+        assertEquals(clock.instant(), instance.nextPollAt)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), broker.releasedReservations)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+
+        // when: 다음 주기
+        service.submitDelete(instance.instanceId)
+
+        // then
+        assertEquals(1, statusChecks)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertEquals(listOf("reservation-held"), broker.releasedReservations)
+    }
+
+    // 삭제 operation이 계속 실패로 끝나면 두 번째부터는 간격을 늘리고 오류를 다시 남기지 않는다
+    // 바로 다시 돌면 인스턴스 하나가 워커 주기마다 런타임을 세 번 부르고 오류를 쌓는다
+    @Test
+    fun `backs off without new errors when delete operations keep failing`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val delegate = FakeRuntimeClient()
+        val runtimeClient = SubmitCountingRuntimeClient(
+            delegate = delegate,
+            status = { RuntimeStatusResult.Found("workload-1") },
+        )
+        val instance = repository.save(newStopping())
+        val service = newService(repository, runtimeClient = runtimeClient, events = events)
+        service.submitDelete(instance.instanceId)
+        delegate.mode = FakeRuntimeMode.OPERATION_FAIL
+
+        // when: 실패한 뒤 확인을 거쳐 다시 접수하고, 그 삭제도 실패한다
+        service.pollOperation(instance.instanceId)
+        assertEquals(clock.instant(), instance.nextPollAt)
+        service.submitDelete(instance.instanceId)
+        assertNotNull(instance.runtimeOperationId)
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(2, runtimeClient.deleteSubmits)
+        assertEquals(InstanceStatus.STOPPING, instance.status)
+        assertNull(instance.runtimeOperationId)
+        // 런타임은 같은 request_id에 기존 operation을 돌려줘서 다시 접수해도 재실행되지 않는다, 길게 기다린다
+        assertEquals(clock.instant().plus(CleanupProperties().statusCheckMaxInterval), instance.nextPollAt)
+        assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
     // 삭제 실패 사유가 not-found면 이미 지워진 것이라 CLEANED로 종결하는지 확인
@@ -4432,45 +4920,86 @@ class InstanceOperationServiceTest {
         assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
     }
 
-    // 정리 대기 상태의 삭제 폴링도 시한이 지나면 FAILED로 남는지 확인
+    // 런타임이 진행 중이라고 답하는 동안 시한이 지나면 operation을 쥔 채 시한만 연장한다
+    // 대량 삭제 때는 런타임이 2개씩 처리해서 줄을 서 있는 것만으로 시한을 넘긴다, 이때 오류를 남기면 거짓 경보다
     @Test
-    fun `parks cleanup pending instance failed when poll deadline passed`() {
+    fun `extends the delete poll deadline while runtime reports the delete in progress`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
-        val instance = repository.save(newCleanupPending())
-        val service = newService(repository, events = events)
+        val instance = repository.save(newStopping().apply { reservationId = "reservation-held" })
+        val service = newService(repository, events = events, transitionEvents = events)
         service.submitDelete(instance.instanceId)
+        val operationId = assertNotNull(instance.runtimeOperationId)
+        // 마지막 조회가 진행 중 응답이면 attemptCount가 0이다
+        assertEquals(0, instance.attemptCount)
         instance.pollDeadlineAt = clock.instant()
 
         // when
         service.pollOperation(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
-        assertNull(instance.runtimeOperationId)
-        assertEquals(1, events.saved.size)
+        assertEquals(InstanceStatus.STOPPING, instance.status)
+        assertEquals(operationId, instance.runtimeOperationId)
+        assertEquals(clock.instant().plus(OperationProperties().pollTimeout), instance.pollDeadlineAt)
+        assertEquals(clock.instant(), instance.nextPollAt)
+        assertEquals("reservation-held", instance.reservationId)
+        assertEquals(emptyList(), events.saved)
     }
 
-    // 시한이 지난 삭제 폴링은 멈추고 FAILED로 남기는지 확인
+    // 결과 조회가 계속 실패해 시한을 넘기면 삭제가 끝났는지 모른다
+    // operation을 놓고 다음 주기에 workload가 남았는지부터 묻게 한다, 예약은 쥔 채로 둔다
     @Test
-    fun `parks stopping instance failed when poll deadline passed`() {
-        // given
-        val repository = TestInstanceRepository()
-        val events = TestInstanceEventRepository()
-        val instance = repository.save(newStopping())
-        val service = newService(repository, events = events)
-        service.submitDelete(instance.instanceId)
-        instance.pollDeadlineAt = clock.instant()
+    fun `keeps cleanup when delete poll deadline passed`() {
+        for (initial in listOf(newStopping(), newCleanupPending())) {
+            // given
+            val repository = TestInstanceRepository()
+            val events = TestInstanceEventRepository()
+            val broker = FakeBrokerClient()
+            val instance = repository.save(initial.apply { reservationId = "reservation-held" })
+            val startStatus = instance.status
+            val service = newService(repository, brokerClient = broker, events = events)
+            service.submitDelete(instance.instanceId)
+            // 조회 오류가 이어지면 attemptCount가 오른다
+            instance.attemptCount = 3
+            instance.pollDeadlineAt = clock.instant()
 
-        // when
-        service.pollOperation(instance.instanceId)
+            // when
+            service.pollOperation(instance.instanceId)
 
-        // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
-        assertNull(instance.runtimeOperationId)
-        assertEquals(1, events.saved.size)
+            // then
+            assertEquals(startStatus, instance.status)
+            assertNull(instance.runtimeOperationId, "start=$startStatus")
+            assertEquals(clock.instant(), instance.nextPollAt, "start=$startStatus")
+            assertEquals("reservation-held", instance.reservationId, "start=$startStatus")
+            assertEquals(emptyList(), broker.releasedReservations, "start=$startStatus")
+            assertEquals(1, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+        }
     }
+
+    // 삭제 접수 횟수를 센다, 상태 확인 답과 접수 결과를 테스트가 정한다
+    // 접수하면 안 되는 자리를 예외로 막으면 운영 코드가 그 예외를 접수 실패로 삼켜 회귀를 놓친다, 횟수로 직접 단언한다
+    private class SubmitCountingRuntimeClient(
+        private val delegate: FakeRuntimeClient = FakeRuntimeClient(),
+        private val status: (UUID) -> RuntimeStatusResult,
+        private val submit: ((RuntimeDeleteRequest) -> RuntimeSubmitResult)? = null,
+    ) : RuntimeClient by delegate {
+        var deleteSubmits = 0
+
+        override fun getRuntimeStatus(instanceId: UUID): RuntimeStatusResult = status(instanceId)
+
+        override fun submitDelete(request: RuntimeDeleteRequest): RuntimeSubmitResult {
+            deleteSubmits += 1
+            return submit?.invoke(request) ?: delegate.submitDelete(request)
+        }
+    }
+
+    // HttpRuntimeClient가 409를 감싸는 모양과 같다, 이미 지워진 workload에 삭제를 접수하면 런타임이 이렇게 답한다
+    private fun stateConflict(request: RuntimeDeleteRequest): SchedulerException =
+        SchedulerException(
+            errorCode = SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+            adminDetail = "requestId=${request.requestId}, status=409, body=INSTANCE_STATE_CONFLICT",
+        )
 
     // 받은 생성 요청을 기록한다, 응답은 FakeRuntimeClient가 준다
     private class CapturingRuntimeClient(
@@ -4721,15 +5250,15 @@ class InstanceOperationServiceTest {
         assertEquals("previous cleanup failed, previousInstanceId=${previous.instanceId}", events.saved[2].adminDetail)
     }
 
-    // 삭제 접수가 한도에 닿으면 STOPPING에서 정리 대기를 거쳐 FAILED로 가고, 두 전환 뒤에 오류 기록이 남는지 확인
-    // STOPPING에서 FAILED로 바로 갈 수 없어 두 단계를 거치는 경로라 전환이 빠지거나 겹치기 쉽다
+    // 삭제 접수가 한도에 닿으면 상태는 그대로 두고 오류 기록 하나만 남기는지 확인
+    // 서비스가 상태를 옮기면 전환 기록이 같은 대역에 쌓여 드러난다
     @Test
-    fun `records stopping to cleanup pending to failed when delete submit retries run out`() {
+    fun `records only an error when delete submit retries reach the limit`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
-        val instance = repository.save(newStopping().apply { cleanupRetryCount = 4 })
-        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        val limit = CleanupProperties().retryLimit
+        val instance = repository.save(newStopping().apply { cleanupRetryCount = limit - 1 })
         val service = newService(
             repository,
             runtimeClient = FakeRuntimeClient(FakeRuntimeMode.SUBMIT_FAIL),
@@ -4741,22 +5270,15 @@ class InstanceOperationServiceTest {
         service.submitDelete(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
+        assertEquals(InstanceStatus.STOPPING, instance.status)
         assertEquals(
-            listOf(
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
-                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
-            ),
+            listOf(Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.STOPPING)),
             events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
         )
-        // 정리 대기 진입에는 삭제 사유가 붙고, FAILED 전환에는 붙지 않는다
-        assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
-        assertNull(events.saved[1].adminDetail)
-        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[2].errorCode)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[0].errorCode)
         assertEquals(
-            "retries=5, reason=requestId=runtime-delete-${instance.instanceId}",
-            events.saved[2].adminDetail,
+            "retries=$limit, reason=requestId=runtime-delete-${instance.instanceId}, cleanup continues",
+            events.saved[0].adminDetail,
         )
     }
 
@@ -4792,61 +5314,48 @@ class InstanceOperationServiceTest {
         assertEquals("operationId=$operationId, reason=poll timeout", added[1].adminDetail)
     }
 
-    // 삭제 폴링 시한이 지나면 STOPPING에서 정리 대기를 거쳐 FAILED로 가고 오류 기록이 마지막에 남는지 확인
+    // 삭제 폴링 시한이 지나면 상태는 그대로 두고 오류 기록 하나만 남기는지 확인
     @Test
-    fun `records stopping to cleanup pending to failed when delete poll deadline passes`() {
+    fun `records only an error when delete poll deadline passes`() {
         // given
         val repository = TestInstanceRepository()
         val events = TestInstanceEventRepository()
         val instance = repository.save(newStopping())
-        // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+        // 서비스가 상태를 옮기면 전환 기록이 같은 대역에 쌓여 드러난다
         val service = newService(repository, events = events, transitionEvents = events)
         service.submitDelete(instance.instanceId)
         val operationId = assertNotNull(instance.runtimeOperationId)
+        // 조회 오류가 이어져 시한에 닿은 경우다
+        instance.attemptCount = 3
         instance.pollDeadlineAt = clock.instant()
 
         // when
         service.pollOperation(instance.instanceId)
 
         // then
-        assertEquals(InstanceStatus.FAILED, instance.status)
-        // 삭제 접수는 상태를 바꾸지 않으므로 시한 처리로 생긴 이벤트만 쌓인다
+        assertEquals(InstanceStatus.STOPPING, instance.status)
         assertEquals(
-            listOf(
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
-                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
-            ),
+            listOf(Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.STOPPING)),
             events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
         )
-        assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
-        assertNull(events.saved[1].adminDetail)
-        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[2].errorCode)
-        assertEquals("operationId=$operationId, reason=poll timeout", events.saved[2].adminDetail)
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, events.saved[0].errorCode)
+        assertEquals(
+            "operationId=$operationId, reason=poll timeout, checking runtime status before resubmitting",
+            events.saved[0].adminDetail,
+        )
     }
 
-    // 삭제 operation이 FAILED로 끝나면 STOPPING은 정리 대기를 거쳐, 정리 대기는 바로 FAILED로 가는지 확인
+    // 삭제 operation이 FAILED로 끝나면 STOPPING과 정리 대기 모두 상태는 그대로 두고 오류 기록 하나만 남기는지 확인
     @Test
-    fun `records failed delete operation transitions from stopping and cleanup pending`() {
-        val cases = listOf(
-            newStopping() to listOf(
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING),
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
-                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
-            ),
-            newCleanupPending() to listOf(
-                Triple(InstanceEventType.STATE_CHANGED, InstanceStatus.CLEANUP_PENDING, InstanceStatus.FAILED),
-                Triple(InstanceEventType.ERROR_RECORDED, null, InstanceStatus.FAILED),
-            ),
-        )
-        for ((initial, expected) in cases) {
+    fun `records only an error when delete operation failed`() {
+        for (initial in listOf(newStopping(), newCleanupPending())) {
             // given
             val repository = TestInstanceRepository()
             val events = TestInstanceEventRepository()
             val runtimeClient = FakeRuntimeClient()
             val instance = repository.save(initial)
             val startStatus = instance.status
-            // 서비스가 전환 기록을 직접 다시 남기면 같은 대역에 겹쳐 쌓여 드러난다
+            // 서비스가 상태를 옮기면 전환 기록이 같은 대역에 쌓여 드러난다
             val service = newService(repository, runtimeClient = runtimeClient, events = events, transitionEvents = events)
             service.submitDelete(instance.instanceId)
             val operationId = assertNotNull(instance.runtimeOperationId)
@@ -4856,21 +5365,18 @@ class InstanceOperationServiceTest {
             service.pollOperation(instance.instanceId)
 
             // then
-            assertEquals(InstanceStatus.FAILED, instance.status, "start=$startStatus")
+            assertEquals(startStatus, instance.status)
             assertEquals(
-                expected,
+                listOf(Triple(InstanceEventType.ERROR_RECORDED, null, startStatus)),
                 events.saved.map { Triple(it.eventType, it.fromStatus, it.toStatus) },
                 "start=$startStatus",
             )
-            if (startStatus == InstanceStatus.STOPPING) {
-                // 정리 대기 진입에만 삭제 사유가 붙는다
-                assertEquals("reason=USER_REQUESTED", events.saved[0].adminDetail)
-            }
-            val transitions = events.saved.filter { it.eventType == InstanceEventType.STATE_CHANGED }
-            assertNull(transitions.last().adminDetail, "start=$startStatus")
-            val error = events.saved.last()
+            val error = events.saved.single()
             assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, error.errorCode)
-            assertEquals("operationId=$operationId, lastErrorCode=FAKE_FAILURE", error.adminDetail)
+            assertEquals(
+                "operationId=$operationId, lastErrorCode=FAKE_FAILURE, checking runtime status before resubmitting",
+                error.adminDetail,
+            )
         }
     }
 
