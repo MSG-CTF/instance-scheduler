@@ -45,6 +45,73 @@ class InstanceSchedulerServiceTest {
 
     private val testUserId: UUID = UUID.fromString("018f3f1e-0000-7a91-a30b-630000000001")
 
+    @Test
+    fun `guarded create keeps the running instance without confirmation`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newRunningInstance())
+        val service = newService(instanceRepository = repository.repository)
+        val error = assertFailsWith<SchedulerException> {
+            service.createInstance(newCommand(previous.teamId).copy(requireReplacementConfirmation = true))
+        }
+        assertEquals(SchedulerErrorCode.INSTANCE_REPLACEMENT_REQUIRED, error.errorCode)
+        assertEquals(InstanceStatus.RUNNING, previous.status)
+        assertEquals(InstanceAction.CREATE, previous.action)
+        assertNull(previous.deleteReason)
+        assertEquals(1, repository.savedInstances.size)
+    }
+
+    @Test
+    fun `guarded create rejects stale confirmation without deleting current instance`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newRunningInstance())
+        val service = newService(instanceRepository = repository.repository)
+        val error = assertFailsWith<SchedulerException> {
+            service.createInstance(newCommand(previous.teamId).copy(
+                requireReplacementConfirmation = true, replaceInstanceId = UUID.randomUUID(),
+            ))
+        }
+        assertEquals(SchedulerErrorCode.INSTANCE_STATE_CHANGED, error.errorCode)
+        assertEquals(InstanceStatus.RUNNING, previous.status)
+        assertNull(previous.deleteReason)
+        assertEquals(1, repository.savedInstances.size)
+    }
+
+    @Test
+    fun `guarded create replaces only the confirmed instance`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newRunningInstance())
+        val service = newService(instanceRepository = repository.repository)
+        val result = service.createInstance(newCommand(previous.teamId).copy(
+            requireReplacementConfirmation = true, replaceInstanceId = previous.instanceId,
+        ))
+        assertEquals(previous.instanceId, result.replacedInstanceId)
+        assertEquals(InstanceStatus.CLEANUP_PENDING, previous.status)
+        assertEquals(2, repository.savedInstances.size)
+    }
+
+    @Test
+    fun `guarded create rejects confirmation after previous instance has ended`() {
+        val repository = TestInstanceRepository()
+        val previous = repository.save(newRunningInstance().apply { status = InstanceStatus.CLEANED })
+        val service = newService(instanceRepository = repository.repository)
+        val error = assertFailsWith<SchedulerException> {
+            service.createInstance(newCommand(previous.teamId).copy(
+                requireReplacementConfirmation = true, replaceInstanceId = previous.instanceId,
+            ))
+        }
+        assertEquals(SchedulerErrorCode.INSTANCE_STATE_CHANGED, error.errorCode)
+        assertEquals(1, repository.savedInstances.size)
+    }
+
+    @Test
+    fun `guarded first create succeeds without a replacement id`() {
+        val repository = TestInstanceRepository()
+        val service = newService(instanceRepository = repository.repository)
+        val result = service.createInstance(newCommand(testUuid(301)).copy(requireReplacementConfirmation = true))
+        assertEquals(InstanceStatus.REQUESTED, result.status)
+        assertNull(result.replacedInstanceId)
+    }
+
     // create가 실행 스펙을 저장한 REQUESTED 인스턴스를 만드는지 확인
     @Test
     fun `creates requested instance with stored workload spec`() {

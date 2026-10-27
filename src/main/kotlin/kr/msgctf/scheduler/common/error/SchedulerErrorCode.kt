@@ -51,6 +51,14 @@ enum class SchedulerErrorCode(
         HttpStatus.CONFLICT,
         "이미 실행 중인 인스턴스가 있습니다.",
     ),
+    INSTANCE_REPLACEMENT_REQUIRED(
+        HttpStatus.CONFLICT,
+        "실행 중인 인스턴스가 있습니다 현재 상태를 확인하고 전환을 선택해주세요",
+    ),
+    INSTANCE_STATE_CHANGED(
+        HttpStatus.CONFLICT,
+        "인스턴스 상태가 변경됐습니다 현재 상태를 확인한 뒤 다시 선택해주세요",
+    ),
     TEAM_INSTANCE_LIMIT_EXCEEDED(
         HttpStatus.CONFLICT,
         "팀에서 실행할 수 있는 인스턴스 한도에 도달했습니다.",

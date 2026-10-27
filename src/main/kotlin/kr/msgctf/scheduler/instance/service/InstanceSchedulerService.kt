@@ -53,6 +53,20 @@ class InstanceSchedulerService(
             userId = command.userId,
             statuses = transitionService.activeStatuses(),
         )
+        if (command.requireReplacementConfirmation || command.replaceInstanceId != null) {
+            if (previous != null && command.replaceInstanceId == null) {
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.INSTANCE_REPLACEMENT_REQUIRED,
+                    adminDetail = "userId=${command.userId}, activeInstanceId=${previous.instanceId}",
+                )
+            }
+            if (command.replaceInstanceId != previous?.instanceId) {
+                throw SchedulerException(
+                    errorCode = SchedulerErrorCode.INSTANCE_STATE_CHANGED,
+                    adminDetail = "userId=${command.userId}, replacement confirmation is stale",
+                )
+            }
+        }
         val replacedInstanceId = previous?.let { replaceOwnInstance(it) }
 
         // 교체로 빠진 이전 인스턴스를 개수에서 뺀 뒤 세어야 꽉 찬 팀에서도 자기 교체가 된다
