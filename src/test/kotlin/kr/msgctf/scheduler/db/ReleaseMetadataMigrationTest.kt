@@ -71,7 +71,7 @@ class ReleaseMetadataMigrationTest {
 
         val current = Flyway.configure().dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
             .locations("classpath:db/migration").load()
-        assertEquals(2, current.migrate().migrationsExecuted)
+        assertEquals(3, current.migrate().migrationsExecuted)
         current.validate()
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
             connection.prepareStatement(

@@ -1123,11 +1123,29 @@ class InstanceOperationService(
                     // 조회 오류가 이어질 때만 attemptCount가 0보다 크다, 진행 중 응답이 0으로 되돌린다
                     instance.pollDeadlineAt = clock.instant().plus(operationProperties.pollTimeout)
                     instance.nextPollAt = clock.instant()
+                    instance.pollExtensionCount += 1
                     log.warn(
-                        "delete still in progress past poll deadline, extending: instanceId={}, operationId={}",
+                        "delete still in progress past poll deadline, extending: instanceId={}, operationId={}, extensions={}",
                         instance.instanceId,
                         operationId,
+                        instance.pollExtensionCount,
                     )
+                    // 줄 서기로는 설명되지 않을 만큼 길어지면 런타임 삭제가 멈춘 것일 수 있다, 운영자가 보도록 한 번만 남긴다
+                    // 정한 횟수와 같을 때만 남겨 연장이 이어져도 오류가 쌓이지 않는다
+                    if (instance.pollExtensionCount == operationProperties.deleteExtensionAlertCount) {
+                        recordError(
+                            instance,
+                            SchedulerErrorCode.RUNTIME_DELETE_FAILED,
+                            "operationId=$operationId, reason=delete still in progress after " +
+                                "${instance.pollExtensionCount} extensions, cleanup continues",
+                        )
+                        log.warn(
+                            "delete extension alert, runtime delete may be stuck: instanceId={}, operationId={}, extensions={}",
+                            instance.instanceId,
+                            operationId,
+                            instance.pollExtensionCount,
+                        )
+                    }
                     null
                 } else {
                     // 결과 조회가 계속 실패해 삭제가 끝났는지 모른다, 일시적인 실패라 접지 않고 정리를 이어 간다
@@ -1405,8 +1423,9 @@ class InstanceOperationService(
         instance.runtimeOperationId = accepted.operationId
         instance.pollDeadlineAt = now.plus(operationProperties.pollTimeout)
         instance.nextPollAt = clampToDeadline(now.plusSeconds(accepted.retryAfterSeconds ?: 0), instance.pollDeadlineAt)
-        // 폴링 단계가 새로 시작되므로 오류 횟수를 0에서 다시 센다
+        // 폴링 단계가 새로 시작되므로 오류 횟수와 연장 횟수를 0에서 다시 센다
         instance.attemptCount = 0
+        instance.pollExtensionCount = 0
     }
 
     private fun clearOperation(instance: Instance) {
@@ -1414,6 +1433,7 @@ class InstanceOperationService(
         instance.nextPollAt = null
         instance.pollDeadlineAt = null
         instance.attemptCount = 0
+        instance.pollExtensionCount = 0
     }
 
     // 예약을 하나 만들고 후보 정보, 예약, 이벤트에 남길 선택 근거를 돌려준다

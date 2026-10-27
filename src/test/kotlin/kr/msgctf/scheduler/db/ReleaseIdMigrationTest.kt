@@ -55,7 +55,7 @@ class ReleaseIdMigrationTest {
 
         val current = flyway()
         // V26은 기존 정리 상태에 반납 의도를 소급해서 만들지 않는다
-        assertEquals(7, current.migrate().migrationsExecuted)
+        assertEquals(8, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
