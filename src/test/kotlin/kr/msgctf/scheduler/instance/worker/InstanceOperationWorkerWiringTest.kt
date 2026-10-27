@@ -4,15 +4,18 @@ import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
-import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.TestcontainersConfiguration
+import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.ApplicationContext
+import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider
 import org.springframework.context.annotation.Import
+import org.springframework.core.type.classreading.MetadataReader
+import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.context.ActiveProfiles
@@ -57,12 +60,31 @@ class InstanceOperationWorkerWiringTest {
         assertTrue("operationWorkerExecutor" in names, names.toString())
     }
 
-    // 스케줄 스레드가 하나면 operation 워커 주기가 길어질 때 cleanup 워커가 그만큼 밀린다
+    // 스케줄 스레드가 워커보다 적으면 operation 워커 주기가 길어질 때 다른 워커가 그만큼 밀린다
+    // 숫자를 고정해 비교하면 워커가 늘어도 통과하므로 코드에 있는 @Scheduled 메서드 수와 비교한다
+    // 컨텍스트에 등록된 작업만 세면 test 프로파일에서 꺼지고 운영에서만 켜지는 워커를 빠뜨린다
     // poolSize는 지금 떠 있는 스레드 수라 첫 주기 전에는 1이다, 설정값인 corePoolSize를 본다
     @Test
     fun `keeps one scheduling thread per scheduled worker`() {
         val scheduler = context.getBean("taskScheduler", ThreadPoolTaskScheduler::class.java)
+        // 기본 스캐너는 @ConditionalOnProperty를 평가해 지금 꺼진 워커를 후보에서 뺀다, 조건을 보지 않고 메서드만 본다
+        // 워커는 구체 클래스에 메서드 하나당 @Scheduled 하나로 둔다는 전제다, 부모 클래스 선언과 @Schedules 묶음은 세지 못한다
+        val scanner = object : ClassPathScanningCandidateComponentProvider(false) {
+            override fun isCandidateComponent(metadataReader: MetadataReader): Boolean =
+                metadataReader.annotationMetadata.hasAnnotatedMethods(Scheduled::class.java.name)
+        }
+        val scheduledMethods = scanner.findCandidateComponents("kr.msgctf.scheduler")
+            .map { it as AnnotatedBeanDefinition }
+            .flatMap { definition ->
+                definition.metadata.getAnnotatedMethods(Scheduled::class.java.name)
+                    .map { "${definition.beanClassName?.substringAfterLast('.')}.${it.methodName}" }
+            }
 
-        assertEquals(2, scheduler.scheduledThreadPoolExecutor.corePoolSize)
+        // 찾는 방법이 깨져 0개가 되면 아래 비교가 저절로 통과하므로 지금 있는 셋은 반드시 찾아야 한다
+        assertTrue(scheduledMethods.size >= 3, scheduledMethods.toString())
+        assertTrue(
+            scheduler.scheduledThreadPoolExecutor.corePoolSize >= scheduledMethods.size,
+            "scheduling threads=${scheduler.scheduledThreadPoolExecutor.corePoolSize}, scheduled methods=$scheduledMethods",
+        )
     }
 }
