@@ -200,4 +200,8 @@ class Instance(
     // broker 후보 조회, 생성 재접수, operation 폴링 단계에서 각각 센다
     @Column(name = "attempt_count", nullable = false)
     var attemptCount: Int = 0,
+
+    // 삭제가 진행 중이라 폴링 시한을 연장한 횟수, operation을 새로 접수하거나 놓으면 0으로 되돌린다
+    @Column(name = "poll_extension_count", nullable = false)
+    var pollExtensionCount: Int = 0,
 )

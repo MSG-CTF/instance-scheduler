@@ -5769,6 +5769,133 @@ class InstanceOperationServiceTest {
         assertEquals(emptyList(), events.saved)
     }
 
+    // 연장이 정한 횟수에 닿으면 오류 이벤트를 한 번 남기고, 그 뒤 연장에서는 더 남기지 않는다
+    // 경보를 남긴 뒤에도 operation을 쥔 채 연장을 이어 가야 삭제 결과를 받을 수 있다
+    @Test
+    fun `records one delete extension alert when extensions reach the alert count`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping())
+        val service = newService(
+            repository,
+            events = events,
+            transitionEvents = events,
+            operationProperties = OperationProperties(deleteExtensionAlertCount = 3),
+        )
+        service.submitDelete(instance.instanceId)
+        val operationId = assertNotNull(instance.runtimeOperationId)
+        val errorsAfter = mutableListOf<Int>()
+
+        // when
+        repeat(4) {
+            instance.pollDeadlineAt = clock.instant()
+            service.pollOperation(instance.instanceId)
+            errorsAfter += events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED }
+        }
+
+        // then
+        assertEquals(listOf(0, 0, 1, 1), errorsAfter)
+        assertEquals(4, instance.pollExtensionCount)
+        assertEquals(InstanceStatus.STOPPING, instance.status)
+        assertEquals(operationId, instance.runtimeOperationId)
+        assertEquals(clock.instant().plus(OperationProperties().pollTimeout), instance.pollDeadlineAt)
+        val alert = events.saved.single { it.eventType == InstanceEventType.ERROR_RECORDED }
+        assertEquals(SchedulerErrorCode.RUNTIME_DELETE_FAILED, alert.errorCode)
+        assertEquals(
+            "operationId=$operationId, reason=delete still in progress after 3 extensions, cleanup continues",
+            alert.adminDetail,
+        )
+    }
+
+    // 새로 접수한 operation은 연장 횟수를 0부터 센다, 이전 operation의 횟수가 남으면 경보가 일찍 나간다
+    @Test
+    fun `restarts the delete extension count when a delete is accepted`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping().apply { pollExtensionCount = 2 })
+        val service = newService(
+            repository,
+            events = events,
+            transitionEvents = events,
+            operationProperties = OperationProperties(deleteExtensionAlertCount = 3),
+        )
+
+        // when
+        service.submitDelete(instance.instanceId)
+        assertEquals(0, instance.pollExtensionCount)
+        instance.pollDeadlineAt = clock.instant()
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(1, instance.pollExtensionCount)
+        assertEquals(0, events.saved.count { it.eventType == InstanceEventType.ERROR_RECORDED })
+    }
+
+    // operation을 놓으면 연장 횟수를 0으로 되돌린다, 같은 요청으로 다시 접수한 operation이 이전 횟수를 이어 받지 않게 한다
+    @Test
+    fun `clears the delete extension count when the operation is released`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(newStopping())
+        val service = newService(repository, events = events, transitionEvents = events)
+        service.submitDelete(instance.instanceId)
+        repeat(2) {
+            instance.pollDeadlineAt = clock.instant()
+            service.pollOperation(instance.instanceId)
+        }
+        assertEquals(2, instance.pollExtensionCount)
+        // 조회 오류가 이어진 채 시한을 넘기면 operation을 놓고 상태 확인부터 다시 한다
+        instance.attemptCount = 3
+        instance.pollDeadlineAt = clock.instant()
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertNull(instance.runtimeOperationId)
+        assertEquals(0, instance.pollExtensionCount)
+    }
+
+    // 생성 결과를 아직 기다리는 정리는 연장하지 않고 조회 경로로 넘긴다, 연장 횟수도 오르지 않는다
+    @Test
+    fun `does not count an extension while the create result is still unknown`() {
+        // given
+        val repository = TestInstanceRepository()
+        val events = TestInstanceEventRepository()
+        val instance = repository.save(
+            newCleanupPending().apply {
+                runtimeWorkloadId = null
+                runtimeOperationId = "create-operation"
+                pollDeadlineAt = clock.instant()
+                nextPollAt = clock.instant()
+            },
+        )
+        val service = newService(
+            repository,
+            events = events,
+            transitionEvents = events,
+            operationProperties = OperationProperties(deleteExtensionAlertCount = 1),
+        )
+
+        // when
+        service.pollOperation(instance.instanceId)
+
+        // then
+        assertEquals(0, instance.pollExtensionCount)
+        assertNull(instance.runtimeOperationId)
+        val errors = events.saved.filter { it.eventType == InstanceEventType.ERROR_RECORDED }
+        assertEquals(listOf(SchedulerErrorCode.RUNTIME_CREATE_FAILED), errors.map { it.errorCode })
+    }
+
+    // 1보다 작으면 경보가 영영 나가지 않으므로 기동 때 막는다
+    @Test
+    fun `rejects delete extension alert count below one`() {
+        assertFailsWith<IllegalArgumentException> { OperationProperties(deleteExtensionAlertCount = 0) }
+    }
+
     // 결과 조회가 계속 실패해 시한을 넘기면 삭제가 끝났는지 모른다
     // operation을 놓고 다음 주기에 workload가 남았는지부터 묻게 한다, 예약은 쥔 채로 둔다
     @Test
