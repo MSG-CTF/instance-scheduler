@@ -26,6 +26,8 @@ data class CreateInstanceCommand(
     val ttlMinutes: Long,
     val hardTimeoutMinutes: Long,
     val releaseId: UUID? = null,
+    val requireReplacementConfirmation: Boolean = false,
+    val replaceInstanceId: UUID? = null,
 )
 
 // delete 서비스에 넘기는 요청 값

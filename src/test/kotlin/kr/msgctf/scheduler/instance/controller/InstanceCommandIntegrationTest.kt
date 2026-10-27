@@ -1111,6 +1111,56 @@ class InstanceCommandIntegrationTest {
         }
     }
 
+    @Test
+    fun `guarded create API preserves current instance until its id is confirmed`() {
+        val previous = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(1300)))
+        val body = createRequestBody(previous.teamId, testUuid(10), previous.userId)
+            .replaceFirst("{", "{\"require_replacement_confirmation\":true,")
+        for (path in listOf("/api/instances", "/api/v2/instances")) {
+            mockMvc.post(path) {
+                contentType = MediaType.APPLICATION_JSON
+                content = body
+            }.andExpect {
+                status { isConflict() }
+                jsonPath("$.code") { value("INSTANCE_REPLACEMENT_REQUIRED") }
+            }
+            assertEquals(InstanceStatus.RUNNING, instanceRepository.findById(previous.instanceId).orElseThrow().status)
+        }
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = body.replaceFirst("{", "{\"replace_instance_id\":\"${previous.instanceId}\",")
+        }.andExpect {
+            status { isAccepted() }
+            jsonPath("$.data.replaced_instance_id") { value(previous.instanceId.toString()) }
+        }
+        assertEquals(InstanceStatus.CLEANUP_PENDING, instanceRepository.findById(previous.instanceId).orElseThrow().status)
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = body.replaceFirst("{", "{\"replace_instance_id\":\"${previous.instanceId}\",")
+        }.andExpect {
+            status { isConflict() }
+            jsonPath("$.code") { value("INSTANCE_STATE_CHANGED") }
+        }
+    }
+
+    @Test
+    fun `guarded create API rejects stale confirmation without state changes`() {
+        val previous = instanceRepository.saveAndFlush(runningInstance(teamId = testUuid(1301)))
+        val body = createRequestBody(previous.teamId, testUuid(10), previous.userId)
+            .replaceFirst("{", "{\"require_replacement_confirmation\":true,\"replace_instance_id\":\"${UUID.randomUUID()}\",")
+        mockMvc.post("/api/instances") {
+            contentType = MediaType.APPLICATION_JSON
+            content = body
+        }.andExpect {
+            status { isConflict() }
+            jsonPath("$.code") { value("INSTANCE_STATE_CHANGED") }
+        }
+        val after = instanceRepository.findById(previous.instanceId).orElseThrow()
+        assertEquals(InstanceStatus.RUNNING, after.status)
+        assertEquals(InstanceAction.CREATE, after.action)
+        assertEquals(1, instanceRepository.count())
+    }
+
     private fun parseTime(value: String): Instant = OffsetDateTime.parse(value).toInstant()
 
     private fun runningInstance(
