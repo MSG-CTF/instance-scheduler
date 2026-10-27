@@ -7,6 +7,14 @@ spring:
     group:
       dev: real
       prod: real
+  datasource:
+    hikari:
+      # DB가 없을 때 요청과 워커가 기본값 30초씩 매달리지 않게 짧게 자른다
+      # 2026-10-27 시험에서 Postgres 재시작 동안 생성 응답이 p50 30초였고 Tomcat 스레드가 쌓였다
+      # 빨리 실패해야 백엔드가 재시도하고 health가 바로 DOWN을 알린다, 값은 밀리초다
+      connection-timeout: 3000
+      # 끊어진 연결을 검증할 때 기다리는 시간, 연결 대기보다 짧아야 한다
+      validation-timeout: 2000
   jpa:
     # 요청이 끝날 때까지 DB 연결을 쥐지 않게 끈다
     # Windows 배정 API는 요청 스레드에서 브로커를 부르므로, 켜 두면 브로커를 기다리는 동안 연결 풀을 잡아먹는다
@@ -23,7 +31,8 @@ spring:
         # 기본은 1이라 operation 워커 한 주기가 끝날 때까지 cleanup 워커가 못 돈다
         # 워커마다 한 스레드씩 쓰게 한다, 같은 워커는 fixedDelay라 스스로 겹치지 않는다
         # @Scheduled 워커를 더하면 이 값도 그만큼 늘린다
-        size: 2
+        # operation 워커, cleanup 워커, 예약 반납 워커 세 개다
+        size: 3
 
 springdoc:
   api-docs:

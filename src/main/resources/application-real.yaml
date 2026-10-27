@@ -26,5 +26,6 @@ scheduler:
 spring:
   datasource:
     hikari:
-      # 워커 스레드마다 커넥션 하나에 API 몫 10개, 모자라면 connection-timeout 30초를 기다린다
+      # 워커가 동시에 쥐는 커넥션은 실행 스레드 8개와 스케줄 워커 3개로 많아야 11개, 남은 9개 안팎이 API 몫이다
+      # 모자라면 connection-timeout(application.yaml, 3초)만큼 기다리고 실패한다
       maximum-pool-size: 20
