@@ -51,6 +51,10 @@ data class RuntimeWorkload(
 
     @JsonProperty("resource_limits")
     val resourceLimits: RuntimeResourceLimits,
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("steady_cpu_millicores")
+    val steadyCpuMillicores: Int? = null,
 )
 
 // 컨테이너 하나의 실행과 격리 선언
@@ -235,6 +239,9 @@ data class RuntimeOperationResult(
     // 공개 포트마다 하나씩 온다, DELETE operation에는 없다
     // 계약상 CREATE 성공에는 필수지만 런타임이 아직 안 보낼 수 있어 없는 경우를 받는다
     val endpoints: List<RuntimeEndpoint>?,
+
+    @JsonProperty("steady_cpu_millicores")
+    val steadyCpuMillicores: Int? = null,
 )
 
 // 참가자가 접속할 주소 하나

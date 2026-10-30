@@ -65,6 +65,10 @@ data class BrokerReservationCommitRequest(
 
     @JsonProperty("resource_profile")
     val resourceProfile: ResourceProfile,
+
+    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+    @JsonProperty("startup_cpu_millicores")
+    val startupCpuMillicores: Int? = null,
 ) : BrokerReservationMutationRequest
 
 // 선점을 돌려줄 때 보내는 값, 생성 실패와 정리 완료 둘 다 이 경로다

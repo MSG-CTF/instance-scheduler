@@ -122,6 +122,10 @@ class Instance(
     @Column(name = "cpu_millicores")
     var cpuMillicores: Int? = null,
 
+    // Persist the peak before any reservation, including retries after restart
+    @Column(name = "startup_cpu_millicores")
+    var startupCpuMillicores: Int? = null,
+
     @Column(name = "memory_mib")
     var memoryMib: Int? = null,
 

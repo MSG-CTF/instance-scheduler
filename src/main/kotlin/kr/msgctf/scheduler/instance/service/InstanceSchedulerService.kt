@@ -94,6 +94,9 @@ class InstanceSchedulerService(
                 isolationProfile = command.isolationProfile,
                 architecture = command.architecture,
                 cpuMillicores = command.resourceProfile.cpuMillicores,
+                startupCpuMillicores = instancePolicyService.startupCpuMillicores(
+                    command.containers, command.isolationProfile, command.resourceProfile,
+                ),
                 memoryMib = command.resourceProfile.memoryMib,
                 ephemeralStorageMib = command.resourceProfile.ephemeralStorageMib,
                 expiresAt = now.plusMinutesOrReject(command.ttlMinutes),
@@ -279,6 +282,9 @@ class InstanceSchedulerService(
                 isolationProfile = previous.isolationProfile,
                 architecture = architecture,
                 cpuMillicores = cpuMillicores,
+                startupCpuMillicores = instancePolicyService.startupCpuMillicores(
+                    storedContainers, previous.isolationProfile, storedResources,
+                ),
                 memoryMib = memoryMib,
                 ephemeralStorageMib = ephemeralStorageMib,
                 expiresAt = previous.expiresAt,

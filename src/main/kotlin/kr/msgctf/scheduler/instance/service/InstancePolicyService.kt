@@ -13,6 +13,14 @@ class InstancePolicyService(
     private val policyProperties: InstancePolicyProperties,
 ) {
 
+    fun startupCpuMillicores(
+        containers: List<ContainerSpec>,
+        isolationProfile: kr.msgctf.scheduler.runtime.IsolationProfile,
+        resources: kr.msgctf.scheduler.broker.ResourceProfile,
+    ): Int? = if (policyProperties.startupCpuBoostEnabled) {
+        StartupCpuPolicy.peak(containers, isolationProfile, resources.cpuMillicores)
+    } else null
+
     // ttl은 1분 이상이면서 hard timeout을 넘을 수 없다
     // hard timeout은 설정된 상한을 넘을 수 없다
     // 상한이 없으면 하드타임아웃 정리가 언제 발동할지를 요청자가 정하게 되어 안전망이 무력해진다

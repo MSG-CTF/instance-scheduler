@@ -6343,6 +6343,73 @@ class InstanceOperationServiceTest {
         }
     }
 
+    @Test
+    fun `startup peak survives worker restart and commits steady only after runtime confirmation`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { startupCpuMillicores = 1000 })
+        val peaks = mutableListOf<Int>()
+        val commits = mutableListOf<BrokerReservationCommitRequest>()
+        val delegateBroker = FakeBrokerClient()
+        val broker = object : BrokerClient by delegateBroker {
+            override fun createReservation(request: BrokerReservationRequest): BrokerReservationResponse {
+                peaks += request.resourceProfile.cpuMillicores
+                return delegateBroker.createReservation(request)
+            }
+            override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse {
+                commits += request
+                return delegateBroker.commitReservation(request)
+            }
+        }
+        val delegateRuntime = FakeRuntimeClient()
+        var sent: RuntimeCreateRequest? = null
+        val runtime = object : RuntimeClient by delegateRuntime {
+            override fun submitCreate(request: RuntimeCreateRequest): RuntimeSubmitResult {
+                sent = request
+                return delegateRuntime.submitCreate(request)
+            }
+            override fun getOperation(operationId: String): RuntimeOperationSnapshot {
+                val snapshot = delegateRuntime.getOperation(operationId)
+                return snapshot.copy(result = snapshot.result?.copy(steadyCpuMillicores = 500))
+            }
+        }
+        newService(repository, brokerClient = broker, runtimeClient = runtime).progressRequested(instance.instanceId)
+        assertEquals(listOf(1000), peaks)
+        assertEquals(1000, sent!!.workload.resourceLimits.cpuMillicores)
+        assertEquals(500, sent!!.workload.steadyCpuMillicores)
+        assertTrue(commits.isEmpty())
+        newService(repository, brokerClient = broker, runtimeClient = runtime).pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.RUNNING, instance.status)
+        assertEquals(500, commits.single().resourceProfile.cpuMillicores)
+        assertEquals(1000, commits.single().startupCpuMillicores)
+    }
+
+    @Test
+    fun `missing steady CPU confirmation cleans up without shrinking or publishing endpoint`() {
+        val repository = TestInstanceRepository()
+        val instance = repository.save(newRequested().apply { startupCpuMillicores = 1000 })
+        var commits = 0
+        val delegate = FakeBrokerClient()
+        val broker = object : BrokerClient by delegate {
+            override fun commitReservation(request: BrokerReservationCommitRequest): BrokerReservationResponse {
+                commits++
+                return delegate.commitReservation(request)
+            }
+        }
+        val runtime = FakeRuntimeClient()
+        val service = newService(repository, brokerClient = broker, runtimeClient = runtime)
+        service.progressRequested(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(0, commits)
+        assertNull(instance.serviceUrl)
+        assertNotNull(instance.reservationId)
+        assertTrue(instance.status in setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING))
+        service.submitDelete(instance.instanceId)
+        service.pollOperation(instance.instanceId)
+        assertEquals(InstanceStatus.CLEANED, instance.status)
+        assertNull(instance.reservationId)
+        assertEquals(1, delegate.releasedReservations.size)
+    }
+
     // 응답은 받았지만 준비된 target이 없는 정상 응답, 조회 멈춤에 걸리지 않는다
     private fun emptyReadiness(query: ImageReadinessQuery): ReadinessLookup =
         ReadinessLookup.Answered(

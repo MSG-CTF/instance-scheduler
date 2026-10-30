@@ -391,8 +391,9 @@ class InstanceOperationService(
             healthcheck = spec.healthcheck?.takeIf { forwardHealthcheck }?.let { check ->
                 RuntimeHealthcheck(container = check.container, port = check.port, path = check.path)
             },
+            steadyCpuMillicores = spec.resourceProfile.cpuMillicores.takeIf { spec.startupCpuMillicores != null },
             resourceLimits = RuntimeResourceLimits(
-                cpuMillicores = spec.resourceProfile.cpuMillicores,
+                cpuMillicores = spec.reservationResourceProfile.cpuMillicores,
                 memoryMib = spec.resourceProfile.memoryMib,
                 ephemeralStorageMib = spec.resourceProfile.ephemeralStorageMib,
             ),
@@ -971,6 +972,12 @@ class InstanceOperationService(
                 return@execute null
             }
             val result = checkNotNull(snapshot.result) { "operation result missing: $instanceId" }
+            if (instance.startupCpuMillicores != null && result.steadyCpuMillicores != instance.cpuMillicores) {
+                instance.runtimeWorkloadId = result.runtimeWorkloadId
+                parkForCreateCleanup(instance)
+                recordError(instance, SchedulerErrorCode.RUNTIME_CREATE_FAILED, "startup CPU restoration was not confirmed")
+                return@execute null
+            }
             pendingCommit(instance, result.runtimeWorkloadId)
         }
         if (reservationToCommit != null && !commitReservation(reservationToCommit)) {
@@ -985,6 +992,10 @@ class InstanceOperationService(
             when (instance.status) {
                 InstanceStatus.PROVISIONING -> {
                     val result = checkNotNull(snapshot.result) { "operation result missing: $instanceId" }
+                    if (instance.startupCpuMillicores != null && result.steadyCpuMillicores != instance.cpuMillicores) {
+                        parkForCreateCleanup(instance)
+                        return@executeWithoutResult
+                    }
                     instance.runtimeWorkloadId = result.runtimeWorkloadId
                     // 계약이 service_url을 첫 번째 공개 접속점으로 정의하므로 빠져 왔으면 그 정의대로 채운다
                     // 백엔드는 service_url이 채워지는 것으로 생성 완료를 판정해서 비워두면 완료를 못 알아챈다
@@ -1335,7 +1346,7 @@ class InstanceOperationService(
             memoryMib = instance.memoryMib ?: return null,
             ephemeralStorageMib = instance.ephemeralStorageMib ?: return null,
         )
-        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile, requireNotNull(instance.createdAt))
+        return PendingCommit(reservationId, instance.instanceId, runtimeWorkloadId, resourceProfile, requireNotNull(instance.createdAt), instance.startupCpuMillicores)
     }
 
     // 확정 실패는 기존 operation으로 재시도하고, 폴링 상한을 넘기면 생성 정리 경로를 탄다
@@ -1350,9 +1361,10 @@ class InstanceOperationService(
                     reservationId = commit.reservationId,
                     runtimeWorkloadId = commit.runtimeWorkloadId,
                     resourceProfile = commit.resourceProfile,
+                    startupCpuMillicores = commit.startupCpuMillicores,
                 ),
             )
-            response.status == BrokerReservationStatus.COMMITTED
+            response.status == BrokerReservationStatus.COMMITTED && response.reservationId == commit.reservationId
         } catch (exception: Exception) {
             log.warn(
                 "reservation commit failed: reservationId={}, reason={}",
@@ -1467,7 +1479,7 @@ class InstanceOperationService(
                     challengeId = spec.challengeId,
                     instanceId = instanceId,
                     architecture = spec.architecture,
-                    resourceProfile = spec.resourceProfile,
+                    resourceProfile = spec.reservationResourceProfile,
                 ),
             )
             val eligible = resourceCandidateSelector.rank(response, spec.architecture, instanceId)
@@ -1476,6 +1488,7 @@ class InstanceOperationService(
                 spec.architecture, spec.containers.map { it.image }, eligible.map { it.runtime.targetId },
             )
             response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readiness.readyTargets)
+                .filter { spec.startupCpuMillicores == null || it.runtime.type == kr.msgctf.scheduler.common.model.RuntimeType.KUBERNETES }
         } catch (exception: Exception) {
             handleBrokerFailure(instanceId, exception, ReservationGuard(null, spec.schedulingLease))
             return null
@@ -1713,7 +1726,7 @@ class InstanceOperationService(
             teamId = spec.teamId,
             challengeId = spec.challengeId,
             architecture = spec.architecture,
-            resourceProfile = spec.resourceProfile,
+            resourceProfile = spec.reservationResourceProfile,
         )
 
     // broker 실패는 간격을 늘려 다시 시도하고 한도에 닿으면 FAILED로 확정한다
@@ -1889,6 +1902,7 @@ class InstanceOperationService(
             isolationProfile = instance.isolationProfile,
             architecture = instance.architecture ?: return null,
             resourceProfile = resourceProfile,
+            startupCpuMillicores = instance.startupCpuMillicores,
             // 저장된 행은 항상 값이 있다, 없는 것은 저장을 거치지 않은 테스트 행뿐이다
             requestedAt = instance.createdAt ?: clock.instant(),
             pendingReservation = PendingReservationCodec.decodeOrNull(instance.pendingReservation, instance.instanceId),
@@ -1942,6 +1956,7 @@ private data class PendingCommit(
     val runtimeWorkloadId: String,
     val resourceProfile: ResourceProfile,
     val requestedAt: Instant,
+    val startupCpuMillicores: Int? = null,
 )
 
 private data class ResumedCreate(
@@ -1965,7 +1980,11 @@ private data class WorkloadSpec(
     val forwardReleaseMetadata: Boolean = false,
     val pendingReservationJson: String? = null,
     val schedulingLease: Instant? = null,
-)
+    val startupCpuMillicores: Int? = null,
+) {
+    val reservationResourceProfile: ResourceProfile
+        get() = resourceProfile.copy(cpuMillicores = startupCpuMillicores ?: resourceProfile.cpuMillicores)
+}
 
 private data class ObtainedReservation(
     val placement: Placement,
