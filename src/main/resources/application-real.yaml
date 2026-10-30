@@ -14,6 +14,8 @@ scheduler:
     fixed-delay: 30s
     retry-limit: 5
   operation:
+    # 생성·정리 중인 작업만 빠르게 확인한다, 조회 장애는 별도 backoff를 유지한다
+    fixed-delay: 1s
     # 워커가 한 단계의 대상을 동시에 처리하는 스레드 수, 브로커 팀이 동시 8개를 확인했다
     # 후보 하나의 자리보다 커도 된다, 예약이 자리 부족으로 거절되면 같은 주기에 다음 후보로 넘어간다
     parallelism: 8
@@ -21,7 +23,7 @@ scheduler:
     # 폴링 조회에도 걸려서 작으면 끝난 operation 확인이 늦어진다, 대회 규모인 200건은 한 주기에 다 잡는다
     batch-size: 200
     # 나눠 처리하면 끝나지 않은 operation을 주기마다 다시 묻게 되어 간격의 하한을 둔다
-    min-poll-interval: 5s
+    min-poll-interval: 1s
 
 spring:
   datasource:
