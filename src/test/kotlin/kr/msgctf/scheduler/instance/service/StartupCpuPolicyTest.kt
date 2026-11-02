@@ -28,4 +28,19 @@ class StartupCpuPolicyTest {
         assertEquals(1000, InstancePolicyService(InstancePolicyProperties(startupCpuBoostEnabled = true)).startupCpuMillicores(containers(), IsolationProfile.WEB, resources))
         assertEquals(300, resources.cpuMillicores)
     }
+
+    @Test
+    fun `current Cashout image keeps the reviewed boost without approving other revisions`() {
+        val image = "ghcr.io/msg-ctf/challenges/misc-cashout/web@sha256:d2e24f8112d2a80a7631182402e427907af60a1810e54da4f6ea533b545409b4"
+        val containers = listOf(ContainerSpec("web", image, listOf(18419), expose = true))
+        val resources = ResourceProfile(250, 128, 128)
+        val enabled = InstancePolicyService(InstancePolicyProperties(startupCpuBoostEnabled = true))
+        assertEquals(1000, enabled.startupCpuMillicores(containers, IsolationProfile.WEB, resources))
+        assertNull(InstancePolicyService(InstancePolicyProperties()).startupCpuMillicores(containers, IsolationProfile.WEB, resources))
+        assertNull(StartupCpuPolicy.peak(containers, IsolationProfile.WEB, 300))
+        assertNull(StartupCpuPolicy.peak(containers, IsolationProfile.PWN, 250))
+        assertNull(StartupCpuPolicy.peak(containers + containers, IsolationProfile.WEB, 250))
+        assertNull(StartupCpuPolicy.peak(listOf(containers.single().copy(image = image.dropLast(1) + "5")), IsolationProfile.WEB, 250))
+        assertEquals(ResourceProfile(250, 128, 128), resources)
+    }
 }
