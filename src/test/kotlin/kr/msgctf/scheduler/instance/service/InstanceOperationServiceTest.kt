@@ -694,6 +694,36 @@ class InstanceOperationServiceTest {
         assertEquals(clock.instant().plusSeconds(30), instance.nextPollAt)
     }
 
+    // 이전 인스턴스가 CLEANED가 되면 기다리던 교체 인스턴스를 그 자리에서 깨운다
+    // backoff-max 확인을 다 기다리지 않고 다음 주기에 예약으로 넘어가야 초기화가 빨라진다
+    // 다른 인스턴스를 기다리는 교체 인스턴스는 그대로 기다린다
+    @Test
+    fun `previous cleanup wakes its waiting replacement for the next cycle`() {
+        // given
+        val repository = TestInstanceRepository()
+        val broker = FakeBrokerClient()
+        val previous = repository.save(newStopping())
+        val replacement = repository.save(newRequested(previous.instanceId, previous.userId))
+        val otherPrevious = repository.save(newCleanupPending())
+        val other = repository.save(newRequested(otherPrevious.instanceId, otherPrevious.userId))
+        val service = newService(repository, brokerClient = broker)
+        service.progressRequested(replacement.instanceId)
+        service.progressRequested(other.instanceId)
+        assertEquals(clock.instant().plusSeconds(30), replacement.nextPollAt)
+
+        // when: 이전 인스턴스의 삭제 접수 뒤 결과 조회에서 SUCCEEDED가 와 정리가 끝난다
+        service.submitDelete(previous.instanceId)
+        service.pollOperation(previous.instanceId)
+
+        // then
+        assertEquals(InstanceStatus.CLEANED, previous.status)
+        assertEquals(clock.instant(), replacement.nextPollAt)
+        assertEquals(clock.instant().plusSeconds(30), other.nextPollAt)
+        service.progressRequested(replacement.instanceId)
+        assertEquals(1, broker.reservationRequests.size)
+        assertEquals(replacement.instanceId, broker.reservationRequests.single().instanceId)
+    }
+
     @Test
     fun `replacement survives three empty observations and service restart`() {
         val repository = TestInstanceRepository()

@@ -8,8 +8,10 @@ import kr.msgctf.scheduler.instance.domain.InstanceStatus
 import org.springframework.data.domain.Limit
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Lock
+import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
+import org.springframework.transaction.annotation.Transactional
 
 interface InstanceRepository : JpaRepository<Instance, UUID> {
 
@@ -38,6 +40,23 @@ interface InstanceRepository : JpaRepository<Instance, UUID> {
         teamId: UUID,
         statuses: Collection<InstanceStatus>,
     ): Long
+
+    // 이전 인스턴스가 CLEANED가 되는 트랜잭션에서, 그 인스턴스를 기다리던 교체 인스턴스의 다음 확인을 지금으로 당긴다
+    // 기다리는 동안의 확인 간격(backoff-max)을 다 채우지 않고 다음 주기에 예약으로 넘어가게 한다
+    // 아직 확인한 적 없거나 지금보다 이른 확인이 잡힌 인스턴스는 그대로 둔다
+    // 관리 중인 엔티티를 갱신하지 않으므로, 같은 트랜잭션에서 교체 인스턴스를 불러 둔 호출자는 쓰지 않는다
+    @Transactional
+    @Modifying
+    @Query(
+        "update Instance i set i.nextPollAt = :now" +
+            " where i.replacedInstanceId = :previousId and i.status in :statuses" +
+            " and i.runtimeOperationId is null and i.nextPollAt > :now",
+    )
+    fun wakeReplacementsOf(
+        @Param("previousId") previousId: UUID,
+        @Param("statuses") statuses: Collection<InstanceStatus>,
+        @Param("now") now: Instant,
+    ): Int
 
     // 같은 인스턴스에 동시에 들어온 삭제 요청을 직렬화한다
     // 행 잠금이 없으면 두 요청이 모두 RUNNING을 읽어 Runtime 삭제를 두 번 호출한다

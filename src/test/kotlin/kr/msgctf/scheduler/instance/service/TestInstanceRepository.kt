@@ -115,6 +115,19 @@ class TestInstanceRepository {
                     val statuses = args[1] as Collection<InstanceStatus>
                     savedInstances.count { it.teamId == teamId && it.status in statuses }.toLong()
                 }
+                // 실제 update 쿼리와 같은 조건으로 다음 확인 시각만 당긴다
+                "wakeReplacementsOf" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val previousId = args?.get(0) as UUID
+                    val statuses = args[1] as Collection<InstanceStatus>
+                    val now = args[2] as Instant
+                    val targets = savedInstances.filter {
+                        it.replacedInstanceId == previousId && it.status in statuses &&
+                            it.runtimeOperationId == null && it.nextPollAt?.isAfter(now) == true
+                    }
+                    targets.forEach { it.nextPollAt = now }
+                    targets.size
+                }
                 "flush" -> null
                 else -> throw UnsupportedOperationException("${method.name} is not used in service tests")
             }
