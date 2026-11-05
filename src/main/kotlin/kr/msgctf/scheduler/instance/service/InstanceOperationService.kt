@@ -221,6 +221,7 @@ class InstanceOperationService(
         }
         // 다른 워커가 이미 처리 중이거나 대기 시각을 정했으면 같은 요청을 다시 보내지 않는다
         if (instance.nextPollAt?.isAfter(now) == true) return false
+        // 이전 인스턴스는 잠그지 않고 읽는다, completeDelete가 이전 인스턴스를 잠근 채 이 인스턴스를 깨우므로 잠그면 교착한다
         val previous = instanceRepository.findById(previousId).orElse(null)
         if (previous == null || previous.userId != instance.userId) {
             failReplacement(instance, SchedulerErrorCode.INTERNAL_ERROR, "replacement predecessor missing or ownership mismatch, previousInstanceId=$previousId")
@@ -1178,6 +1179,11 @@ class InstanceOperationService(
         transitionService.move(instance, InstanceStatus.CLEANED, transitionDetail)
         instance.action = null
         clearOperation(instance)
+        // 이 인스턴스를 기다리던 교체 인스턴스를 바로 깨워 다음 주기에 예약하게 한다
+        // 확인 간격을 줄이는 대신 깨우는 것은, 기다리는 인스턴스가 주기마다 다시 집혀 새 생성의 처리 칸을 차지하지 않게 하려는 것이다
+        // 깨우기 update가 실패하면 CLEANED 전환도 함께 롤백되고 다음 주기에 정리를 다시 확인한다
+        // bulk update라 영속성 컨텍스트를 고치지 않는다, 이 트랜잭션에서 교체 인스턴스 엔티티를 불러 고치면 flush가 깨운 값을 덮는다
+        instanceRepository.wakeReplacementsOf(instance.instanceId, REPLACEMENT_WAIT_STATES, clock.instant())
     }
 
     // 런타임이 확정한 삭제 실패로 FAILED에 둔다, 워커는 다시 집지 않으므로 운영자가 retry-cleanup해야 정리가 이어진다
@@ -1915,6 +1921,8 @@ class InstanceOperationService(
 
     companion object {
         private val DELETE_SUBMIT_STATES = setOf(InstanceStatus.STOPPING, InstanceStatus.CLEANUP_PENDING)
+        // 교체 인스턴스가 이전 인스턴스의 정리를 기다리는 동안 머무는 상태
+        private val REPLACEMENT_WAIT_STATES = setOf(InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING)
 
         // 워커가 진행, 재접수, 삭제 접수 대상으로 조회하는 상태, 폴링 대상은 operation id로 따로 가린다
         private val DEFERRABLE_STATES = setOf(

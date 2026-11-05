@@ -228,6 +228,39 @@ class InstanceOperationIntegrationTest {
         assertNull(found.action)
     }
 
+    // 이전 인스턴스가 워커 안에서 CLEANED가 되면 30초 뒤로 잡혀 있던 교체 인스턴스가 다음 주기에 바로 진행되는지 확인
+    // 엔티티 변경과 깨우기 update가 실제 트랜잭션 하나에서 함께 저장되는지 PostgreSQL로 본다
+    @Test
+    fun `cleaning the previous instance lets its replacement proceed on the next cycle`() {
+        val previous = instanceRepository.saveAndFlush(
+            newRequested().apply {
+                status = InstanceStatus.STOPPING
+                action = InstanceAction.DELETE
+                deleteReason = RuntimeDeleteReason.USER_REQUESTED
+                runtimeType = RuntimeType.KUBERNETES
+                runtimeTargetId = "cluster-main"
+                runtimeWorkloadId = "workload-$instanceId"
+            },
+        )
+        val replacement = instanceRepository.saveAndFlush(
+            newRequested(previous.instanceId, previous.userId).apply {
+                status = InstanceStatus.SCHEDULING
+                // 이전 정리를 한 번 확인하고 backoff-max 뒤로 미뤄 둔 상태다
+                nextPollAt = Instant.now().plusSeconds(30)
+            },
+        )
+        val worker = newWorker()
+
+        worker.progressOperations()
+        worker.progressOperations()
+        assertEquals(InstanceStatus.CLEANED, instanceRepository.findById(previous.instanceId).orElseThrow().status)
+
+        worker.progressOperations()
+        val found = instanceRepository.findById(replacement.instanceId).orElseThrow()
+        assertTrue(found.status in setOf(InstanceStatus.PROVISIONING, InstanceStatus.RUNNING), "status=${found.status}")
+        assertNotNull(found.reservationId)
+    }
+
     // 접수 도중 끊겨 operation이 없는 PROVISIONING 행을 워커가 찾아 다시 접수하는지 확인
     // 진행, 폴링, 삭제 접수 어느 쿼리에도 안 걸려 방치되던 조합이다
     @Test

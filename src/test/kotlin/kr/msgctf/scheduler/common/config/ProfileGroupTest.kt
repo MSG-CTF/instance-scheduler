@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kr.msgctf.scheduler.instance.config.InstancePolicyProperties
+import kr.msgctf.scheduler.instance.config.OperationProperties
 import org.springframework.boot.WebApplicationType
 import org.springframework.boot.builder.SpringApplicationBuilder
 import org.springframework.boot.context.properties.bind.Binder
@@ -72,6 +73,8 @@ class ProfileGroupTest {
                 assertEquals("true", environment.getProperty("scheduler.cleanup.enabled"), profile)
                 assertEquals("8", environment.getProperty("scheduler.operation.parallelism"), profile)
                 assertEquals("20", environment.getProperty("spring.datasource.hikari.maximum-pool-size"), profile)
+                // 키 이름이 어긋나면 기본값 3으로 돌아 넘친 요청이 FAILED로 끝나므로 설정 클래스로 묶어 본다
+                assertEquals(10, bindOperation(context).brokerRetryLimit, profile)
             }
         }
     }
@@ -95,6 +98,11 @@ class ProfileGroupTest {
         Binder.get(context.environment)
             .bind("scheduler.instance-policy", InstancePolicyProperties::class.java)
             .orElseGet { InstancePolicyProperties() }
+
+    private fun bindOperation(context: ConfigurableApplicationContext): OperationProperties =
+        Binder.get(context.environment)
+            .bind("scheduler.operation", OperationProperties::class.java)
+            .orElseGet { OperationProperties() }
 
     // profiles()는 이미 켜진 프로파일에 더하므로 SPRING_PROFILES_ACTIVE가 있는 환경에서 섞인다
     // 명령줄 인자는 환경변수보다 우선해서 지정한 프로파일만 켜진다

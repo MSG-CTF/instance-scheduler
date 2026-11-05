@@ -369,6 +369,59 @@ class InstanceRepositoryTest {
         )
     }
 
+    // 이전 인스턴스를 기다리는 교체 인스턴스만 깨우는지 확인
+    // 다른 인스턴스를 기다리거나, 이미 접수했거나, 대기 상태가 아니거나, 지금보다 이른 확인이 잡힌 인스턴스는 그대로 둔다
+    @Test
+    fun `wakes only replacements waiting on the cleaned instance`() {
+        val now = Instant.parse("2026-06-29T00:00:00Z")
+        val later = now.plusSeconds(30)
+        val previousId = UUID.randomUUID()
+        fun replacement(waitingOn: UUID, status: InstanceStatus, nextPollAt: Instant?, operationId: String? = null) =
+            instanceRepository.saveAndFlush(
+                Instance(
+                    teamId = testUuid(100),
+                    userId = UUID.randomUUID(),
+                    challengeId = testUuid(10),
+                    replacedInstanceId = waitingOn,
+                    status = status,
+                    isolationProfile = IsolationProfile.WEB,
+                    expiresAt = now.plusSeconds(7200),
+                    hardExpiresAt = now.plusSeconds(10800),
+                ).apply {
+                    this.nextPollAt = nextPollAt
+                    runtimeOperationId = operationId
+                },
+            )
+        val requested = replacement(previousId, InstanceStatus.REQUESTED, later)
+        val scheduling = replacement(previousId, InstanceStatus.SCHEDULING, later)
+        val otherPrevious = replacement(UUID.randomUUID(), InstanceStatus.SCHEDULING, later)
+        val submitted = replacement(previousId, InstanceStatus.SCHEDULING, later, operationId = "op-1")
+        val provisioning = replacement(previousId, InstanceStatus.PROVISIONING, later)
+        val alreadyDue = replacement(previousId, InstanceStatus.SCHEDULING, now.minusSeconds(5))
+        val neverChecked = replacement(previousId, InstanceStatus.REQUESTED, null)
+
+        val woken = instanceRepository.wakeReplacementsOf(
+            previousId,
+            listOf(InstanceStatus.REQUESTED, InstanceStatus.SCHEDULING),
+            now,
+        )
+
+        assertEquals(2, woken)
+        fun nextPollOf(instance: Instance): Instant? =
+            jdbcTemplate.queryForObject(
+                "select next_poll_at from challenge_instance where instance_id = ?",
+                Timestamp::class.java,
+                instance.instanceId,
+            )?.toInstant()
+        assertEquals(now, nextPollOf(requested))
+        assertEquals(now, nextPollOf(scheduling))
+        assertEquals(later, nextPollOf(otherPrevious))
+        assertEquals(later, nextPollOf(submitted))
+        assertEquals(later, nextPollOf(provisioning))
+        assertEquals(now.minusSeconds(5), nextPollOf(alreadyDue))
+        assertNull(nextPollOf(neverChecked))
+    }
+
     // next_poll_at이 지난 폴링 대상만 잡는지 확인
     @Test
     fun `finds poll targets past next poll at`() {
