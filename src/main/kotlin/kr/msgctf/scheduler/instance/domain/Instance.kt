@@ -27,6 +27,15 @@ class Instance(
     @Column(name = "instance_id", nullable = false, updatable = false)
     val instanceId: UUID = UUID.randomUUID(),
 
+    @Column(name = "request_id", updatable = false)
+    val requestId: UUID? = null,
+
+    @Column(name = "request_kind", updatable = false)
+    val requestKind: String? = null,
+
+    @Column(name = "request_fingerprint", updatable = false)
+    val requestFingerprint: String? = null,
+
     @Column(name = "team_id", nullable = false)
     val teamId: UUID,
 

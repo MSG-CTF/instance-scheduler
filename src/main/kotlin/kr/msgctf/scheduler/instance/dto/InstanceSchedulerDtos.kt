@@ -28,6 +28,7 @@ data class CreateInstanceCommand(
     val releaseId: UUID? = null,
     val requireReplacementConfirmation: Boolean = false,
     val replaceInstanceId: UUID? = null,
+    val requestId: UUID? = null,
 )
 
 // delete 서비스에 넘기는 요청 값
@@ -45,6 +46,7 @@ data class ExtendInstanceCommand(
 // reset 서비스에 넘기는 요청 값
 data class ResetInstanceCommand(
     val instanceId: UUID,
+    val requestId: UUID? = null,
 )
 
 // create/delete/reset/active 조회가 공통으로 돌려주는 결과 값

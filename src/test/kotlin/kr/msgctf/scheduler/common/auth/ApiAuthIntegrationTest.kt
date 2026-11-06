@@ -36,6 +36,23 @@ class ApiAuthIntegrationTest {
             }
     }
 
+    @Test
+    fun `request result requires authentication and snake case owner scope`() {
+        val path = "/api/instances/requests/${UUID.randomUUID()}"
+        mockMvc.get(path).andExpect { status { isUnauthorized() } }
+        mockMvc.get(path) {
+            header(HttpHeaders.AUTHORIZATION, "Bearer test-api-token")
+        }.andExpect { status { isBadRequest() } }
+        mockMvc.get(path) {
+            header(HttpHeaders.AUTHORIZATION, "Bearer test-api-token")
+            param("user_id", UUID.randomUUID().toString())
+            param("team_id", UUID.randomUUID().toString())
+        }.andExpect {
+            status { isNotFound() }
+            jsonPath("$.code") { value("INSTANCE_REQUEST_NOT_FOUND") }
+        }
+    }
+
     // 올바른 토큰이면 필터를 지나 컨트롤러가 응답하는지 확인
     @Test
     fun `passes api call with token`() {

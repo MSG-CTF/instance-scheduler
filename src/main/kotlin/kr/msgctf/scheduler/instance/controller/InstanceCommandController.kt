@@ -10,6 +10,7 @@ import kr.msgctf.scheduler.instance.dto.ExtendInstanceRequest
 import kr.msgctf.scheduler.instance.dto.ExtendInstanceResponse
 import kr.msgctf.scheduler.instance.dto.InstanceResponse
 import kr.msgctf.scheduler.instance.dto.ResetInstanceCommand
+import kr.msgctf.scheduler.instance.dto.ResetInstanceRequest
 import kr.msgctf.scheduler.instance.service.InstanceSchedulerService
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.DeleteMapping
@@ -59,11 +60,12 @@ class InstanceCommandController(
     @ResponseStatus(HttpStatus.ACCEPTED)
     fun resetInstance(
         @PathVariable instanceId: UUID,
+        @RequestBody(required = false) request: ResetInstanceRequest? = null,
     ): ApiResponse<InstanceResponse> =
         ApiResponse.success(
             message = "인스턴스 초기화 요청 성공",
             data = InstanceResponse.from(
-                instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instanceId)),
+                instanceSchedulerService.resetInstance(ResetInstanceCommand(instanceId = instanceId, requestId = request?.requestId)),
             ),
         )
 

@@ -9,6 +9,7 @@ import kr.msgctf.scheduler.instance.dto.InstanceEventResponse
 import kr.msgctf.scheduler.instance.dto.InstanceListQuery
 import kr.msgctf.scheduler.instance.dto.InstancePageResponse
 import kr.msgctf.scheduler.instance.dto.InstanceResponse
+import kr.msgctf.scheduler.instance.dto.InstanceRequestResponse
 import kr.msgctf.scheduler.instance.service.InstanceQueryService
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
@@ -22,6 +23,16 @@ import org.springframework.web.bind.annotation.RestController
 class InstanceQueryController(
     private val instanceQueryService: InstanceQueryService,
 ) {
+
+    @GetMapping("/requests/{request_id}")
+    fun getRequestResult(
+        @PathVariable("request_id") requestId: UUID,
+        @RequestParam("user_id") userId: UUID,
+        @RequestParam("team_id") teamId: UUID,
+    ): ApiResponse<InstanceRequestResponse> = ApiResponse.success(
+        message = "요청 처리 결과 조회 성공",
+        data = instanceQueryService.getRequestResult(requestId, userId, teamId),
+    )
 
     @GetMapping("/{instanceId}")
     fun getInstance(

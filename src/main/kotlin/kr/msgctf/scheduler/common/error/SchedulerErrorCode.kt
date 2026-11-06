@@ -7,6 +7,8 @@ enum class SchedulerErrorCode(
     val httpStatus: HttpStatus,
     val responseMessage: String,
 ) {
+    INSTANCE_REQUEST_NOT_FOUND(HttpStatus.NOT_FOUND, "요청 처리 결과를 찾을 수 없습니다"),
+    INSTANCE_REQUEST_CONFLICT(HttpStatus.CONFLICT, "같은 요청 ID가 다른 작업에 사용됐습니다"),
     INVALID_STATE_TRANSITION(
         HttpStatus.BAD_REQUEST,
         "현재 상태에서는 요청을 처리할 수 없습니다.",

@@ -55,11 +55,11 @@ class ReleaseIdMigrationTest {
 
         val current = flyway()
         // V26은 기존 정리 상태에 반납 의도를 소급해서 만들지 않는다
-        assertEquals(9, current.migrate().migrationsExecuted)
+        assertEquals(10, current.migrate().migrationsExecuted)
         current.validate()
         connection().use { connection ->
             connection.prepareStatement(
-                "SELECT status, containers, create_failure_confirmed, release_id, cleanup_generation, release_metadata_forwarded, reservation_release_reason, startup_cpu_millicores FROM challenge_instance WHERE instance_id = ?",
+                "SELECT status, containers, create_failure_confirmed, release_id, cleanup_generation, release_metadata_forwarded, reservation_release_reason, startup_cpu_millicores, request_id, request_kind, request_fingerprint FROM challenge_instance WHERE instance_id = ?",
             ).use { statement ->
                 statement.setObject(1, instanceId)
                 statement.executeQuery().use { result ->
@@ -72,6 +72,9 @@ class ReleaseIdMigrationTest {
                     assertNull(result.getObject("release_metadata_forwarded"))
                     assertNull(result.getObject("reservation_release_reason"))
                     assertNull(result.getObject("startup_cpu_millicores"))
+                    assertNull(result.getObject("request_id"))
+                    assertNull(result.getObject("request_kind"))
+                    assertNull(result.getObject("request_fingerprint"))
                 }
             }
             connection.prepareStatement(
