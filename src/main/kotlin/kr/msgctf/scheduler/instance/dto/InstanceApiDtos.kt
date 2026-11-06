@@ -48,6 +48,7 @@ data class CreateInstanceRequest(
     // 참가자 생성은 확인한 기존 ID와 행 잠금 아래의 실제 ID가 일치해야 교체한다
     val requireReplacementConfirmation: Boolean = false,
     val replaceInstanceId: UUID? = null,
+    val requestId: UUID? = null,
 
     // Runtime에 그대로 넘길 격리 정책
     // 런타임 계약이 값을 필수로 받으므로 여기서 빠지면 접수하지 않는다
@@ -83,6 +84,7 @@ data class CreateInstanceRequest(
             releaseId = releaseId,
             requireReplacementConfirmation = requireReplacementConfirmation,
             replaceInstanceId = replaceInstanceId,
+            requestId = requestId,
             isolationProfile = isolationProfile,
             architecture = architecture,
             resourceProfile = resources,
@@ -97,6 +99,16 @@ data class CreateInstanceRequest(
             adminDetail = adminDetail,
         )
 }
+
+data class ResetInstanceRequest(val requestId: UUID? = null)
+
+data class InstanceRequestResponse(
+    val requestId: UUID,
+    val userId: UUID,
+    val action: String,
+    val sourceInstanceId: UUID?,
+    val instance: InstanceDetailResponse,
+)
 
 // healthcheck 요청 값, HTTP GET으로 확인한다
 data class HealthcheckRequest(

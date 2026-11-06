@@ -39,6 +39,8 @@ class InstanceSchedulerService(
     // 접수만 하고 진행은 operation 워커가 맡는다
     @Transactional
     fun createInstance(command: CreateInstanceCommand): InstanceResult {
+        val fingerprint = command.requestId?.let { InstanceRequestFingerprint.of("CREATE", command.copy(requestId = null)) }
+        replayRequest(command.requestId, "CREATE", fingerprint)?.let { return replayResult(it) }
         instancePolicyService.validateTtl(command.ttlMinutes, command.hardTimeoutMinutes)
         instancePolicyService.validateExposedPorts(command.containers)
         instancePolicyService.validateImages(
@@ -82,6 +84,9 @@ class InstanceSchedulerService(
         val instance = saveRequestedInstance(
             Instance(
                 teamId = command.teamId,
+                requestId = command.requestId,
+                requestKind = command.requestId?.let { "CREATE" },
+                requestFingerprint = fingerprint,
                 userId = command.userId,
                 challengeId = command.challengeId,
                 status = InstanceStatus.REQUESTED,
@@ -189,6 +194,8 @@ class InstanceSchedulerService(
     // 새 인스턴스라 request_id가 새로 나와 이 중복 걸러내기에 걸리지 않는다
     @Transactional
     fun resetInstance(command: ResetInstanceCommand): InstanceResult {
+        val fingerprint = command.requestId?.let { InstanceRequestFingerprint.of("RESET", command.copy(requestId = null)) }
+        replayRequest(command.requestId, "RESET", fingerprint)?.let { return replayResult(it) }
         // 같은 인스턴스에 동시에 들어온 삭제, 연장과 겹치지 않게 행을 잠근다
         val previous = instanceRepository.findByIdForUpdate(command.instanceId)
             ?: throw SchedulerException(
@@ -269,6 +276,9 @@ class InstanceSchedulerService(
         val instance = saveRequestedInstance(
             Instance(
                 teamId = previous.teamId,
+                requestId = command.requestId,
+                requestKind = command.requestId?.let { "RESET" },
+                requestFingerprint = fingerprint,
                 userId = previous.userId,
                 challengeId = previous.challengeId,
                 status = InstanceStatus.REQUESTED,
@@ -300,6 +310,23 @@ class InstanceSchedulerService(
             replacedInstanceId = replacedInstanceId,
         )
     }
+
+    private fun replayRequest(requestId: UUID?, kind: String, fingerprint: String?): Instance? {
+        if (requestId == null) return null
+        if (requestId == UUID(0L, 0L)) {
+            throw SchedulerException(SchedulerErrorCode.INVALID_REQUEST, "zero request ID")
+        }
+        instanceRepository.lockRequest(requestId.toString())
+        val existing = instanceRepository.findByRequestId(requestId) ?: return null
+        if (existing.requestKind != kind || existing.requestFingerprint != fingerprint) {
+            throw SchedulerException(SchedulerErrorCode.INSTANCE_REQUEST_CONFLICT, "requestId=$requestId, payload conflict")
+        }
+        return existing
+    }
+
+    private fun replayResult(instance: Instance): InstanceResult = InstanceResult.from(
+        instance, serviceEndpointCodec.decodeOrEmpty(instance.endpoints, instance.instanceId), instance.replacedInstanceId,
+    )
 
     @Transactional
     fun extendInstance(command: ExtendInstanceCommand): InstanceResult {

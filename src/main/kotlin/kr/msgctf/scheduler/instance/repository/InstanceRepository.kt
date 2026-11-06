@@ -15,6 +15,12 @@ import org.springframework.transaction.annotation.Transactional
 
 interface InstanceRepository : JpaRepository<Instance, UUID> {
 
+    fun findByRequestId(requestId: UUID): Instance?
+
+    // Request locks have a separate namespace from team locks and precede entity locks.
+    @Query(value = "select pg_advisory_xact_lock(hashtextextended('instance-request:' || :requestId, 0))", nativeQuery = true)
+    fun lockRequest(@Param("requestId") requestId: String)
+
     @Query(
         "select i from Instance i where i.reservationReleaseReason is not null and i.reservationId is not null" +
             " and (i.nextPollAt is null or i.nextPollAt <= :now) order by i.createdAt, i.instanceId",

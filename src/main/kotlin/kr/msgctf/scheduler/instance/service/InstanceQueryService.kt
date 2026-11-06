@@ -18,6 +18,8 @@ import kr.msgctf.scheduler.instance.dto.InstanceEventResult
 import kr.msgctf.scheduler.instance.dto.InstanceListQuery
 import kr.msgctf.scheduler.instance.dto.InstancePageResult
 import kr.msgctf.scheduler.instance.dto.InstanceResult
+import kr.msgctf.scheduler.instance.dto.InstanceRequestResponse
+import kr.msgctf.scheduler.instance.dto.InstanceDetailResponse
 import kr.msgctf.scheduler.instance.repository.InstanceEventRepository
 import kr.msgctf.scheduler.instance.repository.InstanceRepository
 import org.springframework.data.domain.Limit
@@ -34,6 +36,17 @@ class InstanceQueryService(
     private val transitionService: InstanceStateTransitionService,
     private val serviceEndpointCodec: ServiceEndpointCodec,
 ) {
+
+    @Transactional(readOnly = true)
+    fun getRequestResult(requestId: UUID, userId: UUID, teamId: UUID): InstanceRequestResponse {
+        val instance = instanceRepository.findByRequestId(requestId)
+            ?.takeIf { it.userId == userId && it.teamId == teamId }
+            ?: throw SchedulerException(SchedulerErrorCode.INSTANCE_REQUEST_NOT_FOUND, "requestId=$requestId")
+        return InstanceRequestResponse(
+            requestId, instance.userId, checkNotNull(instance.requestKind), instance.replacedInstanceId,
+            InstanceDetailResponse.from(InstanceDetailResult.from(instance, endpointsOf(instance))),
+        )
+    }
 
     @Transactional(readOnly = true)
     fun getInstance(instanceId: UUID): InstanceDetailResult {
