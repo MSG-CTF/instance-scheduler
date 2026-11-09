@@ -1,26 +1,48 @@
-# instance-scheduler
+<div align="center">
+<h1>MSG CTF · Instance Scheduler</h1>
+<p>문제 실행을 요청하고 생성부터 만료·정리·예약 반납까지 추적하는 서비스</p>
+<p><a href="https://msg-ctf.github.io/platform.html">플랫폼</a> · <a href="#development">개발 문서</a></p>
+</div>
 
-MSG CTF 문제 인스턴스의 생성과 정리를 맡는 스케줄러다.
+<h2 align="center">Overview</h2>
 
-## 프로파일과 설정
+<table align="center">
+<tr><th width="260">생성</th><th width="260">상태 관리</th><th width="260">정리·복구</th></tr>
+<tr><td align="center">브로커 예약 → 런타임 실행</td><td align="center">초기화·TTL·하드타임아웃</td><td align="center">요청 ID 복구·삭제 확인·반납</td></tr>
+</table>
 
-- 실연동 설정은 `application-real.yaml`에 있고 `dev`와 `prod`가 프로파일 그룹으로 함께 켠다. `real`을 직접 켜지 않는다
-  - `dev`: 개발 서버용이다. 데모 화면(`/demo`)과 API 문서(`/swagger-ui`, `/v3/api-docs`)를 인증 없이 연다
-  - `prod`: 대회 운영용이다. 데모 화면과 API 문서를 열지 않는다
-  - `dev`와 `prod`를 함께 켜지 않는다. 함께 켜면 데모 화면과 API 문서가 열린다
-  - 활성 순서는 `dev` 다음 `real`이라서, 같은 키를 두 파일에 적으면 `real` 값이 이긴다
-- 실제 서버에 붙는 새 프로파일을 만들 때는 `real` 그룹에 넣거나 `scheduler.api.token: ${SCHEDULER_API_TOKEN}` 선언을 반드시 넣는다. 둘 다 없으면 그 프로파일은 수신 API 인증 없이 뜬다
-- 인증 없이 뜨는 것은 `local`과 `test` 프로파일만 의도된 동작이다
-- `dev`, `prod` 프로파일 기동에 필요한 환경변수: `SCHEDULER_API_TOKEN`, `SCHEDULER_BROKER_TOKEN`, `SCHEDULER_RUNTIME_BASE_URL`, `SCHEDULER_RUNTIME_TOKEN`. 값이 비거나 placeholder 그대로면 기동이 실패한다
-- `scheduler.instance-policy.allowed-image-prefixes`는 생성과 초기화가 받는 이미지 저장소 접두어 목록이다. 기본은 `ghcr.io/msg-ctf/challenges/` 하나이고, 밖의 이미지와 이름에 `..`, `.`, 빈 경로 조각이 있는 이미지는 `IMAGE_NOT_ALLOWED`(400)로 거절한다. 생성 API가 GHCR만 받으므로 접두어도 `ghcr.io/`로 시작해야 한다 `localhost:5000/`, `docker.io/`, `ghcr.io:443/` 같은 다른 주소는 정상 접두어와 섞어도 기동에서 거절한다 접두어는 소문자로 적고, `/`로 끝나고, 소유자까지 담아야 한다(`ghcr.io/`만 적으면 안 된다). `/`로 나눈 조각은 이미지 이름 문법을 따라야 해서 `ghcr.io//`, `ghcr.io/../`, `https://ghcr.io/msg-ctf/`처럼 빈 조각, `.`, `..`, 주소 형식이 들어간 값은 받지 않는다. 어기거나 목록이 비면 기동이 실패한다. 검사는 생성과 초기화를 접수할 때만 하므로, 범위를 좁히기 전에 접수된 인스턴스는 그대로 뜬다. 초기화는 저장된 이미지를 다시 검사하므로, 범위를 좁힌 뒤에는 백엔드가 이미지를 보내지 않은 초기화 요청도 400을 받을 수 있다. `dev`는 개발 서버 E2E용으로 `ghcr.io/nginxinc/`를 더 허용한다
-- `scheduler.operation.parallelism`은 operation 워커가 한 단계의 대상을 동시에 처리하는 스레드 수다. 기본 1이면 한 건씩 처리한다. 올릴 때는 `spring.datasource.hikari.maximum-pool-size`를 병렬 수 + 10 이상으로 같이 올린다. 워커 스레드마다 커넥션 하나를 쓰고 나머지가 API 몫이다
-- `scheduler.instance-policy.exposed-ports-enabled`는 기본이 `false`다. 런타임이 `exposed_ports`를 받는 버전으로 배포된 것을 확인한 뒤 `true`로 켠다. 꺼져 있으면 그 필드가 온 생성과 초기화 요청을 400으로 거절한다. 켰다가 끄면 이미 접수된 행은 막지 않고 런타임에서 실패한다
-- `scheduler.instance-policy.healthcheck-enabled`는 기본이 `false`다. 런타임이 `workload.healthcheck`를 받게 된 뒤 `true`로 켠다. 꺼져 있어도 `healthcheck` 검증과 저장은 하고 런타임 요청에만 싣지 않는다. 그래서 잘못된 `healthcheck`는 꺼져 있어도 400이다
+<h2 align="center">Contributors</h2>
 
-실행 설정 계약: [환경변수와 비밀값](docs/execution-settings.md)
+<table align="center">
+<tr><th align="center" colspan="4"><a href="https://github.com/MSG-CTF/instance-scheduler">Scheduler</a></th><th align="center" colspan="4"><a href="https://github.com/MSG-CTF/secure-provisioner/tree/dev">Runtime</a></th><th align="center" colspan="4"><a href="https://github.com/MSG-CTF">PM</a></th></tr>
+<tr>
+<td align="center" valign="top" colspan="4" width="260"><a href="https://github.com/tember8003"><img src="https://avatars.githubusercontent.com/u/104021663?v=4&amp;s=128" width="52" height="52" alt="tember8003"></a><br><a href="https://github.com/tember8003"><b>tember8003</b></a><br><sub>상태 전환·정리 재시도<br>전체 조회·Windows 배정</sub></td>
+<td align="center" valign="top" colspan="4" width="260"><a href="https://github.com/goldsimchoi"><img src="https://avatars.githubusercontent.com/u/173701392?v=4&amp;s=128" width="52" height="52" alt="goldsimchoi"></a><br><a href="https://github.com/goldsimchoi"><b>goldsimchoi</b></a><br><sub>이미지 준비 우선 배치<br>예약 복구 연결</sub></td>
+<td align="center" valign="top" colspan="4" width="260"><a href="https://github.com/jongcoding"><img src="https://avatars.githubusercontent.com/u/128033808?v=4&amp;s=128" width="52" height="52" alt="jongcoding"></a><br><a href="https://github.com/jongcoding"><b>jongcoding</b></a><br><sub>서비스 연동·요청 ID 복구<br>예약 반납·기동 CPU</sub></td>
+</tr>
+</table>
 
-초기화 동작과 대기 설정: [이전 실행 정리와 용량 관측 대기](docs/replacement-wait.md)
+<details>
+<summary>기여 기록 · 관련 PR</summary>
 
-이미지 준비 선호와 Runtime 메타데이터 배포 설정: [Image readiness rollout](docs/image-readiness.md)
+| 기여자 | 기여 내용 | 관련 PR |
+| --- | --- | --- |
+| [tember8003](https://github.com/tember8003) | 스케줄러 기본 흐름, 상태 전환·정리 재시도·전체 조회·Windows 배정 API | [#64](https://github.com/MSG-CTF/instance-scheduler/pull/64) · [#74](https://github.com/MSG-CTF/instance-scheduler/pull/74) · [#81](https://github.com/MSG-CTF/instance-scheduler/pull/81) |
+| [goldsimchoi](https://github.com/goldsimchoi) | 이미지 준비 상태 우선 배치와 예약 복구 연결 | [#83](https://github.com/MSG-CTF/instance-scheduler/pull/83) |
+| [jongcoding](https://github.com/jongcoding) | 실제 서비스 연동, 예약 반납 복구·기동 CPU·요청 ID 멱등성 | [#87](https://github.com/MSG-CTF/instance-scheduler/pull/87) · [#92](https://github.com/MSG-CTF/instance-scheduler/pull/92) · [#95](https://github.com/MSG-CTF/instance-scheduler/pull/95) |
 
-Gateway 연동: [공개 연결 정보와 정리 확인·재시도](docs/gateway-v1-transport-cleanup.md)
+</details>
+
+<h2 align="center">Tech Stack</h2>
+
+<p align="center"><img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/kotlin.svg" width="44" height="44" alt="Kotlin" title="Kotlin"> &nbsp; <img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/spring.svg" width="44" height="44" alt="Spring Boot" title="Spring Boot"> &nbsp; <img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/postgresql.svg" width="44" height="44" alt="PostgreSQL" title="PostgreSQL"> &nbsp; <img src="https://raw.githubusercontent.com/MSG-CTF/msg-ctf.github.io/67e93a09ce630910f98ae56fb118ca1317af78e0/assets/tech/redis.svg" width="44" height="44" alt="Redis" title="Redis"><br><sub>Kotlin · Spring Boot · PostgreSQL · Redis</sub><br><sub>Gradle</sub></p>
+
+## Development
+
+- [환경변수와 비밀값 계약](docs/execution-settings.md)
+- [요청 ID 복구](docs/instance-request-recovery.md)
+- [초기화와 용량 대기](docs/replacement-wait.md)
+- [기동 CPU 예약](docs/STARTUP_CPU.md)
+- [설치·실행 안내](README.reference.md)
+
+<p align="center"><sub><a href="https://github.com/MSG-CTF/msg-ctf.github.io/blob/67e93a09ce630910f98ae56fb118ca1317af78e0/docs/tech-icons.md">아이콘 출처</a></sub></p>
