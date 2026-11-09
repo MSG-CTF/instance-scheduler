@@ -1,6 +1,6 @@
 <div align="center">
 <h1>MSG CTF · Instance Scheduler</h1>
-<p>문제 실행을 요청하고 생성부터 만료·정리·예약 반납까지 추적하는 서비스</p>
+<p>문제 실행 요청 · 생성·만료·정리·예약 반납 추적</p>
 <p><a href="https://msg-ctf.github.io/platform.html">플랫폼</a> · <a href="#development">개발 문서</a></p>
 </div>
 
