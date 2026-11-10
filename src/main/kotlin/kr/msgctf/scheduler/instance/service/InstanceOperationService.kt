@@ -1488,12 +1488,12 @@ class InstanceOperationService(
                     resourceProfile = spec.reservationResourceProfile,
                 ),
             )
-            val eligible = resourceCandidateSelector.rank(response, spec.architecture, instanceId)
+            val eligible = resourceCandidateSelector.rank(response, spec.architecture, instanceId, resourceProfile = spec.reservationResourceProfile)
             // 준비 정보는 순서에만 쓴다, 조회가 어떻게 끝났든 예외 없이 결과 값으로 돌아온다
             readiness = imageReadinessPreference.decide(
                 spec.architecture, spec.containers.map { it.image }, eligible.map { it.runtime.targetId },
             )
-            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readiness.readyTargets)
+            response to resourceCandidateSelector.rank(response, spec.architecture, instanceId, readiness.readyTargets, spec.reservationResourceProfile)
                 .filter { spec.startupCpuMillicores == null || it.runtime.type == kr.msgctf.scheduler.common.model.RuntimeType.KUBERNETES }
         } catch (exception: Exception) {
             handleBrokerFailure(instanceId, exception, ReservationGuard(null, spec.schedulingLease))

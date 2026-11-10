@@ -3,6 +3,8 @@ package kr.msgctf.scheduler.broker
 import java.time.Clock
 import java.time.Instant
 import java.util.UUID
+import kotlin.math.abs
+import kotlin.math.ln
 import kr.msgctf.scheduler.common.error.SchedulerErrorCode
 import kr.msgctf.scheduler.common.error.SchedulerException
 import org.slf4j.LoggerFactory
@@ -21,6 +23,7 @@ class ResourceCandidateSelector(
         requestedArchitecture: Architecture,
         instanceId: UUID,
         readyTargetIds: Set<String> = emptySet(),
+        resourceProfile: ResourceProfile? = null,
     ): List<ResourceCandidate> {
         if (response.status != BrokerCandidateStatus.OK) {
             throw unavailable(
@@ -37,7 +40,10 @@ class ResourceCandidateSelector(
             .filter { (_, verdict) -> verdict == ELIGIBLE }
             .map { (candidate, _) -> candidate }
             .sortedWith(compareBy<ResourceCandidate> { riskOrder(it.risk) }
-                .thenBy { it.runtime.targetId !in readyTargetIds }
+                .thenBy {
+                    resourceShapeDistance(it.remainingCapacity, resourceProfile) +
+                        (if (readyTargetIds.isNotEmpty() && it.runtime.targetId !in readyTargetIds) 1.0 else 0.0)
+                }
                 .thenBy { spreadKey(instanceId, it) })
 
         log.info(
@@ -94,6 +100,20 @@ class ResourceCandidateSelector(
 
     private fun countBlockedCost(candidates: List<ResourceCandidate>): Int =
         candidates.count { candidate -> candidate.costEstimate?.status == CostEstimateStatus.BLOCKED }
+
+    // CPU 대비 메모리·저장소의 남은 비율을 요청 비율에 맞춰 다양한 문제의 자원을 보존한다.
+    // 문제 이름이나 특정 크기의 문제에 대한 예외 없이 같은 기준을 적용한다.
+    private fun resourceShapeDistance(capacity: CandidateCapacity, profile: ResourceProfile?): Double {
+        if (profile == null || profile.cpuMillicores <= 0 || profile.memoryMib <= 0 || profile.ephemeralStorageMib <= 0) return 0.0
+        if (capacity.cpuMillicores <= 0 || capacity.memoryMib <= 0 || capacity.ephemeralStorageMib <= 0) return Double.POSITIVE_INFINITY
+        val memoryRatio =
+            (capacity.memoryMib.toDouble() / capacity.cpuMillicores) /
+                (profile.memoryMib.toDouble() / profile.cpuMillicores)
+        val storageRatio =
+            (capacity.ephemeralStorageMib.toDouble() / capacity.cpuMillicores) /
+                (profile.ephemeralStorageMib.toDouble() / profile.cpuMillicores)
+        return abs(ln(memoryRatio)) + abs(ln(storageRatio))
+    }
 
     // 같은 위험도 안의 순서를 인스턴스마다 다르게 섞는다, 동시에 온 요청이 한 후보로 몰리지 않게 한다
     // 무작위가 아니라 인스턴스와 후보로 정해지는 값이다

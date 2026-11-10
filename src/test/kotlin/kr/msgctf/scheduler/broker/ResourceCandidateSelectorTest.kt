@@ -15,6 +15,35 @@ import kr.msgctf.scheduler.common.model.RuntimeType
 class ResourceCandidateSelectorTest {
 
     @Test
+    fun `matches remaining resource shape to different request profiles`() {
+        val lean = newCandidate("lean").copy(
+            runtime = CandidateRuntime(RuntimeType.KUBERNETES, "lean"),
+            remainingCapacity = CandidateCapacity(8000, 8192, 16384, 4),
+        )
+        val rich = newCandidate("rich").copy(
+            runtime = CandidateRuntime(RuntimeType.KUBERNETES, "rich"),
+            remainingCapacity = CandidateCapacity(8000, 32768, 16384, 4),
+        )
+        val response = newResponse(candidates = listOf(rich, lean))
+
+        val small = ResourceProfile(2000, 512, 1024)
+        val memoryHeavy = ResourceProfile(2000, 6144, 2048)
+        assertEquals("lean", selector.rank(response, Architecture.AMD64, instanceId, resourceProfile = small).first().candidateId)
+        assertEquals("rich", selector.rank(response, Architecture.AMD64, instanceId, resourceProfile = memoryHeavy).first().candidateId)
+        assertEquals("lean", selector.rank(response, Architecture.AMD64, instanceId, setOf("rich"), small).first().candidateId)
+
+        val close = newResponse(candidates = listOf(lean, rich.copy(remainingCapacity = CandidateCapacity(8000, 12288, 16384, 4))))
+        assertEquals("rich", selector.rank(close, Architecture.AMD64, instanceId, setOf("rich"), small).first().candidateId)
+
+        val lowerRisk = newResponse(candidates = listOf(lean.copy(risk = ResourceRisk.MEDIUM), rich))
+        assertEquals("rich", selector.rank(lowerRisk, Architecture.AMD64, instanceId, resourceProfile = small).first().candidateId)
+        assertEquals(
+            selector.rank(response, Architecture.AMD64, instanceId, resourceProfile = small).map { it.candidateId },
+            selector.rank(response.copy(candidates = response.candidates.reversed()), Architecture.AMD64, instanceId, resourceProfile = small).map { it.candidateId },
+        )
+    }
+
+    @Test
     fun `readiness prefers targets within risk tiers while preserving spreading and mandatory checks`() {
         val candidates = listOf(
             newCandidate("low-a"), newCandidate("low-b"), newCandidate("low-c"),
