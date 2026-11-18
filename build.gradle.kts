@@ -11,7 +11,7 @@ version = "0.0.1-SNAPSHOT"
 
 java {
 	toolchain {
-		languageVersion = JavaLanguageVersion.of(24)
+		languageVersion = JavaLanguageVersion.of(25)
 	}
 }
 
@@ -54,7 +54,12 @@ dependencies {
 kotlin {
 	compilerOptions {
 		freeCompilerArgs.addAll("-Xjsr305=strict", "-Xannotation-default-target=param-property")
+		jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_24
 	}
+}
+
+tasks.withType<JavaCompile> {
+	options.release = 24
 }
 
 allOpen {

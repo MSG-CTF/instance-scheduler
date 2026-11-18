@@ -22,11 +22,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Download the verified Corretto 25 security release
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/corretto-25.0.5.1.2.tar.gz"
+          curl --fail --silent --show-error --retry 3 -o "$archive" \
+            https://corretto.aws/downloads/resources/25.0.5.1.2/amazon-corretto-25.0.5.1.2-linux-x64.tar.gz
+          printf '%s  %s\n' 8d2be3f035dbdb7f7475e2f7009b7dc20683bfc351ad41064218c8de596c9644 "$archive" | sha256sum --check
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
-          distribution: temurin
-          java-version: '24'
+          distribution: jdkfile
+          jdkFile: ${{ runner.temp }}/corretto-25.0.5.1.2.tar.gz
+          java-version: '25.0.5'
           cache: gradle
+      - name: Check Java runtime version
+        run: |
+          settings=$(java -XshowSettings:properties -version 2>&1)
+          printf '%s\n' "$settings" | grep -F 'java.runtime.version = 25.0.5.1+2'
+          printf '%s\n' "$settings" | grep -F 'java.vendor = Amazon.com Inc.'
       - name: Verify Docker and deployment recovery
         run: |
           docker info > /dev/null
