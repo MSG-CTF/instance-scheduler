@@ -195,7 +195,7 @@ class SystemService:
         for key in ("User", "Group", "WorkingDirectory"):
             if identity.get(key):
                 command.append("--property=" + key + "=" + identity[key])
-        command.extend(["/opt/temurin-24/bin/java", "-Xmx512m", "-jar", "/opt/msgctf-scheduler/bridge.jar",
+        command.extend(["/opt/corretto-25/bin/java", "-Xmx512m", "-jar", "/opt/msgctf-scheduler/bridge.jar",
             "--server.address=127.0.0.1", f"--server.port={BRIDGE_PORT}", f"--management.server.port={BRIDGE_PORT}",
             "--scheduler.operation.enabled=false", "--scheduler.cleanup.enabled=false",
             "--spring.jpa.hibernate.ddl-auto=validate"])
@@ -360,7 +360,7 @@ def deploy(component, stream, root=Path("/"), service=None, attempts=45, delay=2
             entries.append((path("/etc/secure-provisioner/service-token"), files["service-token"], 0o640, gid))
             token = files["service-token"].decode().strip()
         else:
-            dropin = b"[Service]\nExecStart=\nExecStart=/opt/temurin-24/bin/java -jar /opt/msgctf-scheduler/scheduler.jar\n"
+            dropin = b"[Service]\nExecStart=\nExecStart=/opt/corretto-25/bin/java -jar /opt/msgctf-scheduler/scheduler.jar\n"
             entries.append((path("/etc/systemd/system/mjsec-scheduler.service.d/60-ci-artifact.conf"), dropin, 0o644, 0))
         entries.append((marker, (json.dumps({"source_commit": manifest["source_sha"], "artifact_sha256": manifest["checksums"]["artifact"], "component": component, "deployed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}) + "\n").encode(), 0o644, 0))
         with tempfile.TemporaryDirectory(prefix="transaction-", dir=state) as temporary:
